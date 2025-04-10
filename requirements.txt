@@ -1,0 +1,3 @@
+requests>=2.32        # HTTP calls + built‑in urllib3 retry support
+tqdm>=4.66            # progress bars for repos & files
+python-dotenv>=1.0    # loads GITHUB_TOKEN automatically from .env
