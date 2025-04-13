@@ -4,6 +4,10 @@ Harvest every XML file in every repo of an organisation whose
 <TEXT xml:lang="…"> == src_lang  (and, optionally, whose
 <TRANSL xml:lang="…"> == tgt_lang).
 
+NOTE: Please do not set the target lang as currently target language tags
+are not standardized across the XML files. Simply set the source language and 
+make_corpus.py will take care of the rest after. 
+
 Usage examples
 --------------
 $ python fetch_xml.py --src-lang ami
@@ -147,7 +151,7 @@ def main():
     parser.add_argument("--org", default="formosanbank")
     parser.add_argument("--branch", help="force a branch name for all repos")
     parser.add_argument(
-        "--out-dir", default="downloaded_xml", help="where to store the files"
+        "--out-dir", default="../downloaded_xml", help="where to store the files"
     )
     args = parser.parse_args()
 
@@ -180,6 +184,7 @@ def main():
                 and i["path"].startswith("Final_XML/")
                 and i["path"].lower().endswith(".xml")
             ]
+
 
             for item in xml_blobs:
                 futures.append(
