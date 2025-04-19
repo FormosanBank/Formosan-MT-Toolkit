@@ -7,6 +7,7 @@ Examples
 --------
 python make_corpus.py --xml-dir ../downloaded_xml --target chinese --out amis_zh.csv
 python make_corpus.py --xml-dir ../downloaded_xml --target english --out amis_en.csv
+python make_corpus.py --xml-dir ../downloaded_xml --target english --out amis_en_orig.csv --original
 """
 from __future__ import annotations
 
@@ -28,27 +29,46 @@ TARGET_MAP: dict[str, set[str]] = {
 
 
 def list_xml_files(root: Path) -> Iterable[Path]:
+    """Recursively yield all *.xml files under *root*."""
     return root.rglob("*.xml")
 
 
-def choose_src_sentence(s_elem: ET.Element) -> str | None:
-    # Prefer <FORM kindOf="standard">; otherwise first <FORM>
+def choose_src_sentence(s_elem: ET.Element, kind_preference: str) -> str | None:
+    """
+    Return the text of the preferred <FORM> element inside an <S> element.
+
+    Parameters
+    ----------
+    s_elem : ET.Element
+        The <S> element.
+    kind_preference : {"standard", "original"}
+        Which orthography to prefer.
+
+    Notes
+    -----
+    Falls back to the very first <FORM> if the preferred kind is missing.
+    """
     for form in s_elem.findall("FORM"):
-        if (form.get("kindOf") or "").lower() == "standard":
+        if (form.get("kindOf") or "").lower() == kind_preference:
             return form.text
     first = s_elem.find("FORM")
     return first.text if first is not None else None
 
 
-def extract_pairs(xml_path: Path, target_codes: set[str]) -> List[Tuple[str, str]]:
+def extract_pairs(
+    xml_path: Path,
+    target_codes: set[str],
+    kind_preference: str,
+) -> List[Tuple[str, str]]:
+    """Extract (src, tgt) sentence tuples from *xml_path*."""
     pairs: List[Tuple[str, str]] = []
     try:
         tree = ET.parse(xml_path)
     except ET.ParseError:
-        return pairs
+        return pairs  # skip ill‑formed documents
 
     for s in tree.iter("S"):
-        src_sent = choose_src_sentence(s)
+        src_sent = choose_src_sentence(s, kind_preference)
         if not src_sent:
             continue
         for transl in s.findall("TRANSL"):
@@ -66,9 +86,16 @@ def main() -> None:
     parser.add_argument("--xml-dir", default="../downloaded_xml", type=Path)
     parser.add_argument("--target", required=True, choices=TARGET_MAP.keys())
     parser.add_argument("--out", default="corpus.csv", type=Path)
+    parser.add_argument(
+        "--original",
+        action="store_true",
+        help='Prefer FORM kindOf="original" (default: "standard")',
+    )
     args = parser.parse_args()
 
+    kind_pref = "original" if args.original else "standard"
     target_codes = TARGET_MAP[args.target]
+
     xml_files = list(list_xml_files(args.xml_dir))
     if not xml_files:
         sys.exit(f"❌  No XML files found under {args.xml_dir}")
@@ -90,15 +117,14 @@ def main() -> None:
     total_pairs = 0
     with args.out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow([first_src_lang, args.target, "source"])
+        writer.writerow([first_src_lang, args.target, "source", "kindOf"])
 
         for xml_path in tqdm(xml_files, desc="XML files", unit="file"):
-            # full relative path to the specific XML file
             source_path = str(xml_path.relative_to(args.xml_dir))
 
-            pairs = extract_pairs(xml_path, target_codes)
+            pairs = extract_pairs(xml_path, target_codes, kind_pref)
             for src_sent, tgt_sent in pairs:
-                writer.writerow([src_sent, tgt_sent, source_path])
+                writer.writerow([src_sent, tgt_sent, source_path, kind_pref])
 
             total_pairs += len(pairs)
 
