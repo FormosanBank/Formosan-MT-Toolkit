@@ -28,7 +28,6 @@ import xml.etree.ElementTree as ET
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
-
 # ─────────────────────────────  config  ──────────────────────────────────────
 GITHUB_API = "https://api.github.com"
 HEADERS = {"Authorization": f"token {os.getenv('GITHUB_TOKEN', '')}"}
@@ -61,6 +60,9 @@ def get_repos(org: str) -> Iterable[str]:
         data = r.json()
         if not data:
             break
+
+        # remove entry with name "Formosan-Wikipedias"
+        data = [repo for repo in data if repo["name"] != "Formosan-Wikipedias"]
         yield from (repo["name"] for repo in data)
         page += 1
 
