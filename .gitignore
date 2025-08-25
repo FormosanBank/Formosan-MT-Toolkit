@@ -1,3 +1,4 @@
 .env
 downloaded_xml
 *.csv
+.venv/

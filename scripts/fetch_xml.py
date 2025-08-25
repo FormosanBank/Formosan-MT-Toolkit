@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+STEP 1: 
+
 Harvest every XML file in every repo of an organisation whose
 <TEXT xml:lang="…"> == src_lang  (and, optionally, whose
 <TRANSL xml:lang="…"> == tgt_lang).
@@ -11,7 +13,8 @@ make_corpus.py will take care of the rest after.
 Usage examples
 --------------
 $ python fetch_xml.py --src-lang ami
-$ python fetch_xml.py --src-lang ami --tgt-lang zho --out-dir amis_zh
+$ python fetch_xml.py --src-lang pwn --tgt-lang zh   # matches zh, zho, chi
+$ python fetch_xml.py --src-lang ami --tgt-lang zho  # matches zh, zho, chi
 """
 from __future__ import annotations
 
@@ -28,6 +31,24 @@ import xml.etree.ElementTree as ET
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+
+# ─────────────────────────────  language maps  ───────────────────────────────
+# Map language codes to their equivalent sets (same as make_corpus.py)
+LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
+    # Chinese variants
+    "zh": {"zh", "zho", "chi"},
+    "zho": {"zh", "zho", "chi"}, 
+    "chi": {"zh", "zho", "chi"},
+    # English variants
+    "en": {"en", "eng"},
+    "eng": {"en", "eng"},
+}
+
+def get_equivalent_lang_codes(lang_code: str) -> set[str]:
+    """Get all equivalent language codes for a given language code."""
+    return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─────────────────────────────  config  ──────────────────────────────────────
 GITHUB_API = "https://api.github.com"
 HEADERS = {"Authorization": f"token {os.getenv('GITHUB_TOKEN', '')}"}
@@ -104,8 +125,11 @@ def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None):
     if tgt_lang is None:
         return True
 
+    # Get all equivalent language codes for the target language
+    target_codes = get_equivalent_lang_codes(tgt_lang.lower())
+    
     return any(
-        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang") == tgt_lang
+        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").lower() in target_codes
         for elem in root.iter("TRANSL")
     )
 
@@ -149,7 +173,7 @@ def download_blob(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--src-lang", required=True, help="e.g. ami, pau, tsu")
-    parser.add_argument("--tgt-lang", help="optional target language filter")
+    parser.add_argument("--tgt-lang", help="optional target language filter (e.g. zh, zho, en)")
     parser.add_argument("--org", default="formosanbank")
     parser.add_argument("--branch", help="force a branch name for all repos")
     parser.add_argument(
@@ -162,6 +186,11 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(exist_ok=True)
+
+    # Show which language codes will be matched if target language is specified
+    if args.tgt_lang:
+        equivalent_codes = get_equivalent_lang_codes(args.tgt_lang.lower())
+        print(f"🔍  Target language '{args.tgt_lang}' will match: {sorted(equivalent_codes)}")
 
     repos = list(get_repos(args.org))
     print(f"Found {len(repos)} repos in {args.org}")

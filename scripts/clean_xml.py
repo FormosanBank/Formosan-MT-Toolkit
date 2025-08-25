@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+STEP 3: 
+
 Clean the XML files harvested by fetch_xml.py using the scripts defined in 
 the main FormosanBank/FormosanBank repository.
 

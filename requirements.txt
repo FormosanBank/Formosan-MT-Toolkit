@@ -2,6 +2,9 @@ requests>=2.32        # HTTP calls + built‑in urllib3 retry support
 tqdm>=4.66            # progress bars for repos & files
 python-dotenv>=1.0    # loads GITHUB_TOKEN automatically from .env
 lxml>=4.9.2           # XML processing - used by clean_xml.py script
+pandas>=1.5.0         # DataFrame operations - used by filter_split_corpus.py
+numpy>=1.21.0         # numerical operations - used by filter_split_corpus.py
+sacremoses>=0.0.53    # Moses punctuation normalization - used by filter_split_corpus.py
 # urllib3 is automatically installed as a dependency of requests
 # The following are part of the Python standard library and don't need to be installed:
 # - argparse
@@ -11,3 +14,5 @@ lxml>=4.9.2           # XML processing - used by clean_xml.py script
 # - concurrent.futures
 # - csv
 # - re
+# - sys
+# - unicodedata
