@@ -31,6 +31,10 @@ import xml.etree.ElementTree as ET
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ─────────────────────────────  language maps  ───────────────────────────────
 # Map language codes to their equivalent sets (same as make_corpus.py)
@@ -177,7 +181,7 @@ def main():
     parser.add_argument("--org", default="formosanbank")
     parser.add_argument("--branch", help="force a branch name for all repos")
     parser.add_argument(
-        "--out-dir", default="../downloaded_xml", help="where to store the files"
+        "--out-dir", default="downloaded_xml", help="where to store the files"
     )
     args = parser.parse_args()
 

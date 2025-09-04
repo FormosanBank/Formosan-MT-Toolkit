@@ -7,9 +7,9 @@ fetch_xml.py.
 
 Examples
 --------
-python make_corpus.py --xml-dir ../downloaded_xml --target chinese --out amis_zh.csv
-python make_corpus.py --xml-dir ../downloaded_xml --target english --out amis_en.csv
-python make_corpus.py --xml-dir ../downloaded_xml --target english --out amis_en_orig.csv --original
+python make_corpus.py --xml-dir downloaded_xml --target chinese --out amis_zh.csv
+python make_corpus.py --xml-dir downloaded_xml --target english --out amis_en.csv
+python make_corpus.py --xml-dir downloaded_xml --target english --out amis_en_orig.csv --original
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def extract_pairs(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml-dir", default="../downloaded_xml", type=Path)
+    parser.add_argument("--xml-dir", default="downloaded_xml", type=Path)
     parser.add_argument("--target", required=True, choices=TARGET_MAP.keys())
     parser.add_argument("--out", default="corpus.csv", type=Path)
     parser.add_argument(
