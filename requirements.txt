@@ -29,7 +29,7 @@ sympy==1.14.0
 tokenizers==0.22.0
 torch==2.8.0
 tqdm==4.67.1
-transformers==4.33.3
+transformers==4.56.1
 typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0

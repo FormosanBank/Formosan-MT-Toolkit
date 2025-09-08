@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-STEP 2: 
+STEP 3: 
 
 Build a sentence‑aligned parallel corpus from the XML files harvested by
 fetch_xml.py.

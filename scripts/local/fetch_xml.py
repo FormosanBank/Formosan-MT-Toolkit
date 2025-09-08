@@ -13,8 +13,7 @@ make_corpus.py will take care of the rest after.
 Usage examples
 --------------
 $ python fetch_xml.py --src-lang ami
-$ python fetch_xml.py --src-lang pwn --tgt-lang zh   # matches zh, zho, chi
-$ python fetch_xml.py --src-lang ami --tgt-lang zho  # matches zh, zho, chi
+$ python fetch_xml.py --src-lang pwn
 """
 from __future__ import annotations
 
@@ -183,13 +182,17 @@ def main():
     parser.add_argument("--org", default="formosanbank")
     parser.add_argument("--branch", help="force a branch name for all repos")
     parser.add_argument(
-        "--out-dir", default="downloaded_xml", help="where to store the files"
+        "--out-dir", help="where to store the files (default: downloaded_{src_lang})"
     )
     args = parser.parse_args()
 
     if not os.getenv("GITHUB_TOKEN"):
         sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
 
+    # Set default output directory if none provided
+    if args.out_dir is None:
+        args.out_dir = f"downloaded_{args.src_lang}"
+    
     out_dir = Path(args.out_dir)
     out_dir.mkdir(exist_ok=True)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-STEP 3: 
+STEP 2: 
 
 Clean the XML files harvested by fetch_xml.py using the official QC scripts 
 from the FormosanBank/FormosanBank repository.
@@ -16,7 +16,6 @@ only downloading when changes are detected or when forced.
 Usage examples
 --------------
 $ python clean_xml.py --src-lang ami
-$ python clean_xml.py --src-lang ami --tgt-lang zho
 $ python clean_xml.py --src-lang ami --force-update  # Force download QC scripts
 """
 

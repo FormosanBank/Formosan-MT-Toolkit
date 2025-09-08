@@ -150,6 +150,11 @@ def clean_corpus_text_parallel(df: pd.DataFrame, verbose: bool = False, n_worker
     if n_workers is None:
         n_workers = mp.cpu_count()
     
+    # For small datasets, parallel processing has too much overhead - use single thread
+    if len(df) < 1000:
+        print(f"📝  Dataset too small ({len(df)} rows) - using single-threaded processing for better performance")
+        return clean_corpus_text(df, verbose)
+    
     print(f"🚀  Using {n_workers} CPU cores for parallel text cleaning")
     
     for col in string_columns:
@@ -158,7 +163,10 @@ def clean_corpus_text_parallel(df: pd.DataFrame, verbose: bool = False, n_worker
             
             # Split data into chunks for parallel processing
             data = df[col].tolist()
-            chunk_size = max(1, len(data) // (n_workers * 4))  # 4 chunks per worker
+            # Use more reasonable chunking: minimum 100 rows per chunk, maximum n_workers * 2 chunks
+            min_chunk_size = 100
+            max_chunks = n_workers * 2
+            chunk_size = max(min_chunk_size, len(data) // max_chunks)
             chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
             
             print(f"📦  Processing {len(data):,} rows in {len(chunks)} chunks...")
@@ -448,9 +456,9 @@ def main() -> None:
     # Load data
     df = load_data(args.input)
     
-    # FOR TESTING: ONLY RUN THE FIRST 1000 ROWS
+    # FOR TESTING: ONLY RUN THE FIRST 100 ROWS
     # COMMENT THIS OUT FOR FULL RUN
-    df = df.sample(1000)
+    df = df.sample(100)
     
     # Clean text (always includes Moses normalization unless explicitly disabled)
     if not args.no_clean_text:
