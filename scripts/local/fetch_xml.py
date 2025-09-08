@@ -34,7 +34,9 @@ from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+# Look for .env in project root (two levels up from this script)
+project_root = Path(__file__).parent.parent.parent
+load_dotenv(project_root / ".env")
 
 # ─────────────────────────────  language maps  ───────────────────────────────
 # Map language codes to their equivalent sets (same as make_corpus.py)

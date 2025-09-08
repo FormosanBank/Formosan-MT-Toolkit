@@ -448,6 +448,10 @@ def main() -> None:
     # Load data
     df = load_data(args.input)
     
+    # FOR TESTING: ONLY RUN THE FIRST 1000 ROWS
+    # COMMENT THIS OUT FOR FULL RUN
+    df = df.sample(1000)
+    
     # Clean text (always includes Moses normalization unless explicitly disabled)
     if not args.no_clean_text:
         if args.no_parallel:
