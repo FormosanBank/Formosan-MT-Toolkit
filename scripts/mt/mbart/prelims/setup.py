@@ -13,7 +13,7 @@ This script:
 
 Examples
 --------
-python setup.py --src-lang amis --tgt-lang chinese --input corpus_ready.csv
+python setup.py --src-lang amis --tgt-lang chinese --input amis_zh_ready.csv
 python setup.py --src-lang paiwan --tgt-lang english --input pwn_en_ready.csv --output-prefix pwn_en
 python setup.py --src-lang tsou --tgt-lang chinese --input tsou_zh.csv --device cpu
 """

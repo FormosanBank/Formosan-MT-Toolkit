@@ -7,8 +7,8 @@ fetch_xml.py.
 
 Examples
 --------
-python make_corpus.py --xml-dir downloaded_xml --target chinese --out amis_zh.csv
-python make_corpus.py --xml-dir downloaded_xml --target english --out amis_en.csv
+python make_corpus.py --xml-dir downloaded_ami --target chinese --out amis_zh.csv
+python make_corpus.py --xml-dir downloaded_en --target english --out amis_en.csv
 python make_corpus.py --xml-dir downloaded_xml --target english --out amis_en_orig.csv --original
 """
 from __future__ import annotations

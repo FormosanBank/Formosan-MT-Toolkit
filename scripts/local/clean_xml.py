@@ -45,7 +45,7 @@ def parse_args():
     )
     parser.add_argument("--src-lang", required=True, help="Source language (e.g. 'ami')")
     parser.add_argument("--tgt-lang", help="Target language (e.g. 'zho')")
-    parser.add_argument("--in-dir", default="downloaded_xml", help="Directory of raw XML files")
+    parser.add_argument("--in-dir", help="Directory of raw XML files (default: downloaded_{src_lang})")
     parser.add_argument(
         "--force-update", action="store_true", 
         help="Force download of QC scripts even if local versions exist"
@@ -230,6 +230,11 @@ def run_qc_scripts(corpus_dir: Path, qc_dir: Path):
 
 def main():
     args = parse_args()
+    
+    # Set default input directory if none provided
+    if args.in_dir is None:
+        args.in_dir = f"downloaded_{args.src_lang}"
+    
     in_dir = Path(args.in_dir).resolve()
     qc_dir = Path(args.qc_dir).resolve()
 

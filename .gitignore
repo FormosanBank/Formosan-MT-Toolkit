@@ -1,4 +1,4 @@
 .env
-downloaded_xml
+downloaded_*
 *.csv
 .venv/
