@@ -1,4 +1,5 @@
+.venv
 .env
 downloaded_*
-*.csv
 .venv/
+scripts/.formosan_qc_scripts/
