@@ -397,7 +397,7 @@ def main() -> None:
         help="Minimum acceptable length ratio (target/source) [default: %(default)s]"
     )
     parser.add_argument(
-        "--max-ratio", type=float, default=7.0,
+        "--max-ratio", type=float, default=8.0,
         help="Maximum acceptable length ratio (target/source) [default: %(default)s]"
     )
     parser.add_argument(
