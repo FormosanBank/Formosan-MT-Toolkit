@@ -5,7 +5,7 @@ MBART TRAINING SCRIPT
 Train an mBart model for Machine Translation using a custom tokenizer and parallel corpus.
 
 This script:
-1. Loads a custom mBart tokenizer and model (from setup.py output)
+1. Loads a custom mBart tokenizer and model (from custom_tokenizer_langs.py output)
 2. Loads a parallel corpus CSV file with train/validation/test splits
 3. Trains the model with bidirectional translation sampling
 4. Saves checkpoints at regular intervals

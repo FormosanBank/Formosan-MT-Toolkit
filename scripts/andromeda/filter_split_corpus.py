@@ -14,7 +14,7 @@ This script performs several cleaning operations on a parallel corpus CSV:
 Examples
 --------
 python filter_split_corpus.py --input corpus.csv --output corpus_ready.csv
-python filter_split_corpus.py --input amis_zh.csv --output amis_zh_ready.csv --min-ratio 0.3 --max-ratio 5.0
+python filter_split_corpus.py --input amis_zh.csv --output amis_zh_ready.csv
 python filter_split_corpus.py --input corpus.csv --train-ratio 0.9 --val-ratio 0.05 --test-ratio 0.05
 """
 from __future__ import annotations
@@ -458,7 +458,7 @@ def main() -> None:
     
     # FOR TESTING: ONLY RUN THE FIRST 100 ROWS
     # COMMENT THIS OUT FOR FULL RUN
-    df = df.sample(100)
+    # df = df.sample(100)
     
     # Clean text (always includes Moses normalization unless explicitly disabled)
     if not args.no_clean_text:
