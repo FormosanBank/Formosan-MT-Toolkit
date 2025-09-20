@@ -308,18 +308,22 @@ def apply_fertility_heuristic(
 
 def split_corpus(
     df: pd.DataFrame,
-    train_ratio: float = 0.96,
-    val_ratio: float = 0.02,
-    test_ratio: float = 0.02,
+    train_ratio: float = 0.80,
+    val_ratio: float = 0.10,
+    test_ratio: float = 0.10,
     random_state: int = 42
 ) -> pd.DataFrame:
     """
-    Split corpus into train/validation/test sets.
+    Split corpus into train/validation/test sets by corpus.
+    
+    Each individual corpus (determined by 'source' column prefix before first '/')
+    will be split according to the specified ratios, ensuring balanced representation
+    across all splits.
     
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame
+        Input DataFrame (must have 'source' column)
     train_ratio : float
         Proportion for training set
     val_ratio : float
@@ -339,28 +343,66 @@ def split_corpus(
     if abs(total_ratio - 1.0) > 0.001:
         sys.exit(f"❌  Split ratios must sum to 1.0, got {total_ratio:.3f}")
     
-    # Shuffle the data
-    df_shuffled = df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    # Check for 'source' column
+    if 'source' not in df.columns:
+        sys.exit(f"❌  'source' column not found in DataFrame. Required for corpus-based splitting.")
     
-    # Calculate split points
-    n_total = len(df_shuffled)
-    n_train = int(train_ratio * n_total)
-    n_val = int(val_ratio * n_total)
+    # Extract corpus name from source column (everything before first '/')
+    df = df.copy()
+    df['corpus'] = df['source'].astype(str).str.split('/').str[0]
     
-    # Split the data
-    train = df_shuffled[:n_train].copy()
-    val = df_shuffled[n_train:n_train + n_val].copy()
-    test = df_shuffled[n_train + n_val:].copy()
+    # Get unique corpora
+    corpora = df['corpus'].unique()
+    print(f"📚  Found {len(corpora)} corpora: {', '.join(corpora)}")
     
-    # Add split labels
-    train['split'] = 'train'
-    val['split'] = 'validate'
-    test['split'] = 'test'
+    # Split each corpus individually
+    all_splits = []
+    split_summary = {'train': 0, 'validate': 0, 'test': 0}
     
-    # Combine back together
-    result = pd.concat([train, val, test], ignore_index=True)
+    np.random.seed(random_state)  # Set numpy seed for reproducibility
     
-    print(f"📊  Split corpus: {len(train):,} train, {len(val):,} validation, {len(test):,} test")
+    for corpus in corpora:
+        corpus_df = df[df['corpus'] == corpus].copy()
+        corpus_size = len(corpus_df)
+        
+        # Shuffle this corpus's data
+        corpus_df = corpus_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+        
+        # Calculate split points for this corpus
+        n_train = int(train_ratio * corpus_size)
+        n_val = int(val_ratio * corpus_size)
+        
+        # Split the corpus data
+        train_corpus = corpus_df[:n_train].copy()
+        val_corpus = corpus_df[n_train:n_train + n_val].copy()
+        test_corpus = corpus_df[n_train + n_val:].copy()
+        
+        # Add split labels
+        train_corpus['split'] = 'train'
+        val_corpus['split'] = 'validate'
+        test_corpus['split'] = 'test'
+        
+        # Combine this corpus's splits
+        corpus_splits = pd.concat([train_corpus, val_corpus, test_corpus], ignore_index=True)
+        all_splits.append(corpus_splits)
+        
+        # Update summary
+        split_summary['train'] += len(train_corpus)
+        split_summary['validate'] += len(val_corpus)
+        split_summary['test'] += len(test_corpus)
+        
+        print(f"  📖  {corpus}: {len(train_corpus):,} train, {len(val_corpus):,} val, {len(test_corpus):,} test")
+    
+    # Combine all corpus splits
+    result = pd.concat(all_splits, ignore_index=True)
+    
+    # Remove the temporary corpus column
+    result = result.drop(columns=['corpus'])
+    
+    # Shuffle the final result to mix corpora
+    result = result.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    
+    print(f"📊  Total split: {split_summary['train']:,} train, {split_summary['validate']:,} validation, {split_summary['test']:,} test")
     
     return result
 
@@ -415,15 +457,15 @@ def main() -> None:
     
     # Splitting options  
     parser.add_argument(
-        "--train-ratio", type=float, default=0.96,
+        "--train-ratio", type=float, default=0.80,
         help="Training set ratio [default: %(default)s]"
     )
     parser.add_argument(
-        "--val-ratio", type=float, default=0.02, 
+        "--val-ratio", type=float, default=0.10, 
         help="Validation set ratio [default: %(default)s]"
     )
     parser.add_argument(
-        "--test-ratio", type=float, default=0.02,
+        "--test-ratio", type=float, default=0.10,
         help="Test set ratio [default: %(default)s]"
     )
     parser.add_argument(
