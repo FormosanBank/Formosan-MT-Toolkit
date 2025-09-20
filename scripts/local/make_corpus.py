@@ -119,14 +119,23 @@ def main() -> None:
     total_pairs = 0
     with args.out.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow([first_src_lang, args.target, "source", "kindOf"])
+        writer.writerow([first_src_lang, args.target, "source", "kindOf", "dialect"])
 
         for xml_path in tqdm(xml_files, desc="XML files", unit="file"):
             source_path = str(xml_path.relative_to(args.xml_dir))
 
+            # Extract dialect from XML root element
+            dialect = "UNKNOWN"
+            try:
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+                dialect = root.attrib.get("dialect", "UNKNOWN")
+            except ET.ParseError:
+                pass  # Keep dialect as "UNKNOWN" for unparseable files
+
             pairs = extract_pairs(xml_path, target_codes, kind_pref)
             for src_sent, tgt_sent in pairs:
-                writer.writerow([src_sent, tgt_sent, source_path, kind_pref])
+                writer.writerow([src_sent, tgt_sent, source_path, kind_pref, dialect])
 
             total_pairs += len(pairs)
 
