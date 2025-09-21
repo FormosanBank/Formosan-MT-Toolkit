@@ -32,31 +32,22 @@ import pandas as pd
 from tqdm import tqdm
 from sacremoses import MosesPunctNormalizer
 
+ASCII_CTRL_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
 
-def get_non_printing_char_replacer(replace_by: str = " "):
-    """Create a function to replace non-printable characters (NLLB approach)."""
-    non_printable_map = {
-        ord(c): replace_by
-        for c in (chr(i) for i in range(sys.maxunicode + 1))
-        if unicodedata.category(c) in {"C", "Cc", "Cf", "Cs", "Co", "Cn"}
-    }
-
-    def replace_non_printing_char(line: str, verbose: bool = False) -> str:
-        replaced = []
-        for char in line:
-            # Skip caret (^) and apostrophe (') as per NLLB approach
-            if char in "^'":
-                continue
-            if ord(char) in non_printable_map:
-                replaced.append((char, replace_by))
-        
-        if verbose:
-            for old, new in replaced:
-                print(f"Non-printable: Replacing '{old}' with '{new}'")
-        
-        return line.translate(non_printable_map)
-
-    return replace_non_printing_char
+def replace_nonprinting(s: str) -> str:
+    """
+    Fast removal/replacement of non-printable chars:
+    - Strip ASCII control characters via regex
+    - For the rest, replace any Unicode category starting with 'C'
+      (Other: Cc, Cf, Cs, Co, Cn) with a space, except keep ^ and '.
+    """
+    if not s:
+        return ""
+    s = ASCII_CTRL_RE.sub(" ", s)
+    # Only scan the actual string (no giant global map)
+    # Keep caret/apostrophe as in your original logic
+    return ''.join((' ' if (unicodedata.category(ch)[0] == 'C' and ch not in "^'") else ch)
+                   for ch in s)
 
 
 def preprocess_text(text: str, mpn: MosesPunctNormalizer, verbose: bool = False) -> str:
@@ -99,8 +90,7 @@ def preprocess_text(text: str, mpn: MosesPunctNormalizer, verbose: bool = False)
         clean = pattern.sub(sub, clean)
     
     # Step 2: Remove non-printable characters
-    replace_nonprint = get_non_printing_char_replacer(" ")
-    clean = replace_nonprint(clean, verbose)
+    clean = replace_nonprinting(clean)
     
     # Step 3: Unicode normalization (NFKC)
     if verbose:
@@ -122,23 +112,23 @@ def preprocess_text(text: str, mpn: MosesPunctNormalizer, verbose: bool = False)
     
     return clean
 
+G_MPN = None
+
+def _init_worker():
+    """Initializer for multiprocessing pool: create/compile Moses once per worker."""
+    global G_MPN
+    mpn = MosesPunctNormalizer(lang="en")
+    # compile substitutions once
+    mpn.substitutions = [(re.compile(r), sub) for r, sub in mpn.substitutions]
+    G_MPN = mpn
 
 def process_chunk(args):
     """Process a chunk of text data with Moses normalization."""
-    chunk_data, column_name, verbose = args
-    
-    # Initialize Moses normalizer for this worker
-    mpn = MosesPunctNormalizer(lang="en")
-    mpn.substitutions = [
-        (re.compile(r), sub) for r, sub in mpn.substitutions
-    ]
-    
-    # Process each text in the chunk
-    processed = []
-    for text in chunk_data:
-        processed.append(preprocess_text(text, mpn, verbose))
-    
+    chunk_data, verbose = args
+    mpn = G_MPN  # created once in _init_worker
+    processed = [preprocess_text(text, mpn, verbose) for text in chunk_data]
     return processed
+
 
 
 def clean_corpus_text_parallel(df: pd.DataFrame, verbose: bool = False, n_workers: int = None) -> pd.DataFrame:
@@ -172,10 +162,10 @@ def clean_corpus_text_parallel(df: pd.DataFrame, verbose: bool = False, n_worker
             print(f"📦  Processing {len(data):,} rows in {len(chunks)} chunks...")
             
             # Prepare arguments for each chunk
-            chunk_args = [(chunk, col, verbose) for chunk in chunks]
+            chunk_args = [(chunk, verbose) for chunk in chunks]
             
             # Process chunks in parallel
-            with mp.Pool(n_workers) as pool:
+            with mp.Pool(n_workers, initializer=_init_worker) as pool:
                 print("⏳  Processing chunks...")
                 chunk_results = list(tqdm(
                     pool.imap(process_chunk, chunk_args),

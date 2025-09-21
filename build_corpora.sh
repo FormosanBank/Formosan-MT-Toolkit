@@ -51,20 +51,31 @@ run_for_lang() {
 
   # 3) make corpus (target: chinese)
   echo "[3/4] Building Chinese corpus for ${code}..."
-  "$PY" scripts/local/make_corpus.py --xml-dir "downloaded_${code}" --target chinese --out "${code}_zh.csv"
+  "$PY" scripts/local/make_corpus.py --xml-dir "downloaded_${code}" --target chinese --out "raw_corpora/${code}_zh.csv"
 
   # 4) make corpus (target: english)
   echo "[4/4] Building English corpus for ${code}..."
-  "$PY" scripts/local/make_corpus.py --xml-dir "downloaded_${code}" --target english --out "${code}_en.csv"
+  "$PY" scripts/local/make_corpus.py --xml-dir "downloaded_${code}" --target english --out "raw_corpora/${code}_en.csv"
 
   echo "✔ Done: ${name} (${code})"
   echo
+
+  # 5) filter and split corpus for MT training (formosan <-> chinese)
+  echo "[5/6] Filtering and splitting Chinese corpus for MT training for ${code}..."
+  "$PY" scripts/andromeda/filter_split_corpus.py --input "raw_corpora/${code}_zh.csv" --output "processed_corpora/${code}_zh_processed.csv" --workers 32
+
+  # 6) filter and split corpus for MT training (formosan <-> english)
+  echo "[6/6] Filtering and splitting English corpus for MT training for ${code}..."
+  "$PY" scripts/andromeda/filter_split_corpus.py --input "raw_corpora/${code}_en.csv" --output "processed_corpora/${code}_en_processed.csv" --workers 32
 }
 
 main() {
   echo "Starting corpus build…"
   echo "Working directory: $(pwd)"
   echo
+
+  # Create output directories
+  mkdir -p raw_corpora processed_corpora
 
   for entry in "${LANGS[@]}"; do
     IFS=":" read -r NAME CODE <<<"$entry"
