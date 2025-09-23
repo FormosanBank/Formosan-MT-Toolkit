@@ -29,6 +29,20 @@ import pandas as pd
 import torch
 from transformers import MBart50Tokenizer, MBartForConditionalGeneration
 
+
+# progress bar (nice in terminals & notebooks)
+try:
+    from tqdm.auto import tqdm
+    _TQDM_AVAILABLE = True
+except Exception:
+    _TQDM_AVAILABLE = False
+    class _DummyPB:
+        def __init__(self, *a, **k): pass
+        def update(self, *a, **k): pass
+        def close(self): pass
+    def tqdm(*a, **k):  # type: ignore
+        return _DummyPB()
+    
 # sacrebleu >= 2.x
 try:
     import sacrebleu
@@ -127,6 +141,8 @@ def batched_generate(
     max_length: int = 128,
     num_beams: int = 4,
     batch_size: int = 16,
+    progress: bool = True,
+    desc: Optional[str] = None,
 ) -> List[str]:
     # set source language special tokens
     if hasattr(tokenizer, "set_src_lang_special_tokens"):
@@ -142,9 +158,31 @@ def batched_generate(
     texts_sorted = [src_texts[i] for i in order]
 
     outs_sorted: List[str] = []
-    for i in range(0, len(texts_sorted), batch_size):
+
+    total = len(texts_sorted)
+    use_pb = progress and (_TQDM_AVAILABLE)
+    if progress and not _TQDM_AVAILABLE:
+        print("ℹ️ tqdm not found; install with `pip install tqdm` for progress bars.")
+
+    pbar = tqdm(
+        total=total,
+        unit="ex",
+        dynamic_ncols=True,
+        smoothing=0.1,
+        desc=desc or "generate",
+        disable=not use_pb,
+    )
+
+    for i in range(0, total, batch_size):
         chunk = texts_sorted[i:i + batch_size]
-        enc = tokenizer(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_length).to(device)
+        enc = tokenizer(
+            chunk,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length
+        ).to(device)
+
         gen = model.generate(
             **enc,
             max_length=max_length,
@@ -152,10 +190,14 @@ def batched_generate(
             forced_bos_token_id=forced_id,  # REQUIRED for mBART-50
         )
         outs_sorted.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
+        pbar.update(len(chunk))
+
+    pbar.close()
 
     # restore original order
     outs = [outs_sorted[i] for i in restore]
     return outs
+
 
 def score_all(sys_out: List[str], ref: List[str]) -> Dict[str, float]:
     bleu = sacrebleu.corpus_bleu(sys_out, [ref])
