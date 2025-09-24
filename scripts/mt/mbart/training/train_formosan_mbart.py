@@ -326,12 +326,13 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
-    # Output naming
+    # Output naming - save over input model
     if args.output_dir is None:
-        args.output_dir = f"runs/{args.src_lang}_{args.tgt_lang}"
+        args.output_dir = args.model  # Save back to input model directory
     if args.model_name is None:
-        args.model_name = f"mbart-{args.src_lang}-{args.tgt_lang}"
-    os.makedirs(args.output_dir, exist_ok=True)
+        args.model_name = "formosan-multilingual-mbart"
+    
+    print(f"Will save model updates to: {args.output_dir}")
 
     # Device
     device = (
@@ -445,11 +446,11 @@ def main():
                 model.train()
 
             if step > 0 and step % args.save_interval == 0:
-                ckpt = os.path.join(args.output_dir, f"{args.model_name}-step-{step}")
-                os.makedirs(ckpt, exist_ok=True)
-                model.save_pretrained(ckpt)
-                tokenizer.save_pretrained(ckpt)
-                print(f"\n[Save] {ckpt}")
+                # Save directly to model directory (overwrite)
+                print(f"\n[Save] Updating model at step {step} -> {args.output_dir}")
+                model.save_pretrained(args.output_dir)
+                tokenizer.save_pretrained(args.output_dir)
+                print(f"[Save] Model updated successfully")
 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
@@ -459,14 +460,13 @@ def main():
                 continue
             raise
 
-    # Final save
-    final_dir = os.path.join(args.output_dir, f"{args.model_name}-final")
-    os.makedirs(final_dir, exist_ok=True)
-    model.save_pretrained(final_dir)
-    tokenizer.save_pretrained(final_dir)
-    with open(os.path.join(final_dir, "args.json"), "w") as f:
+    # Final save - overwrite input model with trained version
+    print(f"\n[Final Save] Saving final model to: {args.output_dir}")
+    model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
+    with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
-    print(f"\nDone! Final model at: {final_dir}")
+    print(f"✅ Training complete! Updated model saved to: {args.output_dir}")
 
 if __name__ == "__main__":
     main()
