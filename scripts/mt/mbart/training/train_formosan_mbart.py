@@ -9,22 +9,22 @@ What this does (correctness):
   language prefix; pads in labels are mapped to -100.
 - Tiny eval in both directions uses `forced_bos_token_id` for the target lang.
 - Trains bidirectionally by randomly flipping direction each step.
+- Saves updates directly to input model (overwrites) - perfect for multilingual training.
 
 Examples
 --------
-# ami <-> english
+# ami <-> english (saves back to input model)
 python train_formosan_mbart.py \
   --src-lang amis --tgt-lang english \
-  --tokenizer formosan_multilingual_mbart_tokenizer \
-  --model     formosan_multilingual_mbart_model \
-  --input ami_en.csv \
-  --output-dir runs/ami_en
+  --tokenizer /path/to/formosan_multilingual_mbart_tokenizer \
+  --model     /path/to/formosan_multilingual_mbart_model \
+  --input ami_en.csv
 
 # paiwan <-> chinese (traditional texts still use zh_CN code)
 python train_formosan_mbart.py \
   --src-lang paiwan --tgt-lang chinese \
-  --tokenizer formosan_multilingual_mbart_tokenizer \
-  --model     formosan_multilingual_mbart_model \
+  --tokenizer /path/to/formosan_multilingual_mbart_tokenizer \
+  --model     /path/to/formosan_multilingual_mbart_model \
   --input pwn_zh.csv
 """
 from __future__ import annotations
