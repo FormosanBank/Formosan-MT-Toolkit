@@ -45,7 +45,7 @@ except Exception:
 # sacrebleu >= 2.x
 try:
     import sacrebleu
-    from sacrebleu.metrics import CHRF, TER
+    from sacrebleu.metrics import BLEU, CHRF, TER
 except Exception as e:
     raise SystemExit(
         "❌ sacrebleu is required. Install with:\n  pip install sacrebleu\n"
@@ -68,6 +68,10 @@ CODE_TO_LID: Dict[str, str] = {
 }
 
 # ------------------------------ helpers -----------------------------------
+def _bleu_tokenizer_for_lid(lid: str) -> str:
+    lid = (lid or "").lower()
+    return "zh" if lid.startswith("zho_") or lid in {"zh", "zho", "zh_hans", "zh_hant"} else "13a"
+
 def lid_from_code(code: str) -> str:
     """
     Turn a column/language code into an NLLB LID.
@@ -84,19 +88,47 @@ def lid_from_code(code: str) -> str:
 def load_tok_model(tok_dir: str, model_dir: str, device: torch.device):
     tok = NllbTokenizer.from_pretrained(tok_dir)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_dir)
-    model.resize_token_embeddings(len(tok))  # idempotent
-    model.to(device)
-    model.eval()
+
+    emb_rows = model.get_input_embeddings().num_embeddings
+    tok_rows = len(tok)
+
+    if tok_rows > emb_rows:
+        # only ever grow to match a larger tokenizer
+        model.resize_token_embeddings(tok_rows)
+    elif tok_rows < emb_rows:
+        raise SystemExit(
+            f"❌ Tokenizer vocab ({tok_rows}) < model embeddings ({emb_rows}). "
+            f"Refusing to shrink; load the *same tokenizer* used to train."
+        )
+
+    model.to(device).eval()
     return tok, model
 
+
 def ensure_lang_token(tokenizer: NllbTokenizer, code: str) -> int:
+    """Return the id for a language code, but fail if mapping is fishy."""
     tid = tokenizer.convert_tokens_to_ids(code)
+    problems = []
     if tid == tokenizer.unk_token_id:
+        problems.append("maps to <unk>")
+    # must be an added *special* token in NLLB (language codes live here)
+    add_specs = getattr(tokenizer, "additional_special_tokens", []) or []
+    if code not in add_specs:
+        problems.append("not present in tokenizer.additional_special_tokens")
+    # round-trip: the id must decode back to the very same string token
+    decoded = tokenizer.decode([tid], skip_special_tokens=False)
+    if decoded != code:
+        problems.append(f"decodes back to {decoded!r} instead of {code!r}")
+    if problems:
         raise SystemExit(
-            f"❌ Language token {code} resolves to <unk>. "
-            "Recreate tokenizer with this code in `additional_special_tokens`."
+            "❌ Language token mapping is broken for "
+            f"{code!r} (id={tid}): " + "; ".join(problems) + "\n"
+            "Fix: rebuild the tokenizer so all language codes live in "
+            "`additional_special_tokens` with stable ids, and reload the "
+            "model with exactly that tokenizer directory."
         )
     return tid
+
 
 def pick_columns(df: pd.DataFrame, src_col: Optional[str], tgt_col: Optional[str]) -> Tuple[str, str]:
     """
@@ -135,42 +167,53 @@ def batched_generate(
     progress: bool = True,
     desc: Optional[str] = None,
 ) -> List[str]:
+    # Resolve/validate the target language id once
     forced_id = ensure_lang_token(tokenizer, to_code)
 
-    # simple length bucket for throughput
+    # length-bucket for throughput
     order = np.argsort([-len(s) for s in src_texts])
     restore = np.argsort(order)
     texts_sorted = [src_texts[i] for i in order]
 
     outs_sorted: List[str] = []
-    
+
     total = len(texts_sorted)
     use_pb = progress and (_TQDM_AVAILABLE)
     if progress and not _TQDM_AVAILABLE:
         print("ℹ️ tqdm not found; install with `pip install tqdm` for progress bars.")
+    pbar = tqdm(total=total, unit="ex", dynamic_ncols=True, smoothing=0.1,
+                desc=desc or "generate", disable=not use_pb)
 
-    pbar = tqdm(
-        total=total,
-        unit="ex",
-        dynamic_ncols=True,
-        smoothing=0.1,
-        desc=desc or "generate",
-        disable=not use_pb,
-    )
-    
     for i in range(0, len(texts_sorted), batch_size):
         chunk = texts_sorted[i:i + batch_size]
+
+        # Encode with correct source language
         tokenizer.src_lang = from_code
-        enc = tokenizer(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_length)
+        enc = tokenizer(
+            chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_length
+        )
         enc = {k: v.to(device) for k, v in enc.items()}
+
+        # Belt & suspenders: set BOTH forced_bos and decoder_start to the target LID
         gen = model.generate(
             **enc,
             max_length=max_length,
             num_beams=num_beams,
             forced_bos_token_id=forced_id,
+            decoder_start_token_id=forced_id,  # <- key addition
+            return_dict_in_generate=True,       # for a quick sanity check
+            output_scores=False,
         )
-        outs_sorted.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
-        
+
+        # Optional sanity check: first token should be the target LID
+        try:
+            first_tokens = gen.sequences[:, 0].tolist()
+            if any(t != forced_id for t in first_tokens):
+                print(f"[warn] First decoder token != {to_code} for some samples.")
+        except Exception:
+            pass
+
+        outs_sorted.extend(tokenizer.batch_decode(gen.sequences, skip_special_tokens=True))
         pbar.update(len(chunk))
 
     pbar.close()
@@ -179,11 +222,17 @@ def batched_generate(
     outs = [outs_sorted[i] for i in restore]
     return outs
 
-def score_all(sys_out: List[str], ref: List[str]) -> Dict[str, float]:
-    bleu = sacrebleu.corpus_bleu(sys_out, [ref])
-    chrf = CHRF().corpus_score(sys_out, [ref])
-    ter  = TER().corpus_score(sys_out, [ref])
-    return {"BLEU": float(bleu.score), "chrF2": float(chrf.score), "TER": float(ter.score)}
+
+def score_all(sys_out: List[str], ref: List[str], bleu_tok: str = "13a") -> Dict[str, float]:
+    bleu_metric = BLEU(tokenize=bleu_tok, effective_order=True)
+    chrf_metric = CHRF()
+    ter_metric  = TER()
+    return {
+        "BLEU":  float(bleu_metric.corpus_score(sys_out, [ref]).score),
+        "chrF2": float(chrf_metric.corpus_score(sys_out, [ref]).score),
+        "TER":   float(ter_metric.corpus_score(sys_out, [ref]).score),
+    }
+
 
 def pretty_print(title: str, metrics: Dict[str, float], n: int, examples: List[Tuple[str, str, str]]):
     print(f"\n===== {title} =====")
@@ -261,18 +310,20 @@ def main():
     print(f"Evaluating on {n} test examples")
 
     # ---- Direction 1: src -> tgt ----
+    bleu_tok_1 = _bleu_tokenizer_for_lid(tgt_lid)
     sys_out_1 = batched_generate(
         tokenizer, model, src_texts, src_lid, tgt_lid, device,
         max_length=args.max_length, num_beams=args.beam, batch_size=args.batch_size
     )
-    metrics_1 = score_all(sys_out_1, tgt_texts)
+    metrics_1 = score_all(sys_out_1, tgt_texts, bleu_tok=bleu_tok_1)
 
     # ---- Direction 2: tgt -> src ----
+    bleu_tok_2 = _bleu_tokenizer_for_lid(src_lid)  # target is src in this direction
     sys_out_2 = batched_generate(
         tokenizer, model, tgt_texts, tgt_lid, src_lid, device,
         max_length=args.max_length, num_beams=args.beam, batch_size=args.batch_size
     )
-    metrics_2 = score_all(sys_out_2, src_texts)
+    metrics_2 = score_all(sys_out_2, src_texts, bleu_tok=bleu_tok_2)
 
     # Pretty print
     ex_1 = list(zip(src_texts, tgt_texts, sys_out_1))

@@ -2,13 +2,16 @@
 """
 setup_nllb200_formosan.py
 
-Robust NLLB-200-distilled-600M tokenizer/model setup for Formosan languages + zh_Hant (+ optional en)
-- Adds custom language codes (e.g., ami_Latn) as additional_special_tokens and wires lang_code_to_id
-- Two paths for <unk> fixes:
+Robust NLLB-200-distilled-600M tokenizer/model setup for Formosan languages + zho_Hant (+ optional en)
+- Rebuilds the tokenizer so it contains:
+    • ALL stock NLLB language codes, plus your Formosan codes (e.g., ami_Latn)
+    • '<mask>' kept as the last special token (NLLB quirk)
+- Two paths for <unk> mitigation:
     (A) --add-mode chars  : add frequent unknown characters as added tokens
-    (B) --add-mode spm    : train a small SPM on your corpus and surgically merge into NLLB SPM
+    (B) --add-mode spm    : train a small SPM on your corpus and surgically merge into NLLB SPM  ← default
 - Resizes model embeddings exactly once (after *all* tokenizer changes)
 - Warm-starts new embedding rows by averaging old-piece embeddings (fallback to <unk>)
+  and seeds new *_Latn language-code tokens from eng_Latn
 - Saves tokenizer/model + a JSON report
 - Smoke-test generation for each Formosan LID:
     * Formosan -> Traditional Chinese (zho_Hant)
@@ -24,14 +27,19 @@ python setup_nllb200_formosan.py \
   --add-mode chars --min-char-frequency 3 \
   --run-eval --samples-per-lang 1
 
-# SPM path: retrain/merge sentencepiece for cleaner segmentation
+# SPM path (recommended for zh_Hant): retrain/merge sentencepiece for cleaner segmentation
 python setup_nllb200_formosan.py \
   --input big_corpus_combined.csv \
-  --output-prefix formosan_multilingual_nllb_spm \
+  --output-prefix formosan_multilingual_nllb \
   --add-mode spm --spm-vocab 16384 --min-char-frequency 3 \
   --run-eval --samples-per-lang 1
 
-CSV columns expected: lang_code, formosan_sentence, chinese_sentence
+CSV columns expected:
+- REQUIRED: lang_code, formosan_sentence, chinese_sentence
+- OPTIONAL: english_sentence (included in SPM/char scans if present)
+
+Notes:
+- Use tokenizer.src_lang / forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang) for generation.  # HF NLLB docs
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ from tqdm.auto import tqdm, trange
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    NllbTokenizer,
 )
 
 # Optional (only if --add-mode spm)
@@ -65,12 +74,11 @@ try:
 except Exception:
     HAVE_SPM = False
 
-# Base language codes
+# Base language codes from Transformers (list of stock FAIRSEQ/NLLB codes).
 try:
     from transformers.models.nllb.tokenization_nllb import FAIRSEQ_LANGUAGE_CODES
 except Exception:
     FAIRSEQ_LANGUAGE_CODES = None  # fallback handled below
-
 
 
 # ───────────────────────────── config: language maps ──────────────────────────
@@ -95,7 +103,7 @@ BASE_MODEL_NAME = "facebook/nllb-200-distilled-600M"
 def clean_text(s: str) -> str:
     if not isinstance(s, str):
         return ""
-    # Moses-like core: NFKC + collapse/control removal handled downstream
+    # Moses-like core: NFKC; (punct/control handled downstream if you later add MosesPunctNormalizer)
     return unicodedata.normalize("NFKC", s)
 
 
@@ -103,7 +111,7 @@ def load_corpus(input_path: Path) -> Tuple[pd.DataFrame, Set[str]]:
     df = pd.read_csv(input_path)
     required = {"lang_code", "formosan_sentence", "chinese_sentence"}
     if not required <= set(df.columns):
-        sys.exit("❌ CSV must have columns: lang_code, formosan_sentence, chinese_sentence")
+        sys.exit("❌ CSV must have columns: lang_code, formosan_sentence, chinese_sentence (optional: english_sentence)")
     uniq = set(df["lang_code"].dropna().unique().tolist())
     supported = uniq & FORMOSAN_LANGS
     missing = uniq - FORMOSAN_LANGS
@@ -158,57 +166,35 @@ def count_char_frequency(texts: Iterable[str], target_chars: Set[str]) -> Dict[s
 
 
 # ─────────────────────────── tokenizer surgery (≥4.38) ────────────────────────
-def _safe_reload_with_langs_and_optional_spm(base_tokenizer, new_spm_path: Optional[str],
-                                             extra_lang_codes: List[str]):
-    """
-    Robustly rebuild the tokenizer with:
-      - (optional) a new sentencepiece model file
-      - an expanded additional_special_tokens list that includes ALL NLLB language codes
-        plus our custom Formosan codes, and "<mask>" (last).
-    """
-    import json, os, shutil, tempfile
+def _safe_reload_with_langs_and_optional_spm(base_tokenizer, new_spm_path, extra_lang_codes):
+    import os, shutil, tempfile
     tmp = tempfile.mkdtemp(prefix="nllb_tok_")
     base_tokenizer.save_pretrained(tmp)
 
-    cfg_path = os.path.join(tmp, "tokenizer_config.json")
-    if os.path.exists(cfg_path):
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        cfg["added_tokens_decoder"] = {k: v for k, v in cfg.get("added_tokens_decoder", {}).items()
-                                       if k in ["0", "1", "2", "3"]}
-        cfg["additional_special_tokens"] = []
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-
-    for fname in ["added_tokens.json", "special_tokens_map.json"]:
-        p = os.path.join(tmp, fname)
-        if os.path.exists(p):
-            os.remove(p)
-
-    spm_dst = os.path.join(tmp, "sentencepiece.bpe.model")
     if new_spm_path is not None:
-        shutil.copy(new_spm_path, spm_dst)
+        shutil.copy(new_spm_path, os.path.join(tmp, "sentencepiece.bpe.model"))
 
-    # --- NEW: keep all original NLLB codes + our extra Formosan codes
-    if FAIRSEQ_LANGUAGE_CODES is not None:
-        builtin_langs = list(FAIRSEQ_LANGUAGE_CODES)            # 200+ official NLLB codes
-    else:
-        # Fallback: try to harvest from the base tokenizer
-        builtin_langs = [t for t in getattr(base_tokenizer, "additional_special_tokens", [])
-                         if isinstance(t, str) and t != base_tokenizer.mask_token]
+    tok = NllbTokenizer.from_pretrained(tmp, use_fast=False)
 
-    final_langs = sorted(set(builtin_langs) | set(extra_lang_codes))
+    # APPEND truly new codes; DO NOT replace the existing special list
+    existing = set(tok.additional_special_tokens or [])
+    missing = [c for c in extra_lang_codes if c not in existing]
+    if missing:
+        tok.add_special_tokens(
+            {"additional_special_tokens": missing},
+            replace_additional_special_tokens=False,   # ← THIS is the key
+        )
 
-    # Ensure "<mask>" is last
-    mask_tok = getattr(base_tokenizer, "mask_token", None)
-    specials = list(final_langs)
-    if mask_tok and mask_tok not in specials:
-        specials.append(mask_tok)
+    # (optional) keep "<mask>" last
+    m = tok.mask_token
+    if m and tok.additional_special_tokens and tok.additional_special_tokens[-1] != m:
+        lst = [t for t in tok.additional_special_tokens if t != m] + [m]
+        tok.add_special_tokens({"additional_special_tokens": lst}, replace_additional_special_tokens=True)
 
-    from transformers import NllbTokenizer
-    new_tok = NllbTokenizer.from_pretrained(tmp, additional_special_tokens=specials)
     shutil.rmtree(tmp, ignore_errors=True)
-    return new_tok
+    return tok
+
+
 
 
 def _merge_spm_models(nllb_tokenizer, merged_spm_out: str, corpus_txt_path: str,
@@ -250,7 +236,7 @@ def _merge_spm_models(nllb_tokenizer, merged_spm_out: str, corpus_txt_path: str,
     nllb_tokens_set = {p.piece for p in base_spm.pieces}
     prev_min_score = base_spm.pieces[-1].score
 
-    # Only copy NORMAL (type == 1) pieces to avoid duplicating specials
+    # Only copy NORMAL (type == 1) pieces
     added = 0
     for p in added_spm.pieces:
         if getattr(p, "type", 1) != 1:
@@ -277,6 +263,36 @@ def _merge_spm_models(nllb_tokenizer, merged_spm_out: str, corpus_txt_path: str,
     return added
 
 
+def _seed_new_langcode_rows(model, tokenizer, formosan_langcodes: List[str]):
+    """
+    For newly added language-code tokens (e.g., ami_Latn), initialize their embeddings
+    from a 'similar' built-in language code. For Latin-script Formosan, use eng_Latn.
+    """
+    if not formosan_langcodes:
+        return 0
+    emb = model.model.shared.weight.data
+    try:
+        src_id = tokenizer.convert_tokens_to_ids("eng_Latn")
+    except Exception:
+        return 0
+    if src_id is None or src_id < 0:
+        return 0
+
+    seeded = 0
+    for lid in formosan_langcodes:
+        # Only affect *_Latn codes (safe default)
+        if not lid.endswith("_Latn"):
+            continue
+        tid = tokenizer.convert_tokens_to_ids(lid)
+        if tid is None or tid < 0:
+            continue
+        # If row already has non-zero norm (e.g., copied/avg), leave it alone
+        if torch.norm(emb[tid]).item() == 0.0:
+            emb[tid] = emb[src_id]
+            seeded += 1
+    return seeded
+
+
 def _warm_start_new_rows(model, tokenizer_old, tokenizer_new):
     """
     Warm-start any *new* embedding rows:
@@ -296,13 +312,10 @@ def _warm_start_new_rows(model, tokenizer_old, tokenizer_new):
 
     for tok in new_tokens:
         new_id = tokenizer_new.convert_tokens_to_ids(tok)
-
         if tok in vocab_old:
-            # Exact old row exists (e.g., language codes) -> copy it
             emb[new_id] = emb[vocab_old[tok]]
             continue
 
-        # Otherwise, average decomposition under old tokenizer
         ids_old = tokenizer_old(tok, add_special_tokens=False).input_ids
         if not ids_old:
             ids_old = [unk_old]
@@ -316,7 +329,6 @@ def _warm_start_new_rows(model, tokenizer_old, tokenizer_new):
         lm_head.weight.data = torch.cat([lm_head.weight.data, extra.clone()], dim=0)
 
     return len(new_tokens)
-
 
 
 # ───────────────────────────── core setup flow ────────────────────────────────
@@ -338,12 +350,15 @@ def setup_tokenizer_and_model(add_mode: str,
     new_spm_path = None
     added_spm_pieces = 0
     if add_mode == "spm":
-        # Dump cleaned corpus text (Formosan + zh)
+        # Dump cleaned corpus text (Formosan + zh + optional eng)
         corpus_txt = Path(f"{output_prefix}_alltext_cleaned.txt")
         with open(corpus_txt, "w", encoding="utf-8") as f:
-            for col in ["formosan_sentence", "chinese_sentence"]:
-                for t in df[col].dropna().astype(str).tolist():
-                    f.write(clean_text(t) + "\n")
+            for col in ["formosan_sentence", "chinese_sentence", "english_sentence"]:
+                if col in df.columns:
+                    for t in df[col].dropna().astype(str).tolist():
+                        t = clean_text(t)
+                        if t.strip():
+                            f.write(t + "\n")
 
         # Required chars: char freq ≥ min_char_freq (skip spaces)
         chars_cnt = Counter()
@@ -366,12 +381,10 @@ def setup_tokenizer_and_model(add_mode: str,
         tokenizer.lang_code_to_id = {}
         tokenizer.id_to_lang_code = {}
 
-    # Use the same final set we loaded with
     all_langs = set(FAIRSEQ_LANGUAGE_CODES or []) | set(extra_lang_codes)
     for lid in sorted(all_langs):
         tid = tokenizer.convert_tokens_to_ids(lid)
         if tid == tokenizer.unk_token_id:
-            # Should not happen now; keep guard just in case
             continue
         tokenizer.lang_code_to_id[lid] = tid
         tokenizer.id_to_lang_code[tid] = lid
@@ -380,8 +393,10 @@ def setup_tokenizer_and_model(add_mode: str,
     added_char_tokens = 0
     if add_mode == "chars":
         print("🔎 Scanning corpus for unknown characters...")
-        texts = (df["formosan_sentence"].dropna().astype(str).tolist() +
-                 df["chinese_sentence"].dropna().astype(str).tolist())
+        texts = []
+        for col in ["formosan_sentence", "chinese_sentence", "english_sentence"]:
+            if col in df.columns:
+                texts.extend(df[col].dropna().astype(str).tolist())
         uniq = iter_unique_chars(texts)
         unknown = find_unknown_chars(tokenizer, uniq)
         print(f"📊 Unique <unk> chars (pre-filter): {len(unknown):,}")
@@ -391,7 +406,6 @@ def setup_tokenizer_and_model(add_mode: str,
                                 key=lambda c: freq[c], reverse=True)
             if candidates:
                 print(f"➕ Adding {len(candidates)} frequent unknown chars (min_freq={min_char_freq}) as added tokens")
-                # Note: add_tokens on SPM tokenizers creates added tokens that won't be split internally.
                 added_char_tokens = tokenizer.add_tokens(candidates)
             else:
                 print(f"ℹ️  No unknown chars meet min_freq ≥ {min_char_freq}. Skipping char additions.")
@@ -408,6 +422,11 @@ def setup_tokenizer_and_model(add_mode: str,
         if warmed:
             print(f"🔥 Warm-started {warmed} new embedding rows")
 
+        # Seed *_Latn language codes from eng_Latn for stability
+        seeded = _seed_new_langcode_rows(model, tokenizer, extra_lang_codes)
+        if seeded:
+            print(f"🌱 Seeded {seeded} Formosan *_Latn language-code embeddings from eng_Latn")
+
     # Move to device
     model = model.to(torch.device(device))
     print(f"📱 Model on: {device}")
@@ -419,7 +438,7 @@ def setup_tokenizer_and_model(add_mode: str,
 @torch.inference_mode()
 def _gen_once(tokenizer, model, device, text: str, src_lid: str, tgt_lid: str,
               num_beams: int, max_new_tokens: int) -> str:
-    tokenizer.src_lang = src_lid
+    tokenizer.src_lang = src_lid  # HF docs: set src_lang on the tokenizer
     enc = tokenizer(text, return_tensors="pt")
     enc = {k: v.to(device) for k, v in enc.items()}
     out = model.generate(
@@ -427,6 +446,7 @@ def _gen_once(tokenizer, model, device, text: str, src_lid: str, tgt_lid: str,
         num_beams=num_beams,
         max_new_tokens=max_new_tokens,
         forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lid),
+        decoder_start_token_id=tokenizer.convert_tokens_to_ids(tgt_lid),  # add this
     )
     return tokenizer.batch_decode(out, skip_special_tokens=True)[0]
 
@@ -532,11 +552,11 @@ def save_everything(tokenizer,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, required=True,
-                    help="CSV with columns: lang_code, formosan_sentence, chinese_sentence")
+                    help="CSV with columns: lang_code, formosan_sentence, chinese_sentence (optional: english_sentence)")
     ap.add_argument("--output-prefix", default="formosan_multilingual_nllb")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    ap.add_argument("--add-mode", default="chars", choices=["none", "chars", "spm"],
-                    help="Fix unknowns by adding frequent chars, or merging a new SPM")
+    ap.add_argument("--add-mode", default="spm", choices=["none", "chars", "spm"],
+                    help="Fix unknowns by adding frequent chars, or merging a new SPM (default: spm for zh_Hant)")
     ap.add_argument("--min-char-frequency", type=int, default=3,
                     help="Min frequency to add an unknown char (chars mode) or to require in SPM")
     ap.add_argument("--spm-vocab", type=int, default=16384,

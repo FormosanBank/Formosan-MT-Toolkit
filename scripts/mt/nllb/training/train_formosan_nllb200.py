@@ -2,29 +2,33 @@
 """
 Train NLLB-200 (distilled-600M) on a Formosan <-> (English|Chinese) parallel corpus.
 
-Key NLLB differences vs mBART:
-- Set tokenizer.src_lang for inputs; DO NOT prefix target labels with a lang token.
-- For generation/eval, ALWAYS pass forced_bos_token_id=tokenizer.lang_code_to_id[tgt_lid].
-- Your tokenizer/model dirs come from the 'formosan' setup script you just made.
-- Works with Transformers >= 4.38.
+Bi-directional like Dale:
+- Flip direction per step (default 50/50), set tokenizer.src_lang to the *current source* only,
+  NEVER prefix labels with a language token.
+- For generation/eval, ALWAYS pass forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lid).
 
-Examples
---------
-# amis <-> english
-python train_formosan_nllb.py \
+Saves to a fresh run directory:
+  runs/<src>_<tgt>/<YYYYmmdd-HHMMSS>/
+    - checkpoints/step-000000 (initial)
+    - checkpoints/step-005000, step-010000, ...
+    - final/
+
+References:
+- Dale’s NLLB fine-tune write-up (bi-dir batching, Adafactor, warmup).  # see citations in the chat
+- HF NLLB docs: set tokenizer.src_lang + forced_bos_token_id for target.  # see citations in the chat
+
+Example: 
+
+python train_formosan_nllb200.py \
   --src-lang amis --tgt-lang english \
-  --tokenizer formosan_multilingual_nllb_tokenizer \
-  --model     formosan_multilingual_nllb_model \
-  --input ami_en.csv \
-  --output-dir runs/ami_en_nllb
-
-# paiwan <-> chinese (Traditional by default; override with --tgt-lid zho_Hans if needed)
-python train_formosan_nllb.py \
-  --src-lang paiwan --tgt-lang chinese \
-  --tokenizer formosan_multilingual_nllb_tokenizer \
-  --model     formosan_multilingual_nllb_model \
-  --input pwn_zh.csv
+  --tokenizer ../prelims/formosan_multilingual_nllb_tokenizer \
+  --model     ../prelims/formosan_multilingual_nllb_model \
+  --input     ami_en_processed.csv \
+  --normalize \
+  --steps 20000 --batch-size 8 \
+  --save-interval 5000 --eval-interval 5000 --eval-samples 12
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,6 +37,7 @@ import json
 import os
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -56,8 +61,14 @@ from transformers import (
     get_constant_schedule_with_warmup,
 )
 
+# Optional normalization (like NLLB preprocessing)
+try:
+    from sacremoses import MosesPunctNormalizer
+    HAVE_SACREMOSES = True
+except Exception:
+    HAVE_SACREMOSES = False
+
 # ----------------------- language maps (align with your setup) -----------------------
-# NLLB language IDs (LIDs). Formosan ones were added by your tokenizer setup.
 NLLB_LANGUAGE_MAP: Dict[str, str] = {
     # Formosan (custom; Latin orthographies unless you chose differently)
     "amis": "ami_Latn",
@@ -78,7 +89,7 @@ NLLB_LANGUAGE_MAP: Dict[str, str] = {
 
     # Built-ins
     "english": "eng_Latn",
-    # Default to Traditional Chinese; override with --src-lid/--tgt-lid for Simplified
+    # Default to Traditional Chinese (FLORES code)
     "chinese": "zho_Hant",
 }
 
@@ -143,7 +154,24 @@ def smart_find_columns(
 
     sys.exit("Could not infer language columns. Use --src-col and --tgt-col.")
 
-def load_splits(csv_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _normalize_series(s: pd.Series, lang_hint: str) -> pd.Series:
+    # Minimal NFKC, plus Moses punctuation normalization (optional)
+    s = s.fillna("").astype(str).map(lambda t: t if t is not None else "")
+    try:
+        import unicodedata
+        s = s.map(lambda t: unicodedata.normalize("NFKC", t))
+    except Exception:
+        pass
+    if HAVE_SACREMOSES:
+        mpn = MosesPunctNormalizer(lang="en")  # neutral-ish; NLLB preprocessing uses Moses-like normalizer
+        s = s.map(lambda t: mpn.normalize(t))
+    return s
+
+def load_splits(csv_path: Path,
+                make_val: float = 0.05,
+                make_test: float = 0.05,
+                seed: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load 'train/valid/test' by 'split' column; else make deterministic 90/5/5."""
     df = pd.read_csv(csv_path)
     if "split" in df.columns:
         tr = df[df["split"].str.lower().eq("train")]
@@ -152,28 +180,42 @@ def load_splits(csv_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
         if len(tr) == 0:
             sys.exit("No 'train' rows found in CSV 'split' column.")
         return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True)
-    # quick split if none provided
-    # df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-    # n = len(df)
-    # n_val = max(500, int(0.05 * n))
-    # n_test = max(500, int(0.05 * n))
-    # te = df.iloc[:n_test]
-    # va = df.iloc[n_test:n_test + n_val]
-    # tr = df.iloc[n_test + n_val:]
+
+    # Deterministic shuffle and 90/5/5 split
+    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    n = len(df)
+    n_val = int(make_val * n)
+    n_test = int(make_test * n)
+    te = df.iloc[:n_test]
+    va = df.iloc[n_test:n_test + n_val]
+    tr = df.iloc[n_test + n_val:]
     return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True)
 
-def load_tok_model(tok_dir: str, model_dir: str, device: str):
+def load_tok_model(tok_dir: str, model_dir: str, device: torch.device):
     tok = NllbTokenizer.from_pretrained(tok_dir)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_dir)
-    model.resize_token_embeddings(len(tok))  # idempotent if already matched
-    model.to(torch.device(device))
+
+    emb_rows = model.get_input_embeddings().num_embeddings
+    tok_rows = len(tok)
+
+    if tok_rows > emb_rows:
+        # only ever grow to match a larger tokenizer
+        model.resize_token_embeddings(tok_rows)
+    elif tok_rows < emb_rows:
+        raise SystemExit(
+            f"❌ Tokenizer vocab ({tok_rows}) < model embeddings ({emb_rows}). "
+            f"Refusing to shrink; load the *same tokenizer* used to train."
+        )
+
+    model.to(device).eval()
     return tok, model
+
 
 def restore_custom_lang_ids(tokenizer, codes):
     """
     Newer transformers removed `lang_code_to_id`. We don't need it:
-    always resolve with `convert_tokens_to_ids`. This stays a no-op
-    on old versions that still have the dict.
+    always resolve with `convert_tokens_to_ids`.
+    Keep backward compatibility if the dict is present.
     """
     for c in codes:
         tid = tokenizer.convert_tokens_to_ids(c)
@@ -182,8 +224,6 @@ def restore_custom_lang_ids(tokenizer, codes):
                 f"Language token {c} resolves to <unk>. "
                 f"Is it present in your tokenizer's `additional_special_tokens`?"
             )
-            
-    # If you want to keep compatibility with older versions:
     if hasattr(tokenizer, "lang_code_to_id") and isinstance(tokenizer.lang_code_to_id, dict):
         for c in codes:
             tokenizer.lang_code_to_id[c] = tokenizer.convert_tokens_to_ids(c)
@@ -198,6 +238,12 @@ def cleanup_cuda():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+def _make_run_dir(base_out: Optional[str], src: str, tgt: str) -> Path:
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    root = Path(base_out) if base_out else Path("runs") / f"{src}_{tgt}" / ts
+    (root / "checkpoints").mkdir(parents=True, exist_ok=True)
+    return root
 
 # ------------------------------ training -----------------------------------
 def _encode_pair_batch(
@@ -224,11 +270,11 @@ def _encode_pair_batch(
     enc = tokenizer(
         src_texts,
         return_tensors="pt",
-        padding=True,               # or "longest"
+        padding=True,
         truncation=True,
         max_length=max_length,
         return_attention_mask=True,
-        return_token_type_ids=False,   # <-- important
+        return_token_type_ids=False,
     )
 
     # Targets (labels) – no language prefix for NLLB
@@ -239,8 +285,10 @@ def _encode_pair_batch(
         truncation=True,
         max_length=max_length,
         return_attention_mask=False,
-        return_token_type_ids=False,   # <-- important
+        return_token_type_ids=False,
+        add_special_tokens=False,   # <<< important
     )
+
 
     input_ids = enc["input_ids"].to(device)
     attn_mask = enc["attention_mask"].to(device)
@@ -290,29 +338,112 @@ def tiny_eval(
     device: torch.device,
     n_show: int = 3,
     num_beams: int = 4,
+    batch_size: int = 64,
 ):
     """
-    Quick sanity eval in both directions:
-      - encode with source lang set
-      - generate with forced_bos_token_id=tgt_lid
+    Quick sanity eval in both directions.
+    Prints:
+      - sample generations (src->tgt and tgt->src)
+      - avg token-level loss (cross-entropy) over the eval batch in both directions
+        (pads ignored by setting labels==pad_token_id -> -100)
     """
+    import math
+
+    prev_training = model.training
+    model.eval()
+
     def gen_dir(src_texts, from_code, to_code):
+        # 1) encode with the correct source language
         tokenizer.src_lang = from_code
         enc = tokenizer(
-            src_texts, return_tensors="pt", padding=True, truncation=True, max_length=max_length
-        ).to(device)
-        forced_id = get_lang_id(tokenizer, to_code)
-        outs = model.generate(
-            **enc,
+            src_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
             max_length=max_length,
-            forced_bos_token_id=forced_id,
-            num_beams=num_beams,
-        )
-        return tokenizer.batch_decode(outs, skip_special_tokens=True)
+        ).to(device)
 
+        # 2) resolve target BOS id
+        forced_id = get_lang_id(tokenizer, to_code)
+
+        # 3) generate with BOTH a forced BOS and decoder start token
+        #    (covers transformers versions that lean on either field)
+        gen_out = model.generate(
+            **enc,
+            num_beams=1,                      # turn off beams for sanity
+            max_new_tokens=48,                # don’t go to 192 on eval
+            min_new_tokens=2,
+            no_repeat_ngram_size=3,           # stop loops
+            repetition_penalty=1.2,           # gentle deterrent
+            length_penalty=1.05,              # nudge away from 1-token replies
+            early_stopping=True,
+            forced_bos_token_id=forced_id,
+            decoder_start_token_id=forced_id,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        seqs = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out
+        return tokenizer.batch_decode(seqs, skip_special_tokens=True)
+
+
+    def avg_loss_dir(src_texts, tgt_texts, from_code):
+        """
+        Compute weighted average loss over tokens (ignoring pads) in mini-batches.
+        """
+        total_loss = 0.0
+        total_tokens = 0
+
+        for i in range(0, len(src_texts), batch_size):
+            batch_src = ["" if s is None else str(s) for s in src_texts[i:i + batch_size]]
+            batch_tgt = ["" if t is None else str(t) for t in tgt_texts[i:i + batch_size]]
+
+            # Encode inputs with correct source LID
+            tokenizer.src_lang = from_code
+            enc = tokenizer(
+                batch_src,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_attention_mask=True,
+                return_token_type_ids=False,
+            )
+
+            # Encode targets as labels (no LID token prepended for labels)
+            # targets (labels) – do NOT include any language code
+            # Targets (labels) – do NOT add special tokens/LID to labels
+            lab = tokenizer(
+                batch_tgt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+                add_special_tokens=False,  # <<< add this
+            )
+            labels = lab["input_ids"].to(device)
+            labels[labels == tokenizer.pad_token_id] = -100
+
+            non_pad = (labels != -100).sum().item()
+
+            enc = {k: v.to(device) for k, v in enc.items()}
+            labels = labels.to(device)
+
+            outputs = model(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], labels=labels)
+            loss = outputs.loss  # averaged over non-pad tokens in the batch
+
+            # Weighted by token count to aggregate across batches safely
+            total_loss += loss.item() * max(non_pad, 1)
+            total_tokens += max(non_pad, 1)
+
+        avg_loss = total_loss / max(total_tokens, 1)
+        ppl = math.exp(avg_loss) if avg_loss < 50 else float("inf")
+        return avg_loss, ppl
+
+    # Sample pretty prints
     sample_src = [p[0] for p in val_pairs[:n_show]]
     sample_tgt = [p[1] for p in val_pairs[:n_show]]
-
     fwd = gen_dir(sample_src, src_code, tgt_code)
     bwd = gen_dir(sample_tgt, tgt_code, src_code)
 
@@ -323,6 +454,21 @@ def tiny_eval(
     print("[Eval] Sample backward (tgt->src):")
     for s, o in zip(sample_tgt, bwd):
         print(f"  SRC: {s}\n  OUT: {o}\n")
+
+    # Compute losses over the full eval subset passed in
+    all_src = [p[0] for p in val_pairs]
+    all_tgt = [p[1] for p in val_pairs]
+
+    fwd_loss, fwd_ppl = avg_loss_dir(all_src, all_tgt, src_code)
+    bwd_loss, bwd_ppl = avg_loss_dir(all_tgt, all_src, tgt_code)
+
+    print(f"[Eval] Avg token loss  (src->tgt): {fwd_loss:.4f} | ppl: {fwd_ppl:.2f}")
+    print(f"[Eval] Avg token loss  (tgt->src): {bwd_loss:.4f} | ppl: {bwd_ppl:.2f}")
+
+    if prev_training:
+        model.train()
+
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -345,16 +491,20 @@ def main():
     ap.add_argument("--steps", type=int, default=60000)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--max-length", type=int, default=128)
-    ap.add_argument("--learning-rate", type=float, default=5e-5)
+    ap.add_argument("--learning-rate", type=float, default=1e-4)   # Dale-style LR
     ap.add_argument("--warmup-steps", type=int, default=1000)
-    ap.add_argument("--weight-decay", type=float, default=0.01)
+    ap.add_argument("--weight-decay", type=float, default=1e-3)
     ap.add_argument("--clip-threshold", type=float, default=1.0)
     ap.add_argument("--grad-accum-steps", type=int, default=1)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
 
+    # Direction mix (bidirectional training)
+    ap.add_argument("--p-src2tgt", type=float, default=0.5,
+                    help="Probability of sampling src->tgt (else tgt->src) each step")
+
     # Logging / saving / eval
-    ap.add_argument("--output-dir", default=None)
-    ap.add_argument("--model-name", default=None)
+    ap.add_argument("--output-dir", default=None,
+                    help="Root run directory; defaults to runs/<src>_<tgt>/<timestamp>")
     ap.add_argument("--save-interval", type=int, default=5000)
     ap.add_argument("--log-interval", type=int, default=1000)
     ap.add_argument("--eval-interval", type=int, default=5000)
@@ -365,16 +515,14 @@ def main():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--fp16", action="store_true")
 
+    # Preprocessing
+    ap.add_argument("--normalize", action="store_true",
+                    help="Apply NFKC + Moses punctuation normalization to inputs")
+
     # Repro
     ap.add_argument("--seed", type=int, default=42)
 
     args = ap.parse_args()
-
-    # Output naming - save over input model
-    if args.output_dir is None:
-        args.output_dir = args.model  # Save back to input model directory
-    if args.model_name is None:
-        args.model_name = f"nllb-{args.src_lang}-{args.tgt_lang}"
 
     # Device
     device = (
@@ -400,6 +548,12 @@ def main():
     s_col, t_col = smart_find_columns(df_train_all, args.src_lang, args.tgt_lang, args.src_col, args.tgt_col)
     print(f"Using columns: {s_col} -> {t_col}")
 
+    if args.normalize:
+        df_train_all[s_col] = _normalize_series(df_train_all[s_col], args.src_lang)
+        df_train_all[t_col] = _normalize_series(df_train_all[t_col], args.tgt_lang)
+        df_val_all[s_col]   = _normalize_series(df_val_all[s_col], args.src_lang)
+        df_val_all[t_col]   = _normalize_series(df_val_all[t_col], args.tgt_lang)
+
     df_train = df_train_all[[s_col, t_col]].dropna().reset_index(drop=True)
     df_val   = df_val_all[[s_col, t_col]].dropna().reset_index(drop=True)
     df_test  = df_test_all[[s_col, t_col]].dropna().reset_index(drop=True)
@@ -409,7 +563,18 @@ def main():
     tokenizer, model = load_tok_model(args.tokenizer, args.model, str(device))
     restore_custom_lang_ids(tokenizer, [src_code, tgt_code])
 
-    # Optim + sched
+    # Run directory (NEW: always a fresh dir)
+    run_dir = _make_run_dir(args.output_dir, args.src_lang, args.tgt_lang)
+    (run_dir / "final").mkdir(parents=True, exist_ok=True)
+
+    # Save initial checkpoint
+    init_ckpt = run_dir / "checkpoints" / "step-000000"
+    init_ckpt.mkdir(parents=True, exist_ok=True)
+    tokenizer.save_pretrained(str(init_ckpt))
+    model.save_pretrained(str(init_ckpt))
+
+
+    # Optim + sched (Dale-style Adafactor + warmup)
     optimizer = Adafactor(
         (p for p in model.parameters() if p.requires_grad),
         scale_parameter=False,
@@ -425,30 +590,33 @@ def main():
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
+    print(f"\nRun dir: {run_dir}")
     print(f"Starting training on {device} for {args.steps} steps...")
     print(f"Batch size: {args.batch_size} | Grad accum: {args.grad_accum_steps} | Max len: {args.max_length} | FP16: {bool(scaler.is_enabled())}")
-
-    losses: List[float] = []
-    pbar = trange(args.steps, desc="Training", dynamic_ncols=True)
+    print(f"Direction mix p(src->tgt)={args.p_src2tgt:.2f}")
 
     # Arrays for quick sampling
     train_src = df_train[s_col].astype(str).to_numpy()
     train_tgt = df_train[t_col].astype(str).to_numpy()
 
+    losses: List[float] = []
+    pbar = trange(args.steps, desc="Training", dynamic_ncols=True)
+
     for step in pbar:
         try:
-            # Flip direction per step (bidirectional sampling)
             idx = np.random.randint(0, len(df_train), size=args.batch_size)
-            if random.random() < 0.5:
+            if random.random() < args.p_src2tgt:
                 # src -> tgt
                 src_texts = df_train.iloc[idx][s_col].astype(str).tolist()
                 tgt_texts = df_train.iloc[idx][t_col].astype(str).tolist()
                 s_code = src_code
+                dir_tag = "src->tgt"
             else:
                 # tgt -> src
                 src_texts = df_train.iloc[idx][t_col].astype(str).tolist()
                 tgt_texts = df_train.iloc[idx][s_col].astype(str).tolist()
                 s_code = tgt_code
+                dir_tag = "tgt->src"
 
             loss = training_step(
                 tokenizer, model, src_texts, tgt_texts,
@@ -471,8 +639,8 @@ def main():
 
             if step % args.log_interval == 0 and losses:
                 recent = losses[-min(len(losses), args.log_interval):]
-                pbar.set_postfix(loss=f"{np.mean(recent):.4f}",
-                                 dir=f"{'src->tgt' if s_code==src_code else 'tgt->src'}")
+                pbar.set_postfix(loss=f"{np.mean(recent):.4f}", dir=dir_tag)
+                print(f"Step {step} | Loss: {np.mean(recent):.4f} | Direction: {dir_tag}")
 
             if args.eval_interval and step > 0 and step % args.eval_interval == 0 and len(df_val):
                 model.eval()
@@ -488,13 +656,13 @@ def main():
                 model.train()
 
             if step > 0 and step % args.save_interval == 0:
-                # Save directly to model directory (overwrite)
-                print(f"\n[Save] Updating model at step {step} -> {args.output_dir}")
-                model.save_pretrained(args.output_dir)
-                tokenizer.save_pretrained(args.output_dir)
-                with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
-                    json.dump(vars(args), f, indent=2)
-                print(f"[Save] Model updated successfully")
+                ckpt_dir = run_dir / "checkpoints" / f"step-{step:06d}"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                print(f"\n[Save] Step {step} -> {ckpt_dir}")
+                model.save_pretrained(str(ckpt_dir))
+                tokenizer.save_pretrained(str(ckpt_dir))
+                with open(run_dir / "train_log.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"step": step, "loss": float(np.mean(losses[-args.log_interval:]))}) + "\n")
 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
@@ -504,13 +672,12 @@ def main():
                 continue
             raise
 
-    # Final save - overwrite input model with trained version
-    print(f"\n[Final Save] Saving final model to: {args.output_dir}")
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
-    with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
-        json.dump(vars(args), f, indent=2)
-    print(f"✅ Training complete! Updated model saved to: {args.output_dir}")
+    # Final save
+    final_dir = run_dir / "final"
+    print(f"\n[Final Save] -> {final_dir}")
+    model.save_pretrained(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+    print(f"✅ Training complete! Artifacts in: {run_dir}")
 
 if __name__ == "__main__":
     main()

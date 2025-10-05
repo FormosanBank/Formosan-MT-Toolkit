@@ -37,6 +37,7 @@ import random
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
@@ -153,15 +154,8 @@ def load_splits(csv_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFram
         if len(tr) == 0:
             sys.exit("No 'train' rows found in CSV 'split' column.")
         return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True)
-    # no splits -> quick split
-    df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-    n = len(df)
-    n_val = max(500, int(0.05 * n))
-    n_test = max(500, int(0.05 * n))
-    te = df.iloc[:n_test]
-    va = df.iloc[n_test:n_test + n_val]
-    tr = df.iloc[n_test + n_val:]
-    return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True)
+    else: 
+        raise SystemExit("❌ CSV must contain a 'split' column.")
 
 def load_tok_model(tok_dir: str, model_dir: str, device: str):
     tok = MBart50Tokenizer.from_pretrained(tok_dir)
@@ -183,6 +177,42 @@ def cleanup_cuda():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        
+def _encode_pair_batch_mbart(
+    tokenizer: MBart50Tokenizer,
+    src_texts: List[str],
+    tgt_texts: List[str],
+    src_code: str,
+    tgt_code: str,
+    max_length: int,
+    device: torch.device,
+):
+    # mBART-50 MUST know both src and tgt languages before tokenization
+    if hasattr(tokenizer, "set_src_lang_special_tokens"):
+        tokenizer.set_src_lang_special_tokens(src_code)
+    else:
+        tokenizer.src_lang = src_code
+
+    if hasattr(tokenizer, "set_tgt_lang_special_tokens"):
+        tokenizer.set_tgt_lang_special_tokens(tgt_code)
+    else:
+        tokenizer.tgt_lang = tgt_code
+    tokenizer.tgt_lang = tgt_code  # belt-and-suspenders
+
+    batch = tokenizer(
+        src_texts,
+        text_target=tgt_texts,  # ensures target gets the tgt lang prefix
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+    )
+    input_ids = batch["input_ids"].to(device)
+    attn_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
+    labels[labels == tokenizer.pad_token_id] = -100
+    return input_ids, attn_mask, labels
+
 
 # ------------------------------ training -----------------------------------
 def training_step(
@@ -239,52 +269,116 @@ def training_step(
     return loss.detach()
 
 @torch.no_grad()
-def tiny_eval(
+def eval_on_val_mbart(
     tokenizer: MBart50Tokenizer,
     model: MBartForConditionalGeneration,
-    val_pairs: List[Tuple[str, str]],
+    df_val: pd.DataFrame,
+    s_col: str,
+    t_col: str,
     src_code: str,
     tgt_code: str,
     max_length: int,
     device: torch.device,
+    sample_size: int = 500,
+    eval_batch_size: int = 32,
+    num_beams: int = 5,
     n_show: int = 3,
-    num_beams: int = 4,
+    use_amp: bool = False,
 ):
-    """
-    Quick sanity eval both directions using correct mBART-50 generation:
-    - encode with source lang prefix
-    - generate with forced_bos_token_id set to target lang id
-    """
-    def gen_dir(src_texts, from_code, to_code):
-        if hasattr(tokenizer, "set_src_lang_special_tokens"):
-            tokenizer.set_src_lang_special_tokens(from_code)
-        else:
-            tokenizer.src_lang = from_code
-        enc = tokenizer(
-            src_texts, return_tensors="pt", padding=True, truncation=True, max_length=max_length
-        ).to(device)
-        forced_id = tokenizer.lang_code_to_id[to_code]
-        outs = model.generate(
-            **enc,
-            max_length=max_length,
-            forced_bos_token_id=forced_id,
-            num_beams=num_beams,
-        )
-        return tokenizer.batch_decode(outs, skip_special_tokens=True)
+    if len(df_val) == 0:
+        print("[Eval] No validation data available.")
+        return
 
-    sample_src = [p[0] for p in val_pairs[:n_show]]
-    sample_tgt = [p[1] for p in val_pairs[:n_show]]
+    n = min(sample_size, len(df_val))
+    idx = np.random.choice(len(df_val), size=n, replace=False)
+    sub = df_val.iloc[idx]
 
-    fwd = gen_dir(sample_src, src_code, tgt_code)
-    bwd = gen_dir(sample_tgt, tgt_code, src_code)
+    src_list = sub[s_col].astype(str).tolist()
+    tgt_list = sub[t_col].astype(str).tolist()
 
-    print("\n[Eval] Sample forward (src->tgt):")
-    for s, o in zip(sample_src, fwd):
-        print(f"  SRC: {s}\n  OUT: {o}\n")
+    amp_ctx = (autocast(device_type=device.type) if (_AMP_NEW and use_amp) else
+               (autocast() if (not _AMP_NEW and use_amp) else nullcontext()))
 
-    print("[Eval] Sample backward (tgt->src):")
-    for s, o in zip(sample_tgt, bwd):
-        print(f"  SRC: {s}\n  OUT: {o}\n")
+    def mean_loss(src_texts: List[str], tgt_texts: List[str], from_code: str, to_code: str) -> float:
+        total, count = 0.0, 0
+        for i in range(0, len(src_texts), eval_batch_size):
+            bs = src_texts[i:i+eval_batch_size]
+            bt = tgt_texts[i:i+eval_batch_size]
+            input_ids, attn_mask, labels = _encode_pair_batch_mbart(
+                tokenizer, bs, bt, from_code, to_code, max_length, device
+            )
+            with amp_ctx:
+                out = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels)
+                loss = out.loss
+            total += loss.item() * len(bs)
+            count += len(bs)
+        return total / max(1, count)
+
+    # Losses (both directions)
+    fwd_loss = mean_loss(src_list, tgt_list, src_code, tgt_code)  # src->tgt
+    bwd_loss = mean_loss(tgt_list, src_list, tgt_code, src_code)  # tgt->src
+    mean_bi = 0.5 * (fwd_loss + bwd_loss)
+    try:
+        ppl = float(np.exp(mean_bi))
+    except OverflowError:
+        ppl = float("inf")
+
+    print(f"\n[Eval] Sampled {n} val rows | "
+          f"src->tgt loss: {fwd_loss:.4f} | tgt->src loss: {bwd_loss:.4f} | "
+          f"mean: {mean_bi:.4f} | ppl≈{ppl:.2f}")
+
+    # Show k examples each way
+    k = min(n_show, n)
+
+    # src -> tgt
+    show_idx = np.random.choice(n, size=k, replace=False)
+    show_src = [src_list[i] for i in show_idx]
+    show_ref = [tgt_list[i] for i in show_idx]
+
+    if hasattr(tokenizer, "set_src_lang_special_tokens"):
+        tokenizer.set_src_lang_special_tokens(src_code)
+    else:
+        tokenizer.src_lang = src_code
+    enc = tokenizer(
+        show_src, return_tensors="pt", padding=True, truncation=True, max_length=max_length
+    ).to(device)
+    forced_tgt = tokenizer.lang_code_to_id[tgt_code]
+    outs = model.generate(
+        **enc, max_length=max_length, num_beams=num_beams, forced_bos_token_id=forced_tgt
+    )
+    hyps = tokenizer.batch_decode(outs, skip_special_tokens=True)
+
+    print("\n[Eval] Examples (src->tgt):")
+    for s, r, h in zip(show_src, show_ref, hyps):
+        print(f"  SRC: {s}")
+        print(f"  REF: {r}")
+        print(f"  HYP: {h}\n")
+
+    # tgt -> src
+    show_idx2 = np.random.choice(n, size=k, replace=False)
+    show_src2 = [tgt_list[i] for i in show_idx2]
+    show_ref2 = [src_list[i] for i in show_idx2]
+
+    if hasattr(tokenizer, "set_src_lang_special_tokens"):
+        tokenizer.set_src_lang_special_tokens(tgt_code)
+    else:
+        tokenizer.src_lang = tgt_code
+    enc2 = tokenizer(
+        show_src2, return_tensors="pt", padding=True, truncation=True, max_length=max_length
+    ).to(device)
+    forced_src = tokenizer.lang_code_to_id[src_code]
+    outs2 = model.generate(
+        **enc2, max_length=max_length, num_beams=num_beams, forced_bos_token_id=forced_src
+    )
+    hyps2 = tokenizer.batch_decode(outs2, skip_special_tokens=True)
+
+    print("[Eval] Examples (tgt->src):")
+    for s, r, h in zip(show_src2, show_ref2, hyps2):
+        print(f"  SRC: {s}")
+        print(f"  REF: {r}")
+        print(f"  HYP: {h}\n")
+
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -301,7 +395,7 @@ def main():
     # Training hyperparams
     ap.add_argument("--steps", type=int, default=60000)
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--max-length", type=int, default=128)
+    ap.add_argument("--max-length", type=int, default=256)
     ap.add_argument("--learning-rate", type=float, default=5e-5)
     ap.add_argument("--warmup-steps", type=int, default=1000)
     ap.add_argument("--weight-decay", type=float, default=0.01)
@@ -315,8 +409,14 @@ def main():
     ap.add_argument("--save-interval", type=int, default=5000)
     ap.add_argument("--log-interval", type=int, default=1000)
     ap.add_argument("--eval-interval", type=int, default=5000)
-    ap.add_argument("--eval-samples", type=int, default=8)
-    ap.add_argument("--eval-beams", type=int, default=4)
+    ap.add_argument("--eval-samples", type=int, default=100)
+    ap.add_argument("--eval-beams", type=int, default=5)
+
+    # Eval
+    ap.add_argument("--eval-sample-size", type=int, default=500,
+                help="Random validation rows to evaluate each eval step (cap at len(val)).")
+    ap.add_argument("--eval-batch-size", type=int, default=32,
+                help="Batch size for loss computation during eval.")
 
     # Device / precision
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
@@ -397,15 +497,16 @@ def main():
     for step in pbar:
         try:
             # Flip direction per step (bidirectional sampling)
+            idx = np.random.randint(0, len(df_train), size=args.batch_size)
             if random.random() < 0.5:
                 # src -> tgt
-                src_texts = np.random.choice(train_src, args.batch_size, replace=True).tolist()
-                tgt_texts = np.random.choice(train_tgt, args.batch_size, replace=True).tolist()
+                src_texts = df_train[s_col].iloc[idx].astype(str).tolist()
+                tgt_texts = df_train[t_col].iloc[idx].astype(str).tolist()
                 s_code, t_code = src_code, tgt_code
             else:
                 # tgt -> src
-                src_texts = np.random.choice(train_tgt, args.batch_size, replace=True).tolist()
-                tgt_texts = np.random.choice(train_src, args.batch_size, replace=True).tolist()
+                src_texts = df_train[t_col].iloc[idx].astype(str).tolist()
+                tgt_texts = df_train[s_col].iloc[idx].astype(str).tolist()
                 s_code, t_code = tgt_code, src_code
 
             loss = training_step(
@@ -429,21 +530,27 @@ def main():
                 scheduler.step()
 
             if step % args.log_interval == 0 and losses:
+                print("\n   ")
+                print(f"Step {step} | Loss: {np.mean(losses[-min(len(losses), args.log_interval):]):.4f}")
                 recent = losses[-min(len(losses), args.log_interval):]
                 pbar.set_postfix(loss=f"{np.mean(recent):.4f}", dir=f"{s_code}->{t_code}")
 
             if args.eval_interval and step > 0 and step % args.eval_interval == 0 and len(df_val):
                 model.eval()
-                pairs = list(zip(df_val[s_col].astype(str).tolist(), df_val[t_col].astype(str).tolist()))
-                tiny_eval(
+                eval_on_val_mbart(
                     tokenizer, model,
-                    pairs[:args.eval_samples],
+                    df_val, s_col, t_col,
                     src_code, tgt_code,
                     args.max_length, device,
-                    n_show=min(3, args.eval_samples),
+                    sample_size=args.eval_sample_size,
+                    eval_batch_size=args.eval_batch_size,
                     num_beams=args.eval_beams,
+                    n_show=min(3, args.eval_samples),
+                    use_amp=(scaler.is_enabled() and device.type == "cuda"),
                 )
+                cleanup_cuda()
                 model.train()
+
 
             if step > 0 and step % args.save_interval == 0:
                 # Save directly to model directory (overwrite)
@@ -464,8 +571,6 @@ def main():
     print(f"\n[Final Save] Saving final model to: {args.output_dir}")
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
-    with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
-        json.dump(vars(args), f, indent=2)
     print(f"✅ Training complete! Updated model saved to: {args.output_dir}")
 
 if __name__ == "__main__":

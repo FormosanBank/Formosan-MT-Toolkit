@@ -200,7 +200,8 @@ def batched_generate(
 
 
 def score_all(sys_out: List[str], ref: List[str]) -> Dict[str, float]:
-    bleu = sacrebleu.corpus_bleu(sys_out, [ref])
+    tok = "zh"  # for Chinese references
+    bleu = sacrebleu.corpus_bleu(sys_out, [ref], tokenize=tok)     
     chrf = CHRF().corpus_score(sys_out, [ref])
     ter  = TER().corpus_score(sys_out, [ref])
     return {"BLEU": float(bleu.score), "chrF2": float(chrf.score), "TER": float(ter.score)}
