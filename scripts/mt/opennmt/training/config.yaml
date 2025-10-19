@@ -1,0 +1,56 @@
+save_data: ${RUN_DIR}/data/bi
+src_vocab: ${RUN_DIR}/data/vocab.src
+tgt_vocab: ${RUN_DIR}/data/vocab.tgt
+overwrite: true
+
+data:
+  corpus_1:
+    path_src: ${DATA_DIR}/train/bi.spm.src
+    path_tgt: ${DATA_DIR}/train/bi.spm.tgt
+  valid:
+    path_src: ${DATA_DIR}/valid/bi.spm.src
+    path_tgt: ${DATA_DIR}/valid/bi.spm.tgt
+
+world_size: 1
+gpu_ranks: [0]
+
+save_model: ${RUN_DIR}/checkpoints/bi_rnn
+train_steps: 1000000              # high ceiling; early stopping cuts it short
+valid_steps: 2500
+save_checkpoint_steps: 1000
+keep_checkpoint: 10
+report_every: 50
+
+early_stopping: 3                 # stop after 3 validations without improvement
+early_stopping_criteria: ppl      # monitor validation perplexity
+
+# RNN encoder/decoder (older, reliable)
+encoder_type: brnn
+decoder_type: rnn
+rnn_type: LSTM
+enc_layers: 2
+dec_layers: 2
+rnn_size: 512
+word_vec_size: 256
+global_attention: general
+dropout: 0.3
+max_grad_norm: 2
+# (input feeding is ON by default for RNN decoder)
+
+# token batching
+batch_type: tokens
+batch_size: 2048
+accum_count: 2
+valid_batch_size: 1024
+normalization: tokens
+
+# long caps (SPM already subwords)
+src_seq_length: 1000
+tgt_seq_length: 1000
+
+# optimizer
+optim: adam
+learning_rate: 0.001
+
+# dataloader workers
+num_workers: 2

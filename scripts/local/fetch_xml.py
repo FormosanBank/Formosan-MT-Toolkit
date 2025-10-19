@@ -2,9 +2,15 @@
 """
 STEP 1: 
 
-Harvest every XML file in every repo of an organisation whose
-<TEXT xml:lang="…"> == src_lang  (and, optionally, whose
-<TRANSL xml:lang="…"> == tgt_lang).
+Harvest XML files from FormosanBank repositories.
+
+Two modes:
+----------
+1. Default mode: Searches through all repos in the FormosanBank org for files in Final_XML/ folders
+2. Public release mode (--public): Only looks in FormosanBank/FormosanBank/Corpora/*/XML/ structure
+
+The script filters XML files whose <TEXT xml:lang="…"> == src_lang 
+(and, optionally, whose <TRANSL xml:lang="…"> == tgt_lang).
 
 NOTE: Please do not set the target lang as currently target language tags
 are not standardized across the XML files. Simply set the source language and 
@@ -12,8 +18,13 @@ make_corpus.py will take care of the rest after.
 
 Usage examples
 --------------
+# Default mode (all repos, Final_XML folders)
 $ python fetch_xml.py --src-lang ami
 $ python fetch_xml.py --src-lang pwn
+
+# Public release mode (only FormosanBank/FormosanBank/Corpora/*/XML/)
+$ python fetch_xml.py --src-lang ami --public
+$ python fetch_xml.py --src-lang pwn --public --tgt-lang zh
 """
 from __future__ import annotations
 
@@ -184,6 +195,11 @@ def main():
     parser.add_argument(
         "--out-dir", help="where to store the files (default: downloaded_{src_lang})"
     )
+    parser.add_argument(
+        "--public", 
+        action="store_true",
+        help="Use public release structure: only look in FormosanBank/FormosanBank/Corpora/*/XML/"
+    )
     args = parser.parse_args()
 
     if not os.getenv("GITHUB_TOKEN"):
@@ -201,8 +217,13 @@ def main():
         equivalent_codes = get_equivalent_lang_codes(args.tgt_lang.lower())
         print(f"🔍  Target language '{args.tgt_lang}' will match: {sorted(equivalent_codes)}")
 
-    repos = list(get_repos(args.org))
-    print(f"Found {len(repos)} repos in {args.org}")
+    # Determine which repos to process based on --public flag
+    if args.public:
+        repos = ["FormosanBank"]
+        print(f"🌐  Public release mode: only processing FormosanBank/FormosanBank/Corpora/*/XML/")
+    else:
+        repos = list(get_repos(args.org))
+        print(f"Found {len(repos)} repos in {args.org}")
 
     with fut.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
@@ -217,13 +238,26 @@ def main():
                     continue
                 raise
 
-            xml_blobs = [
-                i
-                for i in tree
-                if i["type"] == "blob"
-                and i["path"].startswith("Final_XML/")
-                and i["path"].lower().endswith(".xml")
-            ]
+            # Filter XML files based on mode
+            if args.public:
+                # Public release: look for Corpora/*/XML/*.xml pattern
+                xml_blobs = [
+                    i
+                    for i in tree
+                    if i["type"] == "blob"
+                    and i["path"].startswith("Corpora/")
+                    and "/XML/" in i["path"]
+                    and i["path"].lower().endswith(".xml")
+                ]
+            else:
+                # Default: look for Final_XML/*.xml pattern
+                xml_blobs = [
+                    i
+                    for i in tree
+                    if i["type"] == "blob"
+                    and i["path"].startswith("Final_XML/")
+                    and i["path"].lower().endswith(".xml")
+                ]
 
 
             for item in xml_blobs:

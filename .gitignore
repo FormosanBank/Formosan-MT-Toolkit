@@ -3,3 +3,4 @@
 downloaded_*
 .venv/
 scripts/.formosan_qc_scripts/
+bash/

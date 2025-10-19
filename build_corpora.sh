@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# NOTE on Seediq/Truku:
-# Both Seediq and Truku use ISO 639-3 code 'trv'. To avoid collisions
-# (same download dir/output names), this script runs TRV ONCE.
-# If you need separate labeling later, we can post-process or adjust the tools.
+# BIG HARNESS THAT RUNS THROUGH ALL LANGUAGES
+# 1. FETCH XML
+# 2. CLEAN XML
+# 3. MAKE CORPUS (TARGET: CHINESE)
+# 4. MAKE CORPUS (TARGET: ENGLISH)
+# 5. FILTER AND SPLIT CORPUS (FORMOSAN <-> CHINESE)
+# 6. FILTER AND SPLIT CORPUS (FORMOSAN <-> ENGLISH)
 
 # Pick a Python executable
 if command -v python >/dev/null 2>&1; then PY=python
@@ -43,7 +46,7 @@ run_for_lang() {
 
   # 1) fetch
   echo "[1/4] Fetching XML for ${code}..."
-  "$PY" scripts/local/fetch_xml.py --src-lang "$code"
+  "$PY" scripts/local/fetch_xml.py --src-lang "$code" --public
 
   # 2) clean
   echo "[2/4] Cleaning XML for ${code}..."
@@ -62,11 +65,11 @@ run_for_lang() {
 
   # 5) filter and split corpus for MT training (formosan <-> chinese)
   echo "[5/6] Filtering and splitting Chinese corpus for MT training for ${code}..."
-  "$PY" scripts/andromeda/filter_split_corpus.py --input "raw_corpora/${code}_zh.csv" --output "processed_corpora/${code}_zh_processed.csv" --workers 32
+  "$PY" scripts/local/filter_split_corpus.py --input "raw_corpora/${code}_zh.csv" --output "processed_corpora/${code}_zh_processed.csv" --workers 32
 
   # 6) filter and split corpus for MT training (formosan <-> english)
   echo "[6/6] Filtering and splitting English corpus for MT training for ${code}..."
-  "$PY" scripts/andromeda/filter_split_corpus.py --input "raw_corpora/${code}_en.csv" --output "processed_corpora/${code}_en_processed.csv" --workers 32
+  "$PY" scripts/local/filter_split_corpus.py --input "raw_corpora/${code}_en.csv" --output "processed_corpora/${code}_en_processed.csv" --workers 32
 }
 
 main() {

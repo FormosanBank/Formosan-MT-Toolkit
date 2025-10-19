@@ -257,7 +257,8 @@ def _encode_pair_batch(
     """
     Robust NLLB batch encoding:
       - Set src_lang for inputs
-      - Manually encode targets (no LID prefix for labels)
+      - Encode targets WITHOUT any language token on labels
+      - Explicitly append EOS to each target label sequence
       - Disable token_type_ids everywhere to avoid None in pad()
     """
     # defensively coerce to str
@@ -266,7 +267,7 @@ def _encode_pair_batch(
 
     tokenizer.src_lang = src_code
 
-    # Inputs
+    # Inputs (encoder side)
     enc = tokenizer(
         src_texts,
         return_tensors="pt",
@@ -277,7 +278,7 @@ def _encode_pair_batch(
         return_token_type_ids=False,
     )
 
-    # Targets (labels) – no language prefix for NLLB
+    # Targets (decoder labels) – do NOT add language code; DO add EOS
     lab = tokenizer(
         tgt_texts,
         return_tensors="pt",
@@ -286,17 +287,32 @@ def _encode_pair_batch(
         max_length=max_length,
         return_attention_mask=False,
         return_token_type_ids=False,
-        add_special_tokens=False,   # <<< important
+        add_special_tokens=False,
     )
 
+    labels = lab["input_ids"]  # CPU for now
+    pad_id = tokenizer.pad_token_id
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        raise ValueError("Tokenizer has no eos_token_id; EOS is required for seq2seq training.")
 
+    # Put EOS right after the last non-pad token (or at last slot if full)
+    with torch.no_grad():
+        lengths = (labels != pad_id).sum(dim=1)          # [B]
+        L = labels.size(1)
+        pos = torch.clamp(lengths, max=L - 1)            # [B]
+        rows = torch.arange(labels.size(0), dtype=torch.long)
+        labels[rows, pos] = eos_id
+
+    # Move to device + mask pads for loss
     input_ids = enc["input_ids"].to(device)
     attn_mask = enc["attention_mask"].to(device)
-
-    labels = lab["input_ids"].to(device)
-    labels[labels == tokenizer.pad_token_id] = -100
+    labels = labels.to(device)
+    labels[labels == pad_id] = -100
 
     return input_ids, attn_mask, labels
+
+
 
 
 def training_step(
@@ -309,21 +325,34 @@ def training_step(
     device: torch.device,
     use_amp: bool,
     scaler: Optional[GradScaler],
+    forced_bos_id: int,
 ):
     input_ids, attn_mask, labels = _encode_pair_batch(
         tokenizer, src_texts, tgt_texts, src_code, max_length, device
     )
+    # build decoder_input_ids: [forced_bos_id] + labels (shifted right)
+    dec_in = labels.clone()
+    pad = tokenizer.pad_token_id
+    dec_in = dec_in.masked_fill(dec_in == -100, pad)      # restore pads for shifting
+    bos_col = torch.full((dec_in.size(0), 1), forced_bos_id, device=device, dtype=dec_in.dtype)
+    decoder_input_ids = torch.cat([bos_col, dec_in[:, :-1]], dim=1)
+
     if use_amp:
-        if _AMP_NEW:
-            with autocast(device_type=device.type):
-                loss = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels).loss
-        else:
-            with autocast():
-                loss = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels).loss
-        assert scaler is not None
+        with autocast(device_type=device.type):
+            loss = model(
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                decoder_input_ids=decoder_input_ids,
+                labels=labels
+            ).loss
         scaler.scale(loss).backward()
     else:
-        loss = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels).loss
+        loss = model(
+            input_ids=input_ids,
+            attention_mask=attn_mask,
+            decoder_input_ids=decoder_input_ids,
+            labels=labels
+        ).loss
         loss.backward()
     return loss.detach()
 
@@ -412,6 +441,7 @@ def tiny_eval(
             # Encode targets as labels (no LID token prepended for labels)
             # targets (labels) – do NOT include any language code
             # Targets (labels) – do NOT add special tokens/LID to labels
+            # Encode targets as labels (no LID on labels; add EOS explicitly)
             lab = tokenizer(
                 batch_tgt,
                 return_tensors="pt",
@@ -420,10 +450,25 @@ def tiny_eval(
                 max_length=max_length,
                 return_attention_mask=False,
                 return_token_type_ids=False,
-                add_special_tokens=False,  # <<< add this
+                add_special_tokens=False,
             )
-            labels = lab["input_ids"].to(device)
-            labels[labels == tokenizer.pad_token_id] = -100
+
+            labels = lab["input_ids"]
+            pad_id = tokenizer.pad_token_id
+            eos_id = tokenizer.eos_token_id
+            if eos_id is None:
+                raise ValueError("Tokenizer has no eos_token_id; EOS is required for seq2seq evaluation.")
+
+            with torch.no_grad():
+                lengths = (labels != pad_id).sum(dim=1)
+                L = labels.size(1)
+                pos = torch.clamp(lengths, max=L - 1)
+                rows = torch.arange(labels.size(0), dtype=torch.long)
+                labels[rows, pos] = eos_id
+
+            labels = labels.to(device)
+            labels[labels == pad_id] = -100
+
 
             non_pad = (labels != -100).sum().item()
 
@@ -560,7 +605,7 @@ def main():
     assert len(df_train), "No training data."
 
     # Tokenizer + model (already customized by your setup script)
-    tokenizer, model = load_tok_model(args.tokenizer, args.model, str(device))
+    tokenizer, model = load_tok_model(args.tokenizer, args.model, device)
     restore_custom_lang_ids(tokenizer, [src_code, tgt_code])
 
     # Run directory (NEW: always a fresh dir)
@@ -601,6 +646,10 @@ def main():
 
     losses: List[float] = []
     pbar = trange(args.steps, desc="Training", dynamic_ncols=True)
+    
+    # before the loop
+    src_lang_id = get_lang_id(tokenizer, src_code)
+    tgt_lang_id = get_lang_id(tokenizer, tgt_code)
 
     for step in pbar:
         try:
@@ -610,18 +659,21 @@ def main():
                 src_texts = df_train.iloc[idx][s_col].astype(str).tolist()
                 tgt_texts = df_train.iloc[idx][t_col].astype(str).tolist()
                 s_code = src_code
+                forced_id = tgt_lang_id
                 dir_tag = "src->tgt"
             else:
                 # tgt -> src
                 src_texts = df_train.iloc[idx][t_col].astype(str).tolist()
                 tgt_texts = df_train.iloc[idx][s_col].astype(str).tolist()
                 s_code = tgt_code
+                forced_id = src_lang_id
                 dir_tag = "tgt->src"
 
             loss = training_step(
                 tokenizer, model, src_texts, tgt_texts,
                 s_code, args.max_length, device,
-                use_amp=scaler.is_enabled(), scaler=scaler
+                use_amp=scaler.is_enabled(), scaler=scaler,
+                forced_bos_id=forced_id
             )
             losses.append(loss.item())
 
