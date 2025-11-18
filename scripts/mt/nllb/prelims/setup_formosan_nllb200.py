@@ -21,15 +21,15 @@ Robust NLLB-200-distilled-600M tokenizer/model setup for Formosan languages + zh
 Usage (examples)
 ---------------
 # Fast path: add frequent unknown characters only (no SPM surgery)
-python setup_nllb200_formosan.py \
+python setup_formosan_nllb200.py \
   --input big_corpus_combined.csv \
   --output-prefix formosan_multilingual_nllb \
   --add-mode chars --min-char-frequency 3 \
   --run-eval --samples-per-lang 1
 
 # SPM path (recommended for zh_Hant): retrain/merge sentencepiece for cleaner segmentation
-python setup_nllb200_formosan.py \
-  --input big_corpus_combined.csv \
+python setup_formosan_nllb200.py \
+  --input big_corpus_zh.csv \
   --output-prefix formosan_multilingual_nllb \
   --add-mode spm --spm-vocab 16384 --min-char-frequency 3 \
   --run-eval --samples-per-lang 1
