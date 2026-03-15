@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluate an NLLB-200 fine-tuned model on Formosan↔Chinese (or EN/ZH) test splits.
+Evaluate an NLLB-200 fine-tuned model on Formosan↔Chinese/English (EN/ZH) test splits.
 
 Modes
 -----
@@ -23,15 +23,19 @@ Modes
 
 2) Multilingual mode (for new corpus):
    CSV shape (required):
-     lang_code, formosan_sentence, chinese_sentence, source, dialect, split
+     lang_code, formosan_sentence, chinese_sentence OR english_sentence, source, dialect, split
 
    - 'lang_code' is 3-letter like 'ami', 'bnn', ...
    - 'split' values: train / valid|val / test (we only use 'test')
+   - Target column is chosen via --tgt-lang {chinese,english}:
+        chinese -> uses 'chinese_sentence'
+        english -> uses 'english_sentence'
    - We compute BLEU/chrF++ per language and global.
 
-   Example:
+   Example (Formosan↔Chinese):
    python eval_formosan_nllb.py \
      --multilingual \
+     --tgt-lang chinese \
      --tokenizer formosan_multilingual_nllb_tokenizer \
      --model     formosan_multilingual_nllb_model \
      --input     big_corpus_zh.csv \
@@ -39,7 +43,20 @@ Modes
      --max-new-tokens 64 --min-new-tokens 2 \
      --no-repeat-ngram-size 3 --repetition-penalty 1.1 --length-penalty 1.05 \
      --detok-latin --bleu-lowercase \
-     --csv-out runs/multilingual_eval.csv --save-json runs/multilingual_eval.json
+     --csv-out runs/multilingual_zh_eval.csv --save-json runs/multilingual_zh_eval.json
+
+   Example (Formosan↔English):
+   python eval_formosan_nllb.py \
+     --multilingual \
+     --tgt-lang english \
+     --tokenizer formosan_multilingual_nllb_tokenizer \
+     --model     formosan_multilingual_nllb_model \
+     --input     big_corpus_en.csv \
+     --batch-size 16 --max-length 192 --beam 5 \
+     --max-new-tokens 64 --min-new-tokens 2 \
+     --no-repeat-ngram-size 3 --repetition-penalty 1.1 --length-penalty 1.05 \
+     --detok-latin --bleu-lowercase \
+     --csv-out runs/multilingual_en_eval.csv --save-json runs/multilingual_en_eval.json
 """
 from __future__ import annotations
 
@@ -61,10 +78,12 @@ try:
     _TQDM_AVAILABLE = True
 except Exception:
     _TQDM_AVAILABLE = False
+
     class _DummyPB:
         def __init__(self, *a, **k): pass
         def update(self, *a, **k): pass
         def close(self): pass
+
     def tqdm(*a, **k):  # type: ignore
         return _DummyPB()
 
@@ -100,11 +119,12 @@ CODE_TO_LID: Dict[str, str] = {
     "szy": "szy_Latn", "tao": "tao_Latn", "tay": "tay_Latn", "trv": "trv_Latn",
     "tsu": "tsu_Latn", "xnb": "xnb_Latn", "xsy": "xsy_Latn",
 
-    # chinese (for new multilingual corpus)
+    # chinese/english (for multilingual corpus)
     "chinese": "zho_Hant",
+    "english": "eng_Latn",
 
     # Targets / general
-    "en":  "eng_Latn", "eng": "eng_Latn", "english": "eng_Latn",
+    "en":  "eng_Latn", "eng": "eng_Latn",
     # Default Chinese to Traditional; override with --src-lid/--tgt-lid for Simplified
     "zh":  "zho_Hant", "zho": "zho_Hant", "zh_hant": "zho_Hant", "zh_trad": "zho_Hant",
     "zh_hans": "zho_Hans", "zh_cn": "zho_Hans", "zh_simp": "zho_Hans",
@@ -133,9 +153,11 @@ def _normalize_list_like_train(texts: List[str]) -> List[str]:
         out.append(s)
     return out
 
+
 def _bleu_tokenizer_for_lid(lid: str) -> str:
     lid = (lid or "").lower()
     return "zh" if lid.startswith("zho_") or lid in {"zh", "zho", "zh_hans", "zh_hant"} else "13a"
+
 
 def lid_from_code(code: str) -> str:
     """
@@ -152,6 +174,7 @@ def lid_from_code(code: str) -> str:
             f"--src-lid/--tgt-lid in single-pair mode."
         )
     return CODE_TO_LID[key]
+
 
 def load_tok_model(tok_dir: str, model_dir: str, device: torch.device):
     tok = NllbTokenizer.from_pretrained(tok_dir)
@@ -213,6 +236,7 @@ def pick_columns(df: pd.DataFrame, src_col: Optional[str], tgt_col: Optional[str
         raise SystemExit("❌ Need at least two text columns (plus 'split').")
     return cols[0], cols[1]
 
+
 def load_test_rows(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "split" not in df.columns:
@@ -222,9 +246,11 @@ def load_test_rows(csv_path: Path) -> pd.DataFrame:
         raise SystemExit("❌ No rows with split == 'test'.")
     return test.reset_index(drop=True)
 
+
 def _looks_tokenized_latin(s: str) -> bool:
     # Common markers that SacreBLEU warns about (spaces before punctuation, ``/'' quotes, etc.)
     return bool(re.search(r"\s[.,!?;:]", s) or "``" in s or "''" in s)
+
 
 def maybe_detok_latin(texts: List[str]) -> List[str]:
     """
@@ -250,6 +276,7 @@ def maybe_detok_latin(texts: List[str]) -> List[str]:
         else:
             out.append(t)
     return out
+
 
 @torch.no_grad()
 def batched_generate(
@@ -333,11 +360,11 @@ def batched_generate(
 def score_all(sys_out: List[str], ref: List[str], bleu_tok: str = "13a", lowercase: bool = False) -> Dict[str, float]:
     bleu_metric = BLEU(tokenize=bleu_tok, effective_order=True, lowercase=lowercase)
     chrf_metric = CHRF()
-    ter_metric  = TER()
+    ter_metric = TER()
     return {
-        "BLEU":  float(bleu_metric.corpus_score(sys_out, [ref]).score),
+        "BLEU": float(bleu_metric.corpus_score(sys_out, [ref]).score),
         "chrF2": float(chrf_metric.corpus_score(sys_out, [ref]).score),
-        "TER":   float(ter_metric.corpus_score(sys_out, [ref]).score),
+        "TER": float(ter_metric.corpus_score(sys_out, [ref]).score),
     }
 
 
@@ -351,6 +378,7 @@ def pretty_print(title: str, metrics: Dict[str, float], n: int, examples: List[T
     for s, r, h in examples[:3]:
         print(f"SRC: {s}\nREF: {r}\nHYP: {h}\n")
 
+
 # ------------------------- Multilingual eval (new) -------------------------
 def eval_multilingual(
     args,
@@ -360,22 +388,40 @@ def eval_multilingual(
 ):
     """
     New mode for big multilingual corpus with columns:
-      lang_code, formosan_sentence, chinese_sentence, source, dialect, split
+      lang_code, formosan_sentence, chinese_sentence OR english_sentence, source, dialect, split
 
     - Evaluates all languages in 'lang_code' that have split == 'test'.
+    - Target column chosen via args.tgt_lang in {'chinese','english'}.
     - Computes metrics per language and global (micro-averaged over sentences).
     """
     df = pd.read_csv(args.input)
-    required = ["lang_code", "formosan_sentence", "chinese_sentence", "split"]
+
+    tgt_lang = getattr(args, "tgt_lang", "chinese").lower()
+    if tgt_lang == "chinese":
+        tgt_col = "chinese_sentence"
+        tgt_label = "zh"
+        default_tgt_code = "zh"
+    elif tgt_lang == "english":
+        tgt_col = "english_sentence"
+        tgt_label = "en"
+        default_tgt_code = "en"
+    else:
+        raise SystemExit(
+            f"❌ Multilingual mode: --tgt-lang must be 'chinese' or 'english', got {tgt_lang!r}"
+        )
+
+    required = ["lang_code", "formosan_sentence", tgt_col, "split"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise SystemExit(f"❌ Multilingual mode: CSV is missing required columns: {missing}")
 
-    # Filter to test split
+    # Filter to test split and rows with both sides
     df = df[df["split"].astype(str).str.lower().eq("test")].copy()
-    df = df[~df["formosan_sentence"].isna() & ~df["chinese_sentence"].isna()]
+    df = df[~df["formosan_sentence"].isna() & ~df[tgt_col].isna()]
     if df.empty:
-        raise SystemExit("❌ Multilingual mode: no test rows with both formosan_sentence and chinese_sentence.")
+        raise SystemExit(
+            f"❌ Multilingual mode: no test rows with both formosan_sentence and {tgt_col}."
+        )
 
     # Normalize lang_code strings
     df["lang_code_norm"] = df["lang_code"].astype(str).str.strip().str.lower()
@@ -394,16 +440,16 @@ def eval_multilingual(
         raise SystemExit("❌ Multilingual mode: no supported languages found in lang_code.")
 
     # Global aggregators (after normalization/detok) for micro-averaged metrics
-    global_ref_f2z: List[str] = []
-    global_hyp_f2z: List[str] = []
-    global_ref_z2f: List[str] = []
-    global_hyp_z2f: List[str] = []
+    global_ref_src2tgt: List[str] = []
+    global_hyp_src2tgt: List[str] = []
+    global_ref_tgt2src: List[str] = []
+    global_hyp_tgt2src: List[str] = []
 
     # For optional CSV export
     csv_records: List[Dict[str, str]] = []
 
-    # Chinese LID (same for all langs)
-    tgt_lid_global = args.tgt_lid or lid_from_code("zh")
+    # Target LID (zh or en) same for all langs
+    tgt_lid_global = args.tgt_lid or lid_from_code(default_tgt_code)
     ensure_lang_token(tokenizer, tgt_lid_global)
 
     metrics_by_lang: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -421,9 +467,9 @@ def eval_multilingual(
         src_lid = lid_from_code(lc)
         ensure_lang_token(tokenizer, src_lid)
 
-        # Formosan (src) + Chinese (tgt)
+        # Formosan (src) + target (tgt: Chinese or English)
         src_texts = sub["formosan_sentence"].astype(str).tolist()
-        tgt_texts = sub["chinese_sentence"].astype(str).tolist()
+        tgt_texts = sub[tgt_col].astype(str).tolist()
 
         # Normalize like training if requested
         if args.normalize:
@@ -442,33 +488,47 @@ def eval_multilingual(
             "length_penalty": args.length_penalty,
         }
 
-        # Formosan -> Chinese
+        # Formosan -> target
         sys_out_1 = batched_generate(
-            tokenizer, model, src_texts, src_lid, tgt_lid_global, device,
-            enc_max_length=args.max_length, num_beams=args.beam,
-            batch_size=args.batch_size, gen_kwargs=gen_kwargs,
-            desc=f"{lc}->zh"
+            tokenizer,
+            model,
+            src_texts,
+            src_lid,
+            tgt_lid_global,
+            device,
+            enc_max_length=args.max_length,
+            num_beams=args.beam,
+            batch_size=args.batch_size,
+            gen_kwargs=gen_kwargs,
+            desc=f"{lc}->{tgt_label}",
         )
-        # Chinese -> Formosan
+        # Target -> Formosan
         sys_out_2 = batched_generate(
-            tokenizer, model, tgt_texts, tgt_lid_global, src_lid, device,
-            enc_max_length=args.max_length, num_beams=args.beam,
-            batch_size=args.batch_size, gen_kwargs=gen_kwargs,
-            desc=f"zh->{lc}"
+            tokenizer,
+            model,
+            tgt_texts,
+            tgt_lid_global,
+            src_lid,
+            device,
+            enc_max_length=args.max_length,
+            num_beams=args.beam,
+            batch_size=args.batch_size,
+            gen_kwargs=gen_kwargs,
+            desc=f"{tgt_label}->{lc}",
         )
 
         # Prepare refs/hyps for metrics
-        ref1, hyp1 = tgt_texts, sys_out_1  # Formosan -> Chinese
-        ref2, hyp2 = src_texts, sys_out_2  # Chinese -> Formosan
+        ref1, hyp1 = tgt_texts, sys_out_1  # Formosan -> target
+        ref2, hyp2 = src_texts, sys_out_2  # Target -> Formosan
 
         # Optional: normalize hyps too
         if args.normalize:
             hyp1 = _normalize_list_like_train(hyp1)
             hyp2 = _normalize_list_like_train(hyp2)
 
-        # Optional detok for Latin scripts (never for Chinese)
+        # Optional detok for Latin scripts
         if args.detok_latin:
-            # direction 1 target is Chinese -> skip unless you override tgt_lid_global to non-zh
+            # direction 1 target is zh/en; detok only if non-Chinese (i.e., English)
             if not tgt_lid_global.startswith("zho_"):
                 ref1 = maybe_detok_latin(ref1)
                 hyp1 = maybe_detok_latin(hyp1)
@@ -486,64 +546,71 @@ def eval_multilingual(
         # Examples (use *pre*-normalized src/tgt + raw sys_out for readability)
         ex_1 = list(zip(src_texts, tgt_texts, sys_out_1))
         ex_2 = list(zip(tgt_texts, src_texts, sys_out_2))
-        pretty_print(f"{lc} → zh", metrics_1, n, ex_1)
-        pretty_print(f"zh → {lc}", metrics_2, n, ex_2)
+        pretty_print(f"{lc} → {tgt_label}", metrics_1, n, ex_1)
+        pretty_print(f"{tgt_label} → {lc}", metrics_2, n, ex_2)
 
-        metrics_by_lang[lc] = {"src2zh": metrics_1, "zh2src": metrics_2}
+        metrics_by_lang[lc] = {
+            f"src2{tgt_label}": metrics_1,
+            f"{tgt_label}2src": metrics_2,
+        }
         counts_by_lang[lc] = n
 
         # Extend global pools (after scoring-prep normalization/detok)
-        global_ref_f2z.extend(ref1)
-        global_hyp_f2z.extend(hyp1)
-        global_ref_z2f.extend(ref2)
-        global_hyp_z2f.extend(hyp2)
+        global_ref_src2tgt.extend(ref1)
+        global_hyp_src2tgt.extend(hyp1)
+        global_ref_tgt2src.extend(ref2)
+        global_hyp_tgt2src.extend(hyp2)
 
         # CSV rows (one row per example)
         if args.csv_out:
-            for s_f, s_zh, h_zh, h_f in zip(src_texts, tgt_texts, sys_out_1, sys_out_2):
+            for s_f, s_tgt, h_tgt, h_f in zip(src_texts, tgt_texts, sys_out_1, sys_out_2):
                 csv_records.append({
                     "lang_code": lc,
                     "src_formosan": s_f,
-                    "ref_chinese": s_zh,
-                    "hyp_chinese": h_zh,
+                    f"ref_{tgt_label}": s_tgt,
+                    f"hyp_{tgt_label}": h_tgt,
                     "hyp_formosan": h_f,
                 })
 
     # Global micro-averaged metrics over all sentences
-    if global_ref_f2z:
-        bleu_tok_global_f2z = _bleu_tokenizer_for_lid(tgt_lid_global)  # 'zh'
-        bleu_tok_global_z2f = "13a"  # all Formosan targets are Latin
-        global_metrics_f2z = score_all(
-            global_hyp_f2z, global_ref_f2z,
-            bleu_tok=bleu_tok_global_f2z,
+    if global_ref_src2tgt:
+        bleu_tok_global_src2tgt = _bleu_tokenizer_for_lid(tgt_lid_global)
+        bleu_tok_global_tgt2src = "13a"  # all Formosan targets are Latin
+        global_metrics_src2tgt = score_all(
+            global_hyp_src2tgt,
+            global_ref_src2tgt,
+            bleu_tok=bleu_tok_global_src2tgt,
             lowercase=args.bleu_lowercase,
         )
-        global_metrics_z2f = score_all(
-            global_hyp_z2f, global_ref_z2f,
-            bleu_tok=bleu_tok_global_z2f,
+        global_metrics_tgt2src = score_all(
+            global_hyp_tgt2src,
+            global_ref_tgt2src,
+            bleu_tok=bleu_tok_global_tgt2src,
             lowercase=args.bleu_lowercase,
         )
 
         print("\n================ Global (all languages combined) ================")
-        print(f"Total sentences (Formosan→zh): {len(global_ref_f2z)}")
-        print(f"BLEU:  {global_metrics_f2z['BLEU']:.2f}")
-        print(f"chrF2: {global_metrics_f2z['chrF2']:.2f}")
-        print(f"TER:   {global_metrics_f2z['TER']:.2f}")
+        print(f"Total sentences (Formosan→{tgt_label}): {len(global_ref_src2tgt)}")
+        print(f"BLEU:  {global_metrics_src2tgt['BLEU']:.2f}")
+        print(f"chrF2: {global_metrics_src2tgt['chrF2']:.2f}")
+        print(f"TER:   {global_metrics_src2tgt['TER']:.2f}")
 
-        print(f"\nTotal sentences (zh→Formosan): {len(global_ref_z2f)}")
-        print(f"BLEU:  {global_metrics_z2f['BLEU']:.2f}")
-        print(f"chrF2: {global_metrics_z2f['chrF2']:.2f}")
-        print(f"TER:   {global_metrics_z2f['TER']:.2f}")
+        print(f"\nTotal sentences ({tgt_label}→Formosan): {len(global_ref_tgt2src)}")
+        print(f"BLEU:  {global_metrics_tgt2src['BLEU']:.2f}")
+        print(f"chrF2: {global_metrics_tgt2src['chrF2']:.2f}")
+        print(f"TER:   {global_metrics_tgt2src['TER']:.2f}")
         print("=================================================================\n")
     else:
-        global_metrics_f2z = {}
-        global_metrics_z2f = {}
+        global_metrics_src2tgt = {}
+        global_metrics_tgt2src = {}
 
     # Save JSON (per-language + global)
     if args.save_json:
         out = {
             "mode": "multilingual",
-            "n_examples_total": int(len(global_ref_f2z)),
+            "target_language": tgt_lang,
+            "target_label": tgt_label,
+            "n_examples_total": int(len(global_ref_src2tgt)),
             "settings": {
                 "batch_size": args.batch_size,
                 "enc_max_length": args.max_length,
@@ -560,8 +627,8 @@ def eval_multilingual(
                 "normalize": args.normalize,
             },
             "global_metrics": {
-                "Formosan->zh": global_metrics_f2z,
-                "zh->Formosan": global_metrics_z2f,
+                f"Formosan->{tgt_label}": global_metrics_src2tgt,
+                f"{tgt_label}->Formosan": global_metrics_tgt2src,
             },
             "per_language": {
                 lc: {
@@ -585,37 +652,73 @@ def eval_multilingual(
         df_out.to_csv(args.csv_out, index=False)
         print(f"💾 Saved multilingual predictions CSV to: {args.csv_out}")
 
+
 # ------------------------------- main --------------------------------------
 def main():
     ap = argparse.ArgumentParser()
 
     # Mode switch
-    ap.add_argument("--multilingual", action="store_true",
-                    help="If set, interpret CSV as multilingual corpus with "
-                         "lang_code, formosan_sentence, chinese_sentence, split.")
+    ap.add_argument(
+        "--multilingual",
+        action="store_true",
+        help=(
+            "If set, interpret CSV as multilingual corpus with "
+            "lang_code, formosan_sentence, <target>_sentence, split; "
+            "<target> is chosen via --tgt-lang {chinese,english}."
+        ),
+    )
+
+    # Multilingual target language (for corpus column choice + LID)
+    ap.add_argument(
+        "--tgt-lang",
+        default="chinese",
+        help="(Multilingual) target language: 'chinese' (uses chinese_sentence) or 'english' (uses english_sentence).",
+    )
 
     # Model paths
     ap.add_argument("--tokenizer", required=True, help="Path to tokenizer dir")
     ap.add_argument("--model", required=True, help="Path to model dir")
-    ap.add_argument("--input", type=Path, required=True,
-                    help="CSV with either single-pair (old) or multilingual (new) format")
+    ap.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="CSV with either single-pair (old) or multilingual (new) format",
+    )
 
     # Single-pair-only options (ignored in multilingual mode)
-    ap.add_argument("--src-col", default=None,
-                    help="(Single-pair mode) Name of source text column (e.g. ami)")
-    ap.add_argument("--tgt-col", default=None,
-                    help="(Single-pair mode) Name of target text column (e.g. en)")
+    ap.add_argument(
+        "--src-col",
+        default=None,
+        help="(Single-pair mode) Name of source text column (e.g. ami)",
+    )
+    ap.add_argument(
+        "--tgt-col",
+        default=None,
+        help="(Single-pair mode) Name of target text column (e.g. en)",
+    )
 
     # Optional explicit LIDs override for single-pair (multilingual uses CODE_TO_LID)
-    ap.add_argument("--src-lid", default=None,
-                    help="(Single-pair) Override NLLB LID, e.g. ami_Latn")
-    ap.add_argument("--tgt-lid", default=None,
-                    help="Override NLLB LID, e.g. zho_Hans (used globally in multilingual mode)")
+    ap.add_argument(
+        "--src-lid",
+        default=None,
+        help="(Single-pair) Override NLLB LID, e.g. ami_Latn",
+    )
+    ap.add_argument(
+        "--tgt-lid",
+        default=None,
+        help="Override NLLB LID, e.g. zho_Hans (used globally in multilingual mode)",
+    )
 
     # Limit
-    ap.add_argument("--limit", type=int, default=None,
-                    help="Single-pair: limit total test examples. "
-                         "Multilingual: limit per language.")
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Single-pair: limit total test examples. "
+            "Multilingual: limit per language."
+        ),
+    )
 
     # Generation / batching
     ap.add_argument("--batch-size", type=int, default=16)
@@ -630,14 +733,20 @@ def main():
     ap.add_argument("--length-penalty", type=float, default=0.9)
 
     # Scoring options
-    ap.add_argument("--bleu-lowercase", action="store_true",
-                    help="Compute BLEU in lowercase (for noisy casing)")
-    ap.add_argument("--detok-latin", action="store_true",
-                    help="Detokenize Latin-script refs/hyps before scoring (when CSV looks Moses-tokenized)")
+    ap.add_argument(
+        "--bleu-lowercase",
+        action="store_true",
+        help="Compute BLEU in lowercase (for noisy casing)",
+    )
+    ap.add_argument(
+        "--detok-latin",
+        action="store_true",
+        help="Detokenize Latin-script refs/hyps before scoring (when CSV looks Moses-tokenized)",
+    )
 
     # Device
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    
+
     # Normalization toggle
     ap.add_argument("--normalize", dest="normalize", action="store_true")
     ap.add_argument("--no-normalize", dest="normalize", action="store_false")
@@ -645,15 +754,20 @@ def main():
 
     # Outputs
     ap.add_argument("--save-json", default=None, help="Path to save metrics+samples JSON")
-    ap.add_argument("--csv-out", default=None,
-                    help="Optional CSV with src/ref/hyp. "
-                         "Single-pair: one pair. Multilingual: all languages.")
+    ap.add_argument(
+        "--csv-out",
+        default=None,
+        help="Optional CSV with src/ref/hyp. Single-pair: one pair. Multilingual: all languages.",
+    )
 
     args = ap.parse_args()
 
     # Device
-    dev = ("cuda" if (args.device == "auto" and torch.cuda.is_available()) else
-           (args.device if args.device != "auto" else "cpu"))
+    dev = (
+        "cuda"
+        if (args.device == "auto" and torch.cuda.is_available())
+        else (args.device if args.device != "auto" else "cpu")
+    )
     device = torch.device(dev)
     print(f"Device: {device}")
 
@@ -709,14 +823,30 @@ def main():
 
     # Single-pair generation both directions
     sys_out_1 = batched_generate(
-        tokenizer, model, src_texts, src_lid, tgt_lid, device,
-        enc_max_length=args.max_length, num_beams=args.beam,
-        batch_size=args.batch_size, gen_kwargs=gen_kwargs, desc=f"{src_col}->{tgt_col}"
+        tokenizer,
+        model,
+        src_texts,
+        src_lid,
+        tgt_lid,
+        device,
+        enc_max_length=args.max_length,
+        num_beams=args.beam,
+        batch_size=args.batch_size,
+        gen_kwargs=gen_kwargs,
+        desc=f"{src_col}->{tgt_col}",
     )
     sys_out_2 = batched_generate(
-        tokenizer, model, tgt_texts, tgt_lid, src_lid, device,
-        enc_max_length=args.max_length, num_beams=args.beam,
-        batch_size=args.batch_size, gen_kwargs=gen_kwargs, desc=f"{tgt_col}->{src_col}"
+        tokenizer,
+        model,
+        tgt_texts,
+        tgt_lid,
+        src_lid,
+        device,
+        enc_max_length=args.max_length,
+        num_beams=args.beam,
+        batch_size=args.batch_size,
+        gen_kwargs=gen_kwargs,
+        desc=f"{tgt_col}->{src_col}",
     )
 
     # Prepare refs/hyps for metrics
@@ -770,8 +900,14 @@ def main():
                 "detok_latin": args.detok_latin,
                 "normalize": args.normalize,
             },
-            "metrics": {f"{src_col}->{tgt_col}": metrics_1, f"{tgt_col}->{src_col}": metrics_2},
-            "examples": {f"{src_col}->{tgt_col}": ex_1[:10], f"{tgt_col}->{src_col}": ex_2[:10]},
+            "metrics": {
+                f"{src_col}->{tgt_col}": metrics_1,
+                f"{tgt_col}->{src_col}": metrics_2,
+            },
+            "examples": {
+                f"{src_col}->{tgt_col}": ex_1[:10],
+                f"{tgt_col}->{src_col}": ex_2[:10],
+            },
         }
         Path(os.path.dirname(args.save_json) or ".").mkdir(parents=True, exist_ok=True)
         with open(args.save_json, "w", encoding="utf-8") as f:
@@ -789,6 +925,7 @@ def main():
         Path(os.path.dirname(args.csv_out) or ".").mkdir(parents=True, exist_ok=True)
         df_out.to_csv(args.csv_out, index=False)
         print(f"💾 Saved predictions CSV to: {args.csv_out}")
+
 
 if __name__ == "__main__":
     main()

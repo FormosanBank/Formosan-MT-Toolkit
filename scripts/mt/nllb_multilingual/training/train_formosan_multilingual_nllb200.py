@@ -39,7 +39,7 @@ python train_formosan_multilingual_nllb200.py \
   --tgt-lang chinese \
   --tokenizer formosan_multilingual_nllb_tokenizer \
   --model     formosan_multilingual_nllb_model \
-  --input     big_corpus_zh.csv \
+  --input     big_corpus_en.csv \
   --temperature 5 \
   --steps 150000 --batch-size 8 \
   --save-interval 5000 --eval-interval 5000 --eval-samples 256 --normalize
@@ -449,19 +449,35 @@ def load_splits(csv_path: Path,
     tr = df.iloc[n_test + n_val:]
     return tr.reset_index(drop=True), va.reset_index(drop=True), te.reset_index(drop=True)
 
-def load_splits_multilingual(csv_path: Path,
-                             langs: List[str],
-                             seed: int = 42,
-                             make_val: float = 0.05,
-                             make_test: float = 0.05,
-                             normalize: bool = False) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
+def load_splits_multilingual(
+    csv_path: Path,
+    langs: List[str],
+    tgt_lang: str,
+    seed: int = 42,
+    make_val: float = 0.05,
+    make_test: float = 0.05,
+    normalize: bool = False,
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], str]:
     """
-    Returns dicts lang -> DataFrame with columns [formosan_sentence, chinese_sentence].
-    We keep only rows with both sides non-null for zh runs.
+    Returns dicts lang -> DataFrame with columns [formosan_sentence, <target_col>].
+
+    <target_col> is:
+      - 'chinese_sentence' when tgt_lang == 'chinese'
+      - 'english_sentence' when tgt_lang == 'english'
     """
     df = pd.read_csv(csv_path)
-    want_cols = ["lang_code", "formosan_sentence", "chinese_sentence", "split"]
-    missing = [c for c in ["lang_code","formosan_sentence","chinese_sentence"] if c not in df.columns]
+
+    tgt_lang_l = tgt_lang.lower()
+    if tgt_lang_l == "chinese":
+        tgt_col = "chinese_sentence"
+    elif tgt_lang_l == "english":
+        tgt_col = "english_sentence"
+    else:
+        sys.exit(f"Multilingual loader only supports tgt_lang in {{'chinese','english'}}, got '{tgt_lang}'.")
+
+    want_cols = ["lang_code", "formosan_sentence", tgt_col, "split"]
+    missing = [c for c in ["lang_code", "formosan_sentence", tgt_col] if c not in df.columns]
+
     if missing:
         sys.exit(f"CSV missing required columns: {missing}")
 
@@ -475,13 +491,13 @@ def load_splits_multilingual(csv_path: Path,
     df["canon_lang"] = df["lang_code"].map(canon)
     df = df[df["canon_lang"].isin(langs)].copy()
 
-    # Filter to rows that have zh targets for this stage
-    df = df[~df["formosan_sentence"].isna() & ~df["chinese_sentence"].isna()].copy()
+    # Filter to rows that have targets for this stage
+    df = df[~df["formosan_sentence"].isna() & ~df[tgt_col].isna()].copy()
 
     # Optional normalization
     if normalize:
         df["formosan_sentence"] = _normalize_series(df["formosan_sentence"], "formosan")
-        df["chinese_sentence"]  = _normalize_series(df["chinese_sentence"], "chinese")
+        df[tgt_col] = _normalize_series(df[tgt_col], tgt_lang_l)
 
     # Split per language
     train_by, val_by, test_by = {}, {}, {}
@@ -497,7 +513,7 @@ def load_splits_multilingual(csv_path: Path,
             te = sub.iloc[:n_test]; va = sub.iloc[n_test:n_test+n_val]; tr = sub.iloc[n_test+n_val:]
 
         # Keep only necessary columns
-        cols = ["formosan_sentence","chinese_sentence"]
+        cols = ["formosan_sentence", tgt_col]
         tr = tr[cols].dropna().reset_index(drop=True)
         va = va[cols].dropna().reset_index(drop=True)
         te = te[cols].dropna().reset_index(drop=True)
@@ -507,7 +523,7 @@ def load_splits_multilingual(csv_path: Path,
             val_by[L] = va
         if len(te):
             test_by[L] = te
-    return train_by, val_by, test_by
+    return train_by, val_by, test_by, tgt_col
 
 # --------------------------- multilingual eval wrapper ------------------------------
 @torch.no_grad()
@@ -517,19 +533,25 @@ def multilingual_eval(
     val_by_lang: Dict[str, pd.DataFrame],
     tgt_code: str,
     lang2src_code: Dict[str, str],
+    tgt_col: str,
+    tgt_label: str,
     max_length: int,
     device: torch.device,
     eval_samples_per_lang: int = 12,
     eval_beams: int = 4,
 ):
+
     """
     Runs tiny_eval for each language (src<->zh). Prints per-language losses + global means.
     """
     all_fwd, all_bwd = [], []
     print("\n================ Multilingual Eval (per language) ================")
     for L, df in val_by_lang.items():
-        pairs = list(zip(df["formosan_sentence"].astype(str).tolist(),
-                         df["chinese_sentence"].astype(str).tolist()))
+        pairs = list(zip(
+            df["formosan_sentence"].astype(str).tolist(),
+            df[tgt_col].astype(str).tolist(),
+        ))
+
         if not pairs:
             continue
         pairs = pairs[:eval_samples_per_lang]
@@ -586,11 +608,15 @@ def multilingual_eval(
         bwd_loss = avg_loss_dir(bwd_src, bwd_tgt, from_code=tgt_code)
         all_fwd.append(fwd_loss); all_bwd.append(bwd_loss)
 
-        print(f"[Lang={L}] token-loss src->zh: {fwd_loss:.4f} | zh->src: {bwd_loss:.4f}")
+        print(f"[Lang={L}] token-loss src->{tgt_label}: {fwd_loss:.4f} | {tgt_label}->src: {bwd_loss:.4f}")
 
     if all_fwd and all_bwd:
-        print("\n[Eval Global] mean token-loss src->zh: {:.4f} | zh->src: {:.4f}"
-              .format(float(np.mean(all_fwd)), float(np.mean(all_bwd))))
+        print(
+            f"\n[Eval Global] mean token-loss src->{tgt_label}: "
+            f"{float(np.mean(all_fwd)):.4f} | {tgt_label}->src: {float(np.mean(all_bwd)):.4f}"
+        )
+
+
     print("==================================================================\n")
 
 # --------------------------------------- main ---------------------------------------
@@ -800,17 +826,19 @@ def main():
         return
 
     # ------------------------ MULTILINGUAL MODE (new) ------------------------
-    if args.tgt_lang.lower() != "chinese":
-        sys.exit("Multilingual mode currently supports only <Formosan> <-> Chinese.")
+    tgt_lang = args.tgt_lang.lower()
+    if tgt_lang not in {"chinese", "english"}:
+        sys.exit("Multilingual mode currently supports only <Formosan> <-> {Chinese, English} for now.")
+
 
     # Prepare per-language datasets
     canon_langs = [x.strip().lower() for x in args.langs.split(",") if x.strip()]
-    for L in canon_langs:
+    for L in canon_langs:       
         if L not in FORMOSAN_SET:
             sys.exit(f"--langs includes unsupported language '{L}'. Valid: {sorted(FORMOSAN_SET)}")
 
-    train_by, val_by, test_by = load_splits_multilingual(
-        args.input, langs=canon_langs, seed=args.seed, normalize=args.normalize
+    train_by, val_by, test_by, tgt_col = load_splits_multilingual(
+        args.input, langs=canon_langs, tgt_lang=tgt_lang, seed=args.seed, normalize=args.normalize
     )
 
     # Drop languages with too little training data
@@ -843,8 +871,10 @@ def main():
 
     # Numpy arrays for fast sampling per language
     arr_by_lang = {
-        L: (train_by[L]["formosan_sentence"].astype(str).to_numpy(),
-            train_by[L]["chinese_sentence"].astype(str).to_numpy())
+        L: (
+            train_by[L]["formosan_sentence"].astype(str).to_numpy(),
+            train_by[L][tgt_col].astype(str).to_numpy(),
+        )
         for L in kept_langs
     }
 
@@ -864,7 +894,8 @@ def main():
     print(f"\nRun dir: {run_dir}")
     print(f"Starting multilingual training on {device} for {args.steps} steps...")
     print(f"Batch size: {args.batch_size} | Grad accum: {args.grad_accum_steps} | Max len: {args.max_length} | FP16: {bool(scaler.is_enabled())}")
-    print(f"Direction mix p(src->zh)={args.p_src2tgt:.2f}")
+    tgt_short = "zh" if tgt_lang == "chinese" else "en"
+    print(f"Direction mix p(src->{tgt_short})={args.p_src2tgt:.2f}")
 
     losses: List[float] = []
     pbar = trange(args.steps, desc="Training", dynamic_ncols=True)
@@ -883,14 +914,14 @@ def main():
                 tgt_texts = zh_tgt_arr[idx].tolist()
                 s_code = lang2src_code[L]
                 forced_id = lid_tgt
-                dir_tag = f"{L}->zh"
+                dir_tag = f"{L}->{tgt_short}"
             else:
                 # Chinese -> (Formosan L)
                 src_texts = zh_tgt_arr[idx].tolist()
                 tgt_texts = f_src_arr[idx].tolist()
                 s_code = tgt_code
                 forced_id = lid_src[L]
-                dir_tag = f"zh->{L}"
+                dir_tag = f"{tgt_short}->{L}"
 
             # 3) Core unchanged step
             loss = training_step(tok, model, src_texts, tgt_texts, s_code,
@@ -929,11 +960,14 @@ def main():
                     val_by_lang=val_by_kept,
                     tgt_code=tgt_code,
                     lang2src_code=lang2src_code,
+                    tgt_col=tgt_col,
+                    tgt_label=("zh" if tgt_lang == "chinese" else "en"),
                     max_length=args.max_length,
                     device=device,
                     eval_samples_per_lang=args.eval_samples,
                     eval_beams=args.eval_beams,
                 )
+
                 model.train()
                 
             # Save

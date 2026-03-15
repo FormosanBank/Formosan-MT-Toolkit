@@ -46,7 +46,7 @@ run_for_lang() {
 
   # 1) fetch
   echo "[1/4] Fetching XML for ${code}..."
-  "$PY" scripts/local/fetch_xml.py --src-lang "$code"
+  "$PY" scripts/local/fetch_xml.py --src-lang "$code" --public
 
   # 2) clean
   echo "[2/4] Cleaning XML for ${code}..."

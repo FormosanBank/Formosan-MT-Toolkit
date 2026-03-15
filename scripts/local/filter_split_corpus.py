@@ -16,7 +16,11 @@ Pipeline:
 - **Lexeme detection**: Single-word pairs (≤1 token both sides) → train only
 - **Exact deduplication**: Remove duplicate pairs
 - **Fertility filtering**: Token-ratio outlier removal (0.2-8.0 for sentences)
-- **Simple 80/10/10 split**: Random split with no train/test contamination
+- **Equivalence-group 80/10/10 split**:
+    - Build groups where any rows sharing the same source OR the same target
+      are forced into the **same split** (train / val / test).
+    - This prevents one-to-many and many-to-one (Formosan ↔ EN/ZH) clusters
+      from leaking across splits and inflating BLEU.
 
 Examples
 --------
@@ -406,6 +410,7 @@ def apply_fertility(
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Near-duplicate grouping (edit distance 1) — still available but off by default
+# (currently unused for splitting; we instead group by exact source/target equality)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class UnionFind:
@@ -512,6 +517,47 @@ def build_near_dups(df: pd.DataFrame, src_col: str, tgt_col: str, workers: int |
     return groups
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Equivalence groups for one-to-many / many-to-one (exact src/tgt matches)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_equivalence_groups(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.Series:
+    """
+    Build equivalence groups so that any rows sharing the same source text OR the same target text
+    end up in the same group. This is what we use for split assignment, so that all one-to-many
+    and many-to-one clusters (after cleaning/normalization) are forced into the same split.
+    """
+    if df.empty:
+        return pd.Series([], index=df.index, dtype=object, name="eq_group")
+
+    tmp = df.reset_index()
+    n = len(tmp)
+    uf = UnionFind(n)
+
+    # group by exact source string
+    src_map: dict[str, int] = {}
+    src_values = tmp[src_col].astype(str).tolist()
+    for i, s in enumerate(src_values):
+        prev = src_map.get(s)
+        if prev is not None:
+            uf.union(i, prev)
+        else:
+            src_map[s] = i
+
+    # group by exact target string
+    tgt_map: dict[str, int] = {}
+    tgt_values = tmp[tgt_col].astype(str).tolist()
+    for i, t in enumerate(tgt_values):
+        prev = tgt_map.get(t)
+        if prev is not None:
+            uf.union(i, prev)
+        else:
+            tgt_map[t] = i
+
+    groups_local = [f"eqg:{uf.find(i)}" for i in range(n)]
+    res = pd.Series(groups_local, index=tmp["index"].values, name="eq_group")
+    return res
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Presentation scaffolding drop (CN + Amis) + Obvious CN Headers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -557,7 +603,7 @@ def drop_stagey_rows(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.DataFra
     return df[~mask_drop].reset_index(drop=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Splitting (per-source), with lexeme routing and cap
+# Splitting (equivalence group-aware), with lexeme routing
 # ──────────────────────────────────────────────────────────────────────────────
 
 def extract_source_id(p: str) -> str:
@@ -568,6 +614,8 @@ def extract_source_id(p: str) -> str:
 
 def split_by_source(
     df: pd.DataFrame,
+    src_col: str,
+    tgt_col: str,
     val_ratio: float,
     test_ratio: float,
     random_state: int,
@@ -575,9 +623,11 @@ def split_by_source(
     max_lexeme_frac_train: float | None = None,
 ) -> pd.DataFrame:
     """
-    Simple 80/10/10 split with no train/test contamination.
-    - Lexemes (single-word pairs) stay in train only
-    - Everything else split randomly 80/10/10
+    Group-aware split:
+    - Lexemes (row_type == 'lexeme') → train only.
+    - Sentences are split 80/10/10 (or as configured), but **by equivalence group**:
+      any rows that share the same source OR the same target (after cleaning) are
+      forced into the same split to avoid one-to-many / many-to-one leakage.
     """
     train_ratio = 1.0 - val_ratio - test_ratio
     print(f"\n📂  Target split: {train_ratio*100:.0f}% train / {val_ratio*100:.0f}% val / {test_ratio*100:.0f}% test")
@@ -591,31 +641,65 @@ def split_by_source(
     print(f"  Lexemes: {len(lexeme_df):,} (all → train)")
     print(f"  Sentences: {len(sentence_df):,} (split {train_ratio*100:.0f}/{val_ratio*100:.0f}/{test_ratio*100:.0f})")
 
+    # Lexical entries stay in train (dictionary-style material).
     lexeme_df["split"] = "train"
 
     n_sent = len(sentence_df)
-    indices = rng.permutation(n_sent)
+    if n_sent > 0:
+        # Build equivalence groups so any one-to-many or many-to-one pairs
+        # (same src OR same tgt) land in the same split.
+        eq_groups = build_equivalence_groups(sentence_df, src_col, tgt_col)
+        sentence_df["group_id"] = eq_groups
 
-    n_train = int(n_sent * train_ratio)
-    n_val = int(n_sent * val_ratio)
+        grp_sizes = sentence_df.groupby("group_id").size().reset_index(name="size")
+        grp_ids = grp_sizes["group_id"].tolist()
+        rng.shuffle(grp_ids)
 
-    train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_val]
-    test_idx = indices[n_train + n_val:]
+        total_sent = float(n_sent)
+        target_train = int(total_sent * train_ratio)
+        target_val = int(total_sent * val_ratio)
+        target_test = n_sent - target_train - target_val
 
-    sentence_df["split"] = "train"
-    sentence_df.iloc[val_idx, sentence_df.columns.get_loc("split")] = "validate"
-    sentence_df.iloc[test_idx, sentence_df.columns.get_loc("split")] = "test"
+        counters = {"train": 0, "validate": 0, "test": 0}
+        assignment: dict[str, str] = {}
 
-    df = pd.concat([lexeme_df, sentence_df], ignore_index=True)
+        size_lookup = dict(zip(grp_sizes["group_id"], grp_sizes["size"]))
 
-    counts = df["split"].value_counts()
-    total = len(df)
-    print(f"\n📊  Final split: "
-          f"{counts.get('train',0):,} train ({counts.get('train',0)/total*100:.1f}%), "
-          f"{counts.get('validate',0):,} val ({counts.get('validate',0)/total*100:.1f}%), "
-          f"{counts.get('test',0):,} test ({counts.get('test',0)/total*100:.1f}%)")
-    return df
+        for gid in grp_ids:
+            size = int(size_lookup[gid])
+            rem_train = target_train - counters["train"]
+            rem_val = target_val - counters["validate"]
+            rem_test = target_test - counters["test"]
+
+            rem = {
+                "train": rem_train,
+                "validate": rem_val,
+                "test": rem_test,
+            }
+            # Choose split with the largest remaining capacity
+            best_split = max(rem, key=lambda k: rem[k])
+            # If all are "full" (remaining <= 0), just send to train
+            if rem[best_split] <= 0:
+                best_split = "train"
+
+            assignment[gid] = best_split
+            counters[best_split] += size
+
+        sentence_df["split"] = sentence_df["group_id"].map(assignment)
+    else:
+        sentence_df["split"] = []
+
+    df_out = pd.concat([lexeme_df, sentence_df], ignore_index=True)
+
+    counts = df_out["split"].value_counts()
+    total = len(df_out)
+    print(
+        f"\n📊  Final split: "
+        f"{counts.get('train',0):,} train ({counts.get('train',0)/total*100:.1f}%), "
+        f"{counts.get('validate',0):,} val ({counts.get('validate',0)/total*100:.1f}%), "
+        f"{counts.get('test',0):,} test ({counts.get('test',0)/total*100:.1f}%)"
+    )
+    return df_out
 
 # ──────────────────────────────────────────────────────────────────────────────
 # I/O
@@ -642,7 +726,7 @@ def save_csv(df: pd.DataFrame, path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Filter and split parallel corpus for MT training (lexeme-aware)",
+        description="Filter and split parallel corpus for MT training (lexeme-aware, group-aware)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -673,14 +757,14 @@ def main() -> None:
 
     # Dedup & near-dups
     ap.add_argument("--no-dedup", action="store_true", help="Skip exact duplicate removal")
-    ap.add_argument("--no-near-dup", action="store_true", help="Skip near-duplicate grouping")
+    ap.add_argument("--no-near-dup", action="store_true", help="(Deprecated) unused; kept for CLI compatibility")
 
     # Splitting
     ap.add_argument("--no-split", action="store_true", help="Do not create train/validate/test splits")
     ap.add_argument("--val-ratio", type=float, default=0.10)
     ap.add_argument("--test-ratio", type=float, default=0.10)
     ap.add_argument("--random-state", type=int, default=42)
-    ap.add_argument("--include-lexemes-in-eval", action="store_true", help="Allow lexemes in val/test (default: False)")
+    ap.add_argument("--include-lexemes-in-eval", action="store_true", help="Allow lexemes in val/test (currently ignored; lexemes → train only)")
     ap.add_argument("--max-lexeme-frac", type=float, default=None, help="DEPRECATED - not used in simplified split")
 
     ap.add_argument(
@@ -692,7 +776,7 @@ def main() -> None:
     args = ap.parse_args()
 
     print("=" * 80)
-    print("🚀  MT Corpus Filtering & Splitting (Lexeme-Aware)")
+    print("🚀  MT Corpus Filtering & Splitting (Lexeme-Aware, Group-Aware)")
     print("=" * 80)
 
     # Load
@@ -812,7 +896,7 @@ def main() -> None:
             max_ratio_lex=args.lexeme_max_ratio,
         )
 
-    # Near-duplicate grouping (disabled by default)
+    # Near-duplicate grouping (disabled for now; we use exact-equivalence groups instead)
     # if not args.no_near_dup:
     #     df["nd_group"] = build_near_dups(df, src_col, tgt_col, workers=args.workers)
     # else:
@@ -822,6 +906,8 @@ def main() -> None:
     if not args.no_split:
         df = split_by_source(
             df,
+            src_col,
+            tgt_col,
             val_ratio=args.val_ratio,
             test_ratio=args.test_ratio,
             random_state=args.random_state,

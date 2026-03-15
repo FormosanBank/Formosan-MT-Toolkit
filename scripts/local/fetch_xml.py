@@ -35,6 +35,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote
 
 import requests
 import xml.etree.ElementTree as ET
@@ -53,23 +54,26 @@ load_dotenv(project_root / ".env")
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     # Chinese variants
     "zh": {"zh", "zho", "chi"},
-    "zho": {"zh", "zho", "chi"}, 
+    "zho": {"zh", "zho", "chi"},
     "chi": {"zh", "zho", "chi"},
     # English variants
     "en": {"en", "eng"},
     "eng": {"en", "eng"},
 }
 
+
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
     """Get all equivalent language codes for a given language code."""
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 # ─────────────────────────────  config  ──────────────────────────────────────
 GITHUB_API = "https://api.github.com"
-HEADERS = {"Authorization": f"token {os.getenv('GITHUB_TOKEN', '')}"}
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 MAX_WORKERS = 16
-REQUEST_TIMEOUT = 10        # seconds
+REQUEST_TIMEOUT = 10  # seconds
 RETRIES = Retry(
     total=5,
     backoff_factor=0.5,
@@ -93,6 +97,38 @@ def get_repos(org: str) -> Iterable[str]:
             params={"per_page": 100, "page": page},
             timeout=REQUEST_TIMEOUT,
         )
+
+        # Better diagnostics for 403s / rate limits / permission issues
+        if r.status_code == 403:
+            try:
+                data = r.json()
+                message = data.get("message", "")
+            except Exception:
+                message = r.text.strip()
+
+            remaining = r.headers.get("X-RateLimit-Remaining")
+            reset = r.headers.get("X-RateLimit-Reset")
+
+            err_lines = [
+                f"❌  GitHub returned 403 Forbidden for org '{org}' (page={page}).",
+                f"   Message: {message!r}",
+            ]
+            if remaining is not None:
+                err_lines.append(
+                    f"   X-RateLimit-Remaining={remaining}, X-RateLimit-Reset={reset}"
+                )
+            err_lines.append(
+                "   This usually means either:\n"
+                "     • your GITHUB_TOKEN no longer has access to this org "
+                "(scopes / SSO / membership), or\n"
+                "     • you've hit a rate limit / abuse detection and must wait.\n"
+                "   Try:\n"
+                "     curl -H \"Authorization: token $GITHUB_TOKEN\" "
+                "https://api.github.com/orgs/formosanbank\n"
+                "   to see the full error message."
+            )
+            sys.exit("\n".join(err_lines))
+
         r.raise_for_status()
         data = r.json()
         if not data:
@@ -104,32 +140,36 @@ def get_repos(org: str) -> Iterable[str]:
         page += 1
 
 
-def get_tree(org: str, repo: str, branch: str | None = None):
+def get_tree(org: str, repo: str, branch: str):
     """Return the full git tree (recursive) for a repo/branch."""
-    if branch is None:
-        repo_meta = SESSION.get(
-            f"{GITHUB_API}/repos/{org}/{repo}", timeout=REQUEST_TIMEOUT
-        ).json()
-        branch = repo_meta["default_branch"]
-
     r = SESSION.get(
         f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
         timeout=REQUEST_TIMEOUT,
     )
     r.raise_for_status()
-    return r.json()["tree"]
+    tree = r.json().get("tree", [])
+    print(f"   🌲 {repo}@{branch}: {len(tree)} tree entries")
+    return tree
 
 
-def raw_url(org: str, repo: str, path: str, branch: str):
-    return f"https://raw.githubusercontent.com/{org}/{repo}/{branch}/{path}"
+def raw_url(org: str, repo: str, path: str, branch: str) -> str:
+    """
+    Build a raw.githubusercontent.com URL for a given repo/path/branch.
+
+    The path is split and each segment is percent-encoded so that non-ASCII
+    components (e.g., Chinese chars) and spaces are encoded correctly.
+    """
+    encoded_path = "/".join(quote(part) for part in path.split("/"))
+    return f"https://raw.githubusercontent.com/{org}/{repo}/{branch}/{encoded_path}"
 
 
 def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None):
     """Return True iff the XML root matches src_lang (and tgt_lang if given)."""
     try:
         root = ET.fromstring(xml_bytes)
-    except ET.ParseError:
+    except ET.ParseError as e:
+        print(f"⚠️  XML parse error in file: {e}")
         return False
 
     src_ok = (
@@ -143,9 +183,10 @@ def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None):
 
     # Get all equivalent language codes for the target language
     target_codes = get_equivalent_lang_codes(tgt_lang.lower())
-    
+
     return any(
-        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").lower() in target_codes
+        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").lower()
+        in target_codes
         for elem in root.iter("TRANSL")
     )
 
@@ -159,84 +200,145 @@ def download_blob(
     branch: str,
     out_dir: Path,
 ):
-    """Download → filter → save one blob.  Returns destination Path or None."""
+    """
+    Download → filter → save one blob using raw.githubusercontent.com
+    (so we don't burn through the REST API core rate limit).
+
+    Returns destination Path or None.
+    """
     url = raw_url(org, repo, item["path"], branch)
 
-    # retry loop for DNS hiccups that happen before urllib3 retry kicks in
+    # retry loop for transient HTTP issues
     for attempt in range(3):
         try:
             resp = SESSION.get(url, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                print(
+                    f"⚠️  [{repo}] HTTP {resp.status_code} for {url} "
+                    f"(attempt {attempt+1})"
+                )
+                resp.raise_for_status()
             xml_bytes = resp.content
             break
-        except (requests.exceptions.RequestException, ET.ParseError):
+        except requests.exceptions.RequestException as e:
+            print(
+                f"⚠️  [{repo}] Error fetching {url} on attempt {attempt+1}: {e}"
+            )
             if attempt == 2:
-                # give up after 3 tries
+                print(f"❌  [{repo}] Giving up on {url} after 3 attempts")
                 return None
             time.sleep(2 ** attempt)
     else:
         return None  # never reached
 
     if not wants_file(xml_bytes, src_lang, tgt_lang):
+        # Uncomment for super-verbose logging:
+        # print(f"   ↷ [{repo}] Skipped {item['path']} (lang filter)")
         return None
 
     dest = out_dir / repo / item["path"]
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(xml_bytes)
+    # Uncomment for per-file success logging:
+    # print(f"   ✅ [{repo}] Saved {dest}")
     return dest
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--src-lang", required=True, help="e.g. ami, pau, tsu")
-    parser.add_argument("--tgt-lang", help="optional target language filter (e.g. zh, zho, en)")
+    parser.add_argument(
+        "--tgt-lang", help="optional target language filter (e.g. zh, zho, en)"
+    )
     parser.add_argument("--org", default="formosanbank")
     parser.add_argument("--branch", help="force a branch name for all repos")
     parser.add_argument(
-        "--out-dir", help="where to store the files (default: downloaded_{src_lang})"
+        "--out-dir",
+        help="where to store the files (default: downloaded_{src_lang})",
     )
     parser.add_argument(
-        "--public", 
+        "--public",
         action="store_true",
-        help="Use public release structure: only look in FormosanBank/FormosanBank/Corpora/*/XML/"
+        help=(
+            "Use public release structure: only look in "
+            "FormosanBank/FormosanBank/Corpora/*/XML/"
+        ),
     )
     args = parser.parse_args()
 
-    if not os.getenv("GITHUB_TOKEN"):
+    if not GITHUB_TOKEN:
         sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
+
+    print(
+        f"⚙️  Config:\n"
+        f"   src_lang   = {args.src_lang}\n"
+        f"   tgt_lang   = {args.tgt_lang}\n"
+        f"   org        = {args.org}\n"
+        f"   public     = {args.public}\n"
+        f"   branch_arg = {args.branch}\n"
+        f"   token_len  = {len(GITHUB_TOKEN)}"
+    )
 
     # Set default output directory if none provided
     if args.out_dir is None:
         args.out_dir = f"downloaded_{args.src_lang}"
-    
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(exist_ok=True)
+    print(f"📂  Output directory: {out_dir.resolve()}")
 
     # Show which language codes will be matched if target language is specified
     if args.tgt_lang:
         equivalent_codes = get_equivalent_lang_codes(args.tgt_lang.lower())
-        print(f"🔍  Target language '{args.tgt_lang}' will match: {sorted(equivalent_codes)}")
+        print(
+            f"🔍  Target language '{args.tgt_lang}' will match: "
+            f"{sorted(equivalent_codes)}"
+        )
 
     # Determine which repos to process based on --public flag
     if args.public:
         repos = ["FormosanBank"]
-        print(f"🌐  Public release mode: only processing FormosanBank/FormosanBank/Corpora/*/XML/")
+        print(
+            "🌐  Public release mode: only processing "
+            "FormosanBank/FormosanBank/Corpora/*/XML/"
+        )
     else:
         repos = list(get_repos(args.org))
-        print(f"Found {len(repos)} repos in {args.org}")
+        print(f"📦  Found {len(repos)} repos in {args.org}")
 
     with fut.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
 
-        # ── repo‑level progress bar ──────────────────────────────────────────
+        # ── repo-level progress bar ──────────────────────────────────────────
         for repo in tqdm(repos, desc="Repos", unit="repo"):
+            # Determine branch for this repo
+            if args.branch is None:
+                try:
+                    meta = SESSION.get(
+                        f"{GITHUB_API}/repos/{args.org}/{repo}",
+                        timeout=REQUEST_TIMEOUT,
+                    )
+                    meta.raise_for_status()
+                    branch = meta.json().get("default_branch", "main")
+                    print(f"📦  Repo {repo}: using default branch '{branch}'")
+                except requests.RequestException as e:
+                    print(f"❌  Failed to get default branch for {repo}: {e}")
+                    continue
+            else:
+                branch = args.branch
+                print(f"📦  Repo {repo}: using forced branch '{branch}'")
+
             try:
-                tree = get_tree(args.org, repo, args.branch)
+                tree = get_tree(args.org, repo, branch)
             except requests.HTTPError as e:
                 if e.response.status_code == 409:  # empty repo or huge tree
                     print(f"⚠️  Skipping repo {repo} (empty or too large for API)")
                     continue
-                raise
+                print(f"❌  HTTP error fetching tree for {repo}@{branch}: {e}")
+                continue
+            except requests.RequestException as e:
+                print(f"❌  Request error fetching tree for {repo}@{branch}: {e}")
+                continue
 
             # Filter XML files based on mode
             if args.public:
@@ -259,6 +361,11 @@ def main():
                     and i["path"].lower().endswith(".xml")
                 ]
 
+            if not xml_blobs:
+                print(f"ℹ️  Repo {repo}: no XML blobs found (public={args.public})")
+                continue
+            else:
+                print(f"📄  Repo {repo}: {len(xml_blobs)} XML candidate files")
 
             for item in xml_blobs:
                 futures.append(
@@ -269,12 +376,13 @@ def main():
                         item,
                         args.src_lang,
                         args.tgt_lang,
-                        args.branch or "HEAD",
+                        branch,  # kept for logging / future use
                         out_dir,
                     )
                 )
 
-        # ── file‑download progress bar ──────────────────────────────────────
+        # ── file-download progress bar ──────────────────────────────────────
+        print(f"📊  Total XML download tasks queued: {len(futures)}")
         kept: list[Path] = []
         for f in tqdm(
             fut.as_completed(futures),
@@ -286,7 +394,7 @@ def main():
             if res:
                 kept.append(res)
 
-    print(f"Downloaded {len(kept)} XML files → {out_dir}")
+    print(f"✅  Downloaded {len(kept)} XML files → {out_dir}")
 
 
 if __name__ == "__main__":

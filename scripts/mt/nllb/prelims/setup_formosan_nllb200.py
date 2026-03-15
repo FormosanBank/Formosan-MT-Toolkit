@@ -29,7 +29,7 @@ python setup_formosan_nllb200.py \
 
 # SPM path (recommended for zh_Hant): retrain/merge sentencepiece for cleaner segmentation
 python setup_formosan_nllb200.py \
-  --input big_corpus_zh.csv \
+  --input big_corpus_en.csv \
   --output-prefix formosan_multilingual_nllb \
   --add-mode spm --spm-vocab 16384 --min-char-frequency 3 \
   --run-eval --samples-per-lang 1
