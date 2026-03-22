@@ -7,7 +7,9 @@ Harvest XML files from FormosanBank repositories.
 Two modes:
 ----------
 1. Default mode: Searches through all repos in the FormosanBank org for files in Final_XML/ folders
-2. Public release mode (--public): Only looks in FormosanBank/FormosanBank/Corpora/*/XML/ structure
+2. Public release mode (--public): Only looks inside XML/ directories anywhere under
+   FormosanBank/FormosanBank/Corpora/ (files may live directly in XML/ or in deeper
+   subdirectories such as XML/Yami/...)
 
 The script filters XML files whose <TEXT xml:lang="…"> == src_lang 
 (and, optionally, whose <TRANSL xml:lang="…"> == tgt_lang).
@@ -22,7 +24,7 @@ Usage examples
 $ python fetch_xml.py --src-lang ami
 $ python fetch_xml.py --src-lang pwn
 
-# Public release mode (only FormosanBank/FormosanBank/Corpora/*/XML/)
+# Public release mode (anything at or below an XML/ directory under Corpora/)
 $ python fetch_xml.py --src-lang ami --public
 $ python fetch_xml.py --src-lang pwn --public --tgt-lang zh
 """
@@ -164,6 +166,27 @@ def raw_url(org: str, repo: str, path: str, branch: str) -> str:
     return f"https://raw.githubusercontent.com/{org}/{repo}/{branch}/{encoded_path}"
 
 
+def is_public_release_xml_path(path: str) -> bool:
+    """
+    Return True for any XML file that lives somewhere under a Corpora/.../XML/
+    subtree in the public release repo.
+
+    Accepted examples:
+      - Corpora/Foo/XML/file.xml
+      - Corpora/Foo/XML/Yami/file.xml
+      - Corpora/Foo/Bar/XML/nested/deeper/file.xml
+    """
+    if not path.lower().endswith(".xml"):
+        return False
+
+    parts = path.split("/")
+    if len(parts) < 3 or parts[0] != "Corpora":
+        return False
+
+    # Match any file directly in XML/ or any deeper descendant of XML/.
+    return "XML" in parts[:-1]
+
+
 def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None):
     """Return True iff the XML root matches src_lang (and tgt_lang if given)."""
     try:
@@ -260,8 +283,8 @@ def main():
         "--public",
         action="store_true",
         help=(
-            "Use public release structure: only look in "
-            "FormosanBank/FormosanBank/Corpora/*/XML/"
+            "Use public release structure: look anywhere under XML/ directories "
+            "inside FormosanBank/FormosanBank/Corpora/"
         ),
     )
     args = parser.parse_args()
@@ -299,8 +322,8 @@ def main():
     if args.public:
         repos = ["FormosanBank"]
         print(
-            "🌐  Public release mode: only processing "
-            "FormosanBank/FormosanBank/Corpora/*/XML/"
+            "🌐  Public release mode: processing any XML file at or below "
+            "FormosanBank/FormosanBank/Corpora/**/XML/"
         )
     else:
         repos = list(get_repos(args.org))
@@ -342,14 +365,12 @@ def main():
 
             # Filter XML files based on mode
             if args.public:
-                # Public release: look for Corpora/*/XML/*.xml pattern
+                # Public release: accept XML files directly under XML/ or deeper.
                 xml_blobs = [
                     i
                     for i in tree
                     if i["type"] == "blob"
-                    and i["path"].startswith("Corpora/")
-                    and "/XML/" in i["path"]
-                    and i["path"].lower().endswith(".xml")
+                    and is_public_release_xml_path(i["path"])
                 ]
             else:
                 # Default: look for Final_XML/*.xml pattern

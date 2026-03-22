@@ -44,7 +44,8 @@ run_for_lang() {
   echo ">> ${name} (${code})"
   echo "------------------------------------------------------------"
 
-  # 1) fetch
+  # 1) fetch 
+  # NOTE: You must be a member of FormosanBank if you want to fetch the non-public data 
   echo "[1/4] Fetching XML for ${code}..."
   "$PY" scripts/local/fetch_xml.py --src-lang "$code" --public
 

@@ -335,7 +335,7 @@ def run_qc_scripts(corpus_dir: Path, qc_dir: Path):
 
     print("Running standardization script...")
     subprocess.run(
-        ["python", str(std_script), "--corpora_path", str(corpus_dir)],
+        ["python", str(std_script), "--corpora_path", str(corpus_dir), "--copy"],
         check=True,
     )
 
