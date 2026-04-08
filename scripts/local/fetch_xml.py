@@ -187,28 +187,29 @@ def is_public_release_xml_path(path: str) -> bool:
     return "XML" in parts[:-1]
 
 
-def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None):
-    """Return True iff the XML root matches src_lang (and tgt_lang if given)."""
+def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None, dialect: str | None):
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as e:
         print(f"⚠️  XML parse error in file: {e}")
         return False
 
-    src_ok = (
-        root.attrib.get("{http://www.w3.org/XML/1998/namespace}lang") == src_lang
-    )
-    if not src_ok:
+    xml_lang = root.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").strip().lower()
+    xml_dialect = root.attrib.get("dialect", "").strip().lower()
+
+    src_ok = (xml_lang == src_lang.strip().lower())
+    dialect_ok = True if dialect is None else (xml_dialect == dialect.strip().lower())
+
+    if not src_ok or not dialect_ok:
         return False
 
     if tgt_lang is None:
         return True
 
-    # Get all equivalent language codes for the target language
     target_codes = get_equivalent_lang_codes(tgt_lang.lower())
 
     return any(
-        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").lower()
+        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").strip().lower()
         in target_codes
         for elem in root.iter("TRANSL")
     )
@@ -222,6 +223,7 @@ def download_blob(
     tgt_lang: str | None,
     branch: str,
     out_dir: Path,
+    dialect: str | None,
 ):
     """
     Download → filter → save one blob using raw.githubusercontent.com
@@ -254,7 +256,7 @@ def download_blob(
     else:
         return None  # never reached
 
-    if not wants_file(xml_bytes, src_lang, tgt_lang):
+    if not wants_file(xml_bytes, src_lang, tgt_lang, dialect):
         # Uncomment for super-verbose logging:
         # print(f"   ↷ [{repo}] Skipped {item['path']} (lang filter)")
         return None
@@ -287,6 +289,11 @@ def main():
             "inside FormosanBank/FormosanBank/Corpora/"
         ),
     )
+    parser.add_argument(
+        "--dialect",
+        default=None,
+        help=("optional dialect filter for if you would like to also filter by the xml:dialect tag"),
+    )
     args = parser.parse_args()
 
     if not GITHUB_TOKEN:
@@ -295,6 +302,7 @@ def main():
     print(
         f"⚙️  Config:\n"
         f"   src_lang   = {args.src_lang}\n"
+        f"   dialect    = {args.dialect}\n"
         f"   tgt_lang   = {args.tgt_lang}\n"
         f"   org        = {args.org}\n"
         f"   public     = {args.public}\n"
@@ -302,6 +310,7 @@ def main():
         f"   token_len  = {len(GITHUB_TOKEN)}"
     )
 
+    dialect = args.dialect if args.dialect else None
     # Set default output directory if none provided
     if args.out_dir is None:
         args.out_dir = f"downloaded_{args.src_lang}"
@@ -399,6 +408,7 @@ def main():
                         args.tgt_lang,
                         branch,  # kept for logging / future use
                         out_dir,
+                        dialect
                     )
                 )
 
