@@ -5,10 +5,11 @@ Multilingual fine-tuning for NLLB-200 (distilled-600M) on 15 Formosan <-> Chines
 
 This *extends* your single-pair trainer while preserving the core src/target LID logic:
 
-- For each batch we set `tokenizer.src_lang` to the *current source* language only.
-- We NEVER prefix labels with any language token (labels are raw tokens + EOS).
-- For generation/eval we ALWAYS pass `forced_bos_token_id` (target LID id) and also set
-  `decoder_start_token_id` to the same value for safety across Transformers versions.
+- For each batch we set `tokenizer.src_lang` to the *current source* language.
+- We set `tokenizer.tgt_lang` and tokenize labels through `text_target`, so labels
+  use the Transformers 4.56 NLLB target format: target LID + raw tokens + EOS.
+- For generation/eval we pass `forced_bos_token_id` (target LID id) and keep
+  `decoder_start_token_id` as EOS (`</s>`), matching M2M100/NLLB generation.
 
 New in this version
 -------------------
@@ -176,6 +177,38 @@ def _normalize_series(s: pd.Series, lang_hint: str) -> pd.Series:
         s = s.map(lambda t: mpn.normalize(t))
     return s
 
+def source_bucket(source: object) -> str:
+    """Coarse source family for optional train-time sampling weights."""
+    s = "" if source is None else str(source)
+    if "xue_xi_ci_biao_learning_vocabulary" in s:
+        return "learning_vocab"
+    if "qing_jing_zu_yu_contextual_indigenous_language" in s:
+        return "classroom_context"
+    if "Dict" in s or "Dictionary" in s:
+        return "dictionary"
+    if "tu_hua_gu_shi_pian_picture_story" in s:
+        return "picture_story"
+    if "hui_ben_ping_tai_picture_book_platform" in s:
+        return "picture_book"
+    if "zu_yu_duan_wen_indigenous_language_essays" in s:
+        return "essays"
+    if "yue_du_shu_xie_pian_reading_writing" in s:
+        return "reading_writing"
+    if "wen_hua_pian_cultural_section" in s:
+        return "culture"
+    if "jiu_jie_jiao_cai_nine_level_materials" in s:
+        return "nine_level"
+    if "YouTube" in s:
+        return "youtube"
+    if "NTU" in s:
+        return "ntu"
+    if "President" in s or "Apology" in s:
+        return "presidential_apology"
+    return s.split("/")[0] if s else "unknown"
+
+def parse_csv_values(value: str) -> Tuple[str, ...]:
+    return tuple(v.strip() for v in value.split(",") if v.strip())
+
 def cleanup_cuda():
     gc.collect()
     if torch.cuda.is_available():
@@ -187,12 +220,36 @@ def _make_run_dir(base_out: Optional[str], tag: str) -> Path:
     (root / "checkpoints").mkdir(parents=True, exist_ok=True)
     return root
 
-# ------------------------------ encoding & step (UNCHANGED CORE) -------------------
+# ------------------------------ encoding & step -------------------
+def _encode_target_labels(
+    tokenizer: NllbTokenizer,
+    tgt_texts: List[str],
+    tgt_code: str,
+    max_length: int,
+    device: torch.device,
+):
+    tokenizer.tgt_lang = tgt_code
+    lab = tokenizer(
+        text_target=tgt_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+    )
+
+    labels = lab["input_ids"].to(device)
+    labels[labels == tokenizer.pad_token_id] = -100
+    return labels
+
+
 def _encode_pair_batch(
     tokenizer: NllbTokenizer,
     src_texts: List[str],
     tgt_texts: List[str],
     src_code: str,
+    tgt_code: str,
     max_length: int,
     device: torch.device,
 ):
@@ -212,34 +269,9 @@ def _encode_pair_batch(
         return_token_type_ids=False,
     )
 
-    lab = tokenizer(
-        tgt_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_attention_mask=False,
-        return_token_type_ids=False,
-        add_special_tokens=False,
-    )
-
-    labels = lab["input_ids"]
-    pad_id = tokenizer.pad_token_id
-    eos_id = tokenizer.eos_token_id
-    if eos_id is None:
-        raise ValueError("Tokenizer has no eos_token_id; EOS is required.")
-
-    with torch.no_grad():
-        lengths = (labels != pad_id).sum(dim=1)
-        L = labels.size(1)
-        pos = torch.clamp(lengths, max=L - 1)
-        rows = torch.arange(labels.size(0), dtype=torch.long)
-        labels[rows, pos] = eos_id
-
     input_ids = enc["input_ids"].to(device)
     attn_mask = enc["attention_mask"].to(device)
-    labels = labels.to(device)
-    labels[labels == pad_id] = -100
+    labels = _encode_target_labels(tokenizer, tgt_texts, tgt_code, max_length, device)
     return input_ids, attn_mask, labels
 
 def training_step(
@@ -248,37 +280,32 @@ def training_step(
     src_texts: List[str],
     tgt_texts: List[str],
     src_code: str,
+    tgt_code: str,
     max_length: int,
     device: torch.device,
     use_amp: bool,
     scaler: Optional[GradScaler],
-    forced_bos_id: int,
+    loss_scale: float = 1.0,
 ):
     input_ids, attn_mask, labels = _encode_pair_batch(
-        tokenizer, src_texts, tgt_texts, src_code, max_length, device
+        tokenizer, src_texts, tgt_texts, src_code, tgt_code, max_length, device
     )
-    pad = tokenizer.pad_token_id
-    dec_in = labels.clone().masked_fill(labels == -100, pad)
-    bos_col = torch.full((dec_in.size(0), 1), forced_bos_id, device=device, dtype=dec_in.dtype)
-    decoder_input_ids = torch.cat([bos_col, dec_in[:, :-1]], dim=1)
 
     if use_amp:
         with autocast(device_type=device.type):
             loss = model(
                 input_ids=input_ids,
                 attention_mask=attn_mask,
-                decoder_input_ids=decoder_input_ids,
                 labels=labels
             ).loss
-        scaler.scale(loss).backward()
+        scaler.scale(loss / loss_scale).backward()
     else:
         loss = model(
             input_ids=input_ids,
             attention_mask=attn_mask,
-            decoder_input_ids=decoder_input_ids,
             labels=labels
         ).loss
-        loss.backward()
+        (loss / loss_scale).backward()
     return loss.detach()
 
 @torch.no_grad()
@@ -319,14 +346,14 @@ def tiny_eval(
             length_penalty=1.05,
             early_stopping=True,
             forced_bos_token_id=forced_id,
-            decoder_start_token_id=forced_id,
+            decoder_start_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
         )
         seqs = gen_out.sequences if hasattr(gen_out, "sequences") else gen_out
         return tokenizer.batch_decode(seqs, skip_special_tokens=True)
 
-    def avg_loss_dir(src_texts, tgt_texts, from_code):
+    def avg_loss_dir(src_texts, tgt_texts, from_code, to_code):
         total_loss = 0.0
         total_tokens = 0
         for i in range(0, len(src_texts), batch_size):
@@ -338,24 +365,7 @@ def tiny_eval(
                 batch_src, return_tensors="pt", padding=True, truncation=True,
                 max_length=max_length, return_attention_mask=True, return_token_type_ids=False,
             )
-            lab = tokenizer(
-                batch_tgt, return_tensors="pt", padding=True, truncation=True,
-                max_length=max_length, return_attention_mask=False, return_token_type_ids=False,
-                add_special_tokens=False,
-            )
-
-            labels = lab["input_ids"]
-            pad_id = tokenizer.pad_token_id
-            eos_id = tokenizer.eos_token_id
-            with torch.no_grad():
-                lengths = (labels != pad_id).sum(dim=1)
-                L = labels.size(1)
-                pos = torch.clamp(lengths, max=L - 1)
-                rows = torch.arange(labels.size(0), dtype=torch.long)
-                labels[rows, pos] = eos_id
-
-            labels = labels.to(device)
-            labels[labels == pad_id] = -100
+            labels = _encode_target_labels(tokenizer, batch_tgt, to_code, max_length, device)
 
             non_pad = (labels != -100).sum().item()
             enc = {k: v.to(device) for k, v in enc.items()}
@@ -381,8 +391,8 @@ def tiny_eval(
 
     all_src = [p[0] for p in val_pairs]
     all_tgt = [p[1] for p in val_pairs]
-    fwd_loss, fwd_ppl = avg_loss_dir(all_src, all_tgt, src_code)
-    bwd_loss, bwd_ppl = avg_loss_dir(all_tgt, all_src, tgt_code)
+    fwd_loss, fwd_ppl = avg_loss_dir(all_src, all_tgt, src_code, tgt_code)
+    bwd_loss, bwd_ppl = avg_loss_dir(all_tgt, all_src, tgt_code, src_code)
     print(f"[Eval] Avg token loss  (src->tgt): {fwd_loss:.4f} | ppl: {fwd_ppl:.2f}")
     print(f"[Eval] Avg token loss  (tgt->src): {bwd_loss:.4f} | ppl: {bwd_ppl:.2f}")
 
@@ -475,7 +485,6 @@ def load_splits_multilingual(
     else:
         sys.exit(f"Multilingual loader only supports tgt_lang in {{'chinese','english'}}, got '{tgt_lang}'.")
 
-    want_cols = ["lang_code", "formosan_sentence", tgt_col, "split"]
     missing = [c for c in ["lang_code", "formosan_sentence", tgt_col] if c not in df.columns]
 
     if missing:
@@ -514,6 +523,8 @@ def load_splits_multilingual(
 
         # Keep only necessary columns
         cols = ["formosan_sentence", tgt_col]
+        if "source" in sub.columns:
+            cols.append("source")
         tr = tr[cols].dropna().reset_index(drop=True)
         va = va[cols].dropna().reset_index(drop=True)
         te = te[cols].dropna().reset_index(drop=True)
@@ -572,7 +583,7 @@ def multilingual_eval(
         bwd_src = fwd_tgt
         bwd_tgt = fwd_src
 
-        def avg_loss_dir(src_texts, tgt_texts, from_code):
+        def avg_loss_dir(src_texts, tgt_texts, from_code, to_code):
             total_loss = 0.0
             total_tokens = 0
             batch_size = 64
@@ -583,20 +594,7 @@ def multilingual_eval(
                 enc = tokenizer(bs, return_tensors="pt", padding=True, truncation=True,
                                 max_length=max_length, return_attention_mask=True,
                                 return_token_type_ids=False)
-                lab = tokenizer(bt, return_tensors="pt", padding=True, truncation=True,
-                                max_length=max_length, return_attention_mask=False,
-                                return_token_type_ids=False, add_special_tokens=False)
-                labels = lab["input_ids"]
-                pad_id = tokenizer.pad_token_id
-                eos_id = tokenizer.eos_token_id
-                with torch.no_grad():
-                    lengths = (labels != pad_id).sum(dim=1)
-                    Ls = labels.size(1)
-                    pos = torch.clamp(lengths, max=Ls - 1)
-                    rows = torch.arange(labels.size(0), dtype=torch.long)
-                    labels[rows, pos] = eos_id
-                labels = labels.to(device)
-                labels[labels == pad_id] = -100
+                labels = _encode_target_labels(tokenizer, bt, to_code, max_length, device)
                 enc = {k: v.to(device) for k, v in enc.items()}
                 loss = model(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], labels=labels).loss
                 non_pad = (labels != -100).sum().item()
@@ -604,8 +602,8 @@ def multilingual_eval(
                 total_tokens += max(non_pad, 1)
             return total_loss / max(total_tokens, 1)
 
-        fwd_loss = avg_loss_dir(fwd_src, fwd_tgt, from_code=src_code)
-        bwd_loss = avg_loss_dir(bwd_src, bwd_tgt, from_code=tgt_code)
+        fwd_loss = avg_loss_dir(fwd_src, fwd_tgt, from_code=src_code, to_code=tgt_code)
+        bwd_loss = avg_loss_dir(bwd_src, bwd_tgt, from_code=tgt_code, to_code=src_code)
         all_fwd.append(fwd_loss); all_bwd.append(bwd_loss)
 
         print(f"[Lang={L}] token-loss src->{tgt_label}: {fwd_loss:.4f} | {tgt_label}->src: {bwd_loss:.4f}")
@@ -649,6 +647,21 @@ def main():
                     help="Sampling temperature T (p ∝ n^(1/T)); higher T upweights low-resource.")
     ap.add_argument("--alpha", type=float, default=None,
                     help="Alternative smoothing exponent α (p ∝ n^α). If provided, overrides --temperature.")
+    ap.add_argument(
+        "--easy-source-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Row sampling weight for easy lexical/template source buckets. "
+            "Use values like 0.1-0.3 to keep dictionaries/classroom rows but "
+            "stop them dominating sentence-level hard-domain training."
+        ),
+    )
+    ap.add_argument(
+        "--easy-source-buckets",
+        default="dictionary,learning_vocab,classroom_context",
+        help="Comma-separated source buckets affected by --easy-source-weight.",
+    )
 
     # Training hyperparams
     ap.add_argument("--steps", type=int, default=60000)
@@ -699,6 +712,9 @@ def main():
     # Model & tokenizer
     tok = NllbTokenizer.from_pretrained(args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model)
+    model.config.decoder_start_token_id = tok.eos_token_id
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.decoder_start_token_id = tok.eos_token_id
 
     # Resize embeddings if tokenizer has grown
     emb_rows = model.get_input_embeddings().num_embeddings
@@ -760,8 +776,8 @@ def main():
 
         losses: List[float] = []
         pbar = trange(args.steps, desc="Training", dynamic_ncols=True)
-        src_lang_id = get_lang_id(tok, src_code)
-        tgt_lang_id = get_lang_id(tok, tgt_code)
+        get_lang_id(tok, src_code)
+        get_lang_id(tok, tgt_code)
 
         for step in pbar:
             try:
@@ -769,16 +785,17 @@ def main():
                 if random.random() < args.p_src2tgt:
                     src_texts = df_train.iloc[idx][s_col].astype(str).tolist()
                     tgt_texts = df_train.iloc[idx][t_col].astype(str).tolist()
-                    s_code = src_code; forced_id = tgt_lang_id; dir_tag = "src->tgt"
+                    s_code = src_code; t_code = tgt_code; dir_tag = "src->tgt"
                 else:
                     src_texts = df_train.iloc[idx][t_col].astype(str).tolist()
                     tgt_texts = df_train.iloc[idx][s_col].astype(str).tolist()
-                    s_code = tgt_code; forced_id = src_lang_id; dir_tag = "tgt->src"
+                    s_code = tgt_code; t_code = src_code; dir_tag = "tgt->src"
 
-                    # NOTE: core logic preserved
-
-                loss = training_step(tok, model, src_texts, tgt_texts, s_code,
-                                     args.max_length, device, scaler.is_enabled(), scaler, forced_id)
+                loss = training_step(
+                    tok, model, src_texts, tgt_texts, s_code,
+                    t_code, args.max_length, device, scaler.is_enabled(), scaler,
+                    loss_scale=max(1, args.grad_accum_steps),
+                )
                 losses.append(loss.item())
 
                 if (step + 1) % args.grad_accum_steps == 0:
@@ -866,8 +883,9 @@ def main():
     # Precompute language codes and LID ids
     lang2src_code: Dict[str, str] = {L: get_nllb_code(L) for L in kept_langs}
     restore_custom_lang_ids(tok, list(lang2src_code.values()) + [tgt_code])
-    lid_src: Dict[str, int] = {L: get_lang_id(tok, lang2src_code[L]) for L in kept_langs}
-    lid_tgt = get_lang_id(tok, tgt_code)
+    for L in kept_langs:
+        get_lang_id(tok, lang2src_code[L])
+    get_lang_id(tok, tgt_code)
 
     # Numpy arrays for fast sampling per language
     arr_by_lang = {
@@ -877,6 +895,22 @@ def main():
         )
         for L in kept_langs
     }
+    easy_buckets = set(parse_csv_values(args.easy_source_buckets))
+    sample_probs_by_lang: Dict[str, Optional[np.ndarray]] = {}
+    if args.easy_source_weight <= 0:
+        sys.exit("--easy-source-weight must be > 0.")
+    for L in kept_langs:
+        df_l = train_by[L]
+        if "source" not in df_l.columns or abs(args.easy_source_weight - 1.0) < 1e-9:
+            sample_probs_by_lang[L] = None
+            continue
+        buckets = df_l["source"].map(source_bucket)
+        weights = np.ones(len(df_l), dtype=np.float64)
+        weights[buckets.isin(easy_buckets).to_numpy()] = float(args.easy_source_weight)
+        if not np.isfinite(weights).all() or weights.sum() <= 0:
+            sample_probs_by_lang[L] = None
+        else:
+            sample_probs_by_lang[L] = weights / weights.sum()
 
     # Run directory (shared multilingual tag)
     tag = f"formosan_multilingual_to_{args.tgt_lang}"
@@ -891,6 +925,26 @@ def main():
     for L, n, p in zip(kept_langs, counts.tolist(), probs.tolist()):
         print(f"  {L:11s}  n={int(n):6d}  p={p:.4f}")
     print(f"[Multilingual] Sampling scheme: p(L) ∝ n^(1/T) w/ {mix_note}.")
+    if abs(args.easy_source_weight - 1.0) >= 1e-9:
+        print(
+            "[Multilingual] Row sampling weights: "
+            f"{sorted(easy_buckets)} -> {args.easy_source_weight:g}"
+        )
+        for L in kept_langs:
+            df_l = train_by[L]
+            if "source" not in df_l.columns:
+                continue
+            buckets = df_l["source"].map(source_bucket)
+            raw_easy = float(buckets.isin(easy_buckets).mean())
+            row_probs = sample_probs_by_lang.get(L)
+            if row_probs is None:
+                eff_easy = raw_easy
+            else:
+                eff_easy = float(row_probs[buckets.isin(easy_buckets).to_numpy()].sum())
+            print(
+                f"  {L:11s} easy rows={raw_easy*100:5.1f}% "
+                f"effective sample={eff_easy*100:5.1f}%"
+            )
     print(f"\nRun dir: {run_dir}")
     print(f"Starting multilingual training on {device} for {args.steps} steps...")
     print(f"Batch size: {args.batch_size} | Grad accum: {args.grad_accum_steps} | Max len: {args.max_length} | FP16: {bool(scaler.is_enabled())}")
@@ -906,26 +960,33 @@ def main():
             L = np.random.choice(kept_langs, p=probs)
             f_src_arr, zh_tgt_arr = arr_by_lang[L]
             # 2) Sample indices from that language
-            idx = np.random.randint(0, len(f_src_arr), size=args.batch_size)
+            row_probs = sample_probs_by_lang.get(L)
+            if row_probs is None:
+                idx = np.random.randint(0, len(f_src_arr), size=args.batch_size)
+            else:
+                idx = np.random.choice(
+                    len(f_src_arr), size=args.batch_size, replace=True, p=row_probs
+                )
 
             if random.random() < args.p_src2tgt:
                 # (Formosan L) -> Chinese
                 src_texts = f_src_arr[idx].tolist()
                 tgt_texts = zh_tgt_arr[idx].tolist()
                 s_code = lang2src_code[L]
-                forced_id = lid_tgt
+                t_code = tgt_code
                 dir_tag = f"{L}->{tgt_short}"
             else:
                 # Chinese -> (Formosan L)
                 src_texts = zh_tgt_arr[idx].tolist()
                 tgt_texts = f_src_arr[idx].tolist()
                 s_code = tgt_code
-                forced_id = lid_src[L]
+                t_code = lang2src_code[L]
                 dir_tag = f"{tgt_short}->{L}"
 
-            # 3) Core unchanged step
+            # 3) Train with the same NLLB target-label format used for generation
             loss = training_step(tok, model, src_texts, tgt_texts, s_code,
-                                 args.max_length, device, scaler.is_enabled(), scaler, forced_id)
+                                 t_code, args.max_length, device, scaler.is_enabled(), scaler,
+                                 loss_scale=max(1, args.grad_accum_steps))
             losses.append(loss.item())
 
             # 4) Optim step

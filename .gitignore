@@ -4,3 +4,45 @@ downloaded_*
 .venv/
 scripts/.formosan_qc_scripts/
 bash/
+artifacts/
+runs/
+logs/
+raw_corpora/
+hf_space_*/
+
+# Python/runtime clutter
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Generated DeepL pivot corpora and caches. These are expensive to rebuild, so
+# keep protected local copies under protected_corpora/ and mirror them off-box.
+pivot_corpora_final/*.csv
+pivot_corpora_final/*_report.json
+processed_corpora/pivot/*.csv
+processed_corpora/pivot/cache/
+processed_corpora/pivot/pivot_manifest.json
+
+# Protected local corpus payloads are intentionally not versioned. Keep the
+# manifest/checksums in git so clones know what should exist locally.
+protected_corpora/*
+!protected_corpora/README.md
+!protected_corpora/deepl_pivots/
+protected_corpora/deepl_pivots/*
+!protected_corpora/deepl_pivots/README.md
+!protected_corpora/deepl_pivots/MANIFEST.json
+!protected_corpora/deepl_pivots/SHA256SUMS
+
+# Experiment outputs are generated artifacts, not source.
+formosan_mt_experiments/data/*
+!formosan_mt_experiments/data/.gitkeep
+!formosan_mt_experiments/data/README.md
+formosan_mt_experiments/reports/*
+!formosan_mt_experiments/reports/.gitkeep
+!formosan_mt_experiments/reports/README.md
+
+# Avoid saving heavy generated model artifacts inside source script folders.
+scripts/mt/nllb/prelims/big_corpus_combined.csv
+scripts/mt/nllb/prelims/formosan_multilingual_nllb_language_info.json
+scripts/mt/nllb/prelims/formosan_multilingual_nllb_model/
+scripts/mt/nllb/prelims/formosan_multilingual_nllb_tokenizer/

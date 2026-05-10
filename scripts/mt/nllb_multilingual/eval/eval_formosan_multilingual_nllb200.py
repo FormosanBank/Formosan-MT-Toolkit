@@ -179,6 +179,9 @@ def lid_from_code(code: str) -> str:
 def load_tok_model(tok_dir: str, model_dir: str, device: torch.device):
     tok = NllbTokenizer.from_pretrained(tok_dir)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_dir)
+    model.config.decoder_start_token_id = tok.eos_token_id
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.decoder_start_token_id = tok.eos_token_id
 
     emb_rows = model.get_input_embeddings().num_embeddings
     tok_rows = len(tok)
@@ -294,15 +297,16 @@ def batched_generate(
     gen_kwargs: Optional[Dict] = None,
 ) -> List[str]:
     """
-    Encode with correct source LID and generate with BOTH forced_bos_token_id and
-    decoder_start_token_id set to the target LID for HF version robustness.
+    Encode with correct source LID and generate with forced_bos_token_id set to
+    the target LID. Keep decoder_start_token_id as EOS (`</s>`), which is the
+    M2M100/NLLB decoder start used by Transformers 4.56.
     Prefer max_new_tokens/min_new_tokens over legacy max_length for decoding.
     """
     gen_kwargs = dict(gen_kwargs or {})
     # Resolve/validate the target language id once
     forced_id = ensure_lang_token(tokenizer, to_code)
     gen_kwargs.setdefault("forced_bos_token_id", forced_id)
-    gen_kwargs.setdefault("decoder_start_token_id", forced_id)
+    gen_kwargs.setdefault("decoder_start_token_id", tokenizer.eos_token_id)
     gen_kwargs.setdefault("eos_token_id", tokenizer.eos_token_id)
     gen_kwargs.setdefault("pad_token_id", tokenizer.pad_token_id)
 
@@ -339,11 +343,14 @@ def batched_generate(
             output_scores=False,
         )
 
-        # Optional sanity check: first token should be the target LID
+        # Optional sanity check: generation should start </s>, target LID.
         try:
-            first_tokens = gen_out.sequences[:, 0].tolist()
-            if any(t != forced_id for t in first_tokens):
-                print(f"[warn] First decoder token != {to_code} for some samples.")
+            start_tokens = gen_out.sequences[:, 0].tolist()
+            target_tokens = gen_out.sequences[:, 1].tolist()
+            if any(t != tokenizer.eos_token_id for t in start_tokens):
+                print("[warn] First decoder token != </s> for some samples.")
+            if any(t != forced_id for t in target_tokens):
+                print(f"[warn] First generated token != {to_code} for some samples.")
         except Exception:
             pass
 
@@ -726,11 +733,11 @@ def main():
     ap.add_argument("--beam", type=int, default=4)
 
     # Modern generation knobs
-    ap.add_argument("--max-new-tokens", type=int, default=32)
-    ap.add_argument("--min-new-tokens", type=int, default=2)
-    ap.add_argument("--no-repeat-ngram-size", type=int, default=3)
-    ap.add_argument("--repetition-penalty", type=float, default=1.1)
-    ap.add_argument("--length-penalty", type=float, default=0.9)
+    ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument("--min-new-tokens", type=int, default=1)
+    ap.add_argument("--no-repeat-ngram-size", type=int, default=0)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0)
+    ap.add_argument("--length-penalty", type=float, default=1.0)
 
     # Scoring options
     ap.add_argument(

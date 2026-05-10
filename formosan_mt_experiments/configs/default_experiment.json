@@ -1,0 +1,58 @@
+{
+  "project_root": ".",
+  "primary_input": "pivot_corpora_final/big_corpus_en.csv",
+  "splits": {
+    "output_dir": "formosan_mt_experiments/data/splits_en_v1",
+    "train_ratio": 0.9,
+    "validate_ratio": 0.025,
+    "test_ratio": 0.075,
+    "tiers": ["lexical", "in_domain_hard", "hard_global"],
+    "headline_tier": "in_domain_hard",
+    "stress_tier": "hard_global"
+  },
+  "tokenizer": {
+    "mode": "spm",
+    "spm_vocab_sweep": [8192, 16384, 32768],
+    "default_spm_vocab": 16384,
+    "min_char_frequency": 3,
+    "max_dialect_tags": 200
+  },
+  "training_defaults": {
+    "steps": 300000,
+    "batch_size": 16,
+    "grad_accum_steps": 4,
+    "effective_batch_size": 64,
+    "max_length": 384,
+    "learning_rate": 0.00003,
+    "warmup_steps": 4000,
+    "weight_decay": 0.001,
+    "alpha": 0.5,
+    "precision": "bf16",
+    "label_smoothing": 0.1,
+    "f2en_easy_source_weight": 0.05,
+    "en2f_easy_source_weight": 0.15
+  },
+  "dae_defaults": {
+    "steps": 100000,
+    "word_dropout": 0.1,
+    "span_mask": 0.15,
+    "shuffle_distance": 3
+  },
+  "generation_defaults": {
+    "beam": 4,
+    "max_length": 384,
+    "max_new_tokens": 256,
+    "min_new_tokens": 1,
+    "no_repeat_ngram_size": 0,
+    "repetition_penalty": 1.0,
+    "length_penalty": 1.0
+  },
+  "lora_defaults": {
+    "enabled": false,
+    "r": 16,
+    "alpha": 32,
+    "dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
+    "merge_lora_final": true
+  }
+}

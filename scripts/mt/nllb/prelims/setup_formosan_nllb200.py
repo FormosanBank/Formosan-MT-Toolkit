@@ -39,7 +39,8 @@ CSV columns expected:
 - OPTIONAL: english_sentence (included in SPM/char scans if present)
 
 Notes:
-- Use tokenizer.src_lang / forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang) for generation.  # HF NLLB docs
+- Use tokenizer.src_lang / forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang) for generation.
+  Keep decoder_start_token_id as </s> (the NLLB/M2M100 default), not the target language id.
 """
 
 from __future__ import annotations
@@ -96,7 +97,7 @@ TARGET_LANGUAGE_MAP: Dict[str, str] = {
     "english": "eng_Latn",
 }
 
-BASE_MODEL_NAME = "facebook/nllb-200-distilled-600M"
+DEFAULT_BASE_MODEL_NAME = "facebook/nllb-200-distilled-600M"
 
 
 # ────────────────────────────── utilities ─────────────────────────────────────
@@ -286,10 +287,8 @@ def _seed_new_langcode_rows(model, tokenizer, formosan_langcodes: List[str]):
         tid = tokenizer.convert_tokens_to_ids(lid)
         if tid is None or tid < 0:
             continue
-        # If row already has non-zero norm (e.g., copied/avg), leave it alone
-        if torch.norm(emb[tid]).item() == 0.0:
-            emb[tid] = emb[src_id]
-            seeded += 1
+        emb[tid] = emb[src_id]
+        seeded += 1
     return seeded
 
 
@@ -339,10 +338,11 @@ def setup_tokenizer_and_model(add_mode: str,
                               spm_vocab: int,
                               min_char_freq: int,
                               device: str,
-                              also_eng: bool) -> Tuple:
+                              also_eng: bool,
+                              base_model_name: str = DEFAULT_BASE_MODEL_NAME) -> Tuple:
     print("🔧 Loading base NLLB tokenizer/model...")
-    tokenizer_base = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, use_fast=False)
-    model = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL_NAME)
+    tokenizer_base = AutoTokenizer.from_pretrained(base_model_name, use_fast=False)
+    model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
 
     extra_lang_codes = [FORMOSAN_LANGUAGE_MAP[k] for k in sorted(supported_langs)]
 
@@ -427,6 +427,12 @@ def setup_tokenizer_and_model(add_mode: str,
         if seeded:
             print(f"🌱 Seeded {seeded} Formosan *_Latn language-code embeddings from eng_Latn")
 
+    # NLLB/M2M100 generation starts the decoder with </s>; forced_bos_token_id
+    # then places the target language id as the first generated token.
+    model.config.decoder_start_token_id = tokenizer.eos_token_id
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.decoder_start_token_id = tokenizer.eos_token_id
+
     # Move to device
     model = model.to(torch.device(device))
     print(f"📱 Model on: {device}")
@@ -446,7 +452,7 @@ def _gen_once(tokenizer, model, device, text: str, src_lid: str, tgt_lid: str,
         num_beams=num_beams,
         max_new_tokens=max_new_tokens,
         forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lid),
-        decoder_start_token_id=tokenizer.convert_tokens_to_ids(tgt_lid),  # add this
+        decoder_start_token_id=tokenizer.eos_token_id,
     )
     return tokenizer.batch_decode(out, skip_special_tokens=True)[0]
 
@@ -523,7 +529,8 @@ def save_everything(tokenizer,
                     supported_langs: Set[str],
                     output_prefix: str,
                     added_char_tokens: int,
-                    added_spm_pieces: int):
+                    added_spm_pieces: int,
+                    base_model_name: str):
     tok_dir = f"{output_prefix}_tokenizer"
     mdl_dir = f"{output_prefix}_model"
     print("💾 Saving tokenizer/model...")
@@ -538,7 +545,7 @@ def save_everything(tokenizer,
         "len_tokenizer": len(tokenizer),
         "added_char_tokens": int(added_char_tokens),
         "added_spm_pieces": int(added_spm_pieces),
-        "base_model": BASE_MODEL_NAME,
+        "base_model": base_model_name,
     }
     with open(f"{output_prefix}_language_info.json", "w", encoding="utf-8") as f:
         json.dump(lang_info, f, indent=2, ensure_ascii=False)
@@ -554,6 +561,8 @@ def main():
     ap.add_argument("--input", type=Path, required=True,
                     help="CSV with columns: lang_code, formosan_sentence, chinese_sentence (optional: english_sentence)")
     ap.add_argument("--output-prefix", default="formosan_multilingual_nllb")
+    ap.add_argument("--base-model", default=DEFAULT_BASE_MODEL_NAME,
+                    help="Base NLLB checkpoint, e.g. facebook/nllb-200-distilled-600M or facebook/nllb-200-1.3B")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--add-mode", default="spm", choices=["none", "chars", "spm"],
                     help="Fix unknowns by adding frequent chars, or merging a new SPM (default: spm for zh_Hant)")
@@ -574,7 +583,7 @@ def main():
         sys.exit(f"❌ Input file not found: {args.input}")
 
     device = get_device(args.device)
-    print(f"🚀 NLLB-200 setup\n📁 Input: {args.input}\n📱 Device: {device}\n📂 Out: {args.output_prefix}\n🧩 Mode: {args.add_mode}")
+    print(f"🚀 NLLB-200 setup\n📁 Input: {args.input}\n📱 Device: {device}\n📂 Out: {args.output_prefix}\n🧩 Mode: {args.add_mode}\n🧱 Base: {args.base_model}")
 
     df, supported_langs = load_corpus(args.input)
 
@@ -587,9 +596,10 @@ def main():
         min_char_freq=args.min_char_frequency,
         device=device,
         also_eng=args.also_eng,
+        base_model_name=args.base_model,
     )
 
-    save_everything(tokenizer, model, supported_langs, args.output_prefix, added_char_tokens, added_spm_pieces)
+    save_everything(tokenizer, model, supported_langs, args.output_prefix, added_char_tokens, added_spm_pieces, args.base_model)
 
     if args.run_eval:
         run_smoke_tests(
@@ -605,8 +615,9 @@ def main():
             save_jsonl=args.save_eval_json,
         )
 
-    print("\n🎉 Done. Ready for fine-tuning.\nℹ️  For training, set tokenizer.src_lang per batch and use "
-          "`forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang)` in generate().")
+    print("\n🎉 Done. Ready for fine-tuning.\nℹ️  For training, set tokenizer.src_lang/tgt_lang per batch; "
+          "for generation use `forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang)` "
+          "and keep `decoder_start_token_id` as `tokenizer.eos_token_id`.")
 
 
 if __name__ == "__main__":
