@@ -1,4 +1,4 @@
-# FormosanBank-MT
+# Formosan-MT-Toolkit
 
 MT tooling and corpus creation repo. It is part of the FormosanBank organization.
 
