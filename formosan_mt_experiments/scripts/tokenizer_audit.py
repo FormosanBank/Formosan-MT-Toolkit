@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from transformers import NllbTokenizer
 
-from mt_common import DEFAULT_INPUT, FORMOSAN_CODES, read_parallel_csv, write_json
+from mt_common import DEFAULT_INPUT, FORMOSAN_CODES, normalize_target_language, read_parallel_csv, target_col_for, write_json
 
 
 def audit_tokenizer(
@@ -18,9 +18,10 @@ def audit_tokenizer(
     output_json: Path,
     output_csv: Path | None,
     max_rows_per_lang: int,
+    target_col: str = "english_sentence",
 ) -> dict:
     tok = NllbTokenizer.from_pretrained(tokenizer_dir)
-    df = read_parallel_csv(input_csv)
+    df = read_parallel_csv(input_csv, target_col=target_col)
     rows: list[dict] = []
 
     for lang in FORMOSAN_CODES:
@@ -83,6 +84,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument(
@@ -92,6 +95,8 @@ def main() -> None:
         help="Use 0 for all rows. Sampling keeps audits fast during sweeps.",
     )
     args = parser.parse_args()
+    target_lang = normalize_target_language(args.target_lang, args.target_col)
+    target_col = args.target_col or target_col_for(target_lang)
 
     summary = audit_tokenizer(
         tokenizer_dir=args.tokenizer,
@@ -99,6 +104,7 @@ def main() -> None:
         output_json=args.output_json,
         output_csv=args.output_csv,
         max_rows_per_lang=args.max_rows_per_lang,
+        target_col=target_col,
     )
     print(f"macro pieces/word: {summary['macro_avg_pieces_per_word']:.3f}")
     print(f"report: {args.output_json}")

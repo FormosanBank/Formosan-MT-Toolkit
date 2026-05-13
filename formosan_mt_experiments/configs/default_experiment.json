@@ -1,8 +1,23 @@
 {
   "project_root": ".",
   "primary_input": "pivot_corpora_final/big_corpus_en.csv",
+  "targets": {
+    "english": {
+      "input": "pivot_corpora_final/big_corpus_en.csv",
+      "target_col": "english_sentence",
+      "directions": ["f2en", "en2f"],
+      "selected_recipe": "E3 SPM8k directional for deployable demo; E4 1.3B LoRA for best quality"
+    },
+    "chinese": {
+      "input": "pivot_corpora_final/big_corpus_zh.csv",
+      "target_col": "chinese_sentence",
+      "directions": ["f2zh", "zh2f"],
+      "selected_recipe": "E3 SPM8k directional"
+    }
+  },
   "splits": {
-    "output_dir": "formosan_mt_experiments/data/splits_en_v1",
+    "english_output_dir": "formosan_mt_experiments/data/splits_en_v1",
+    "chinese_output_dir": "formosan_mt_experiments/data/splits_zh_v1",
     "train_ratio": 0.9,
     "validate_ratio": 0.025,
     "test_ratio": 0.075,
@@ -14,6 +29,7 @@
     "mode": "spm",
     "spm_vocab_sweep": [8192, 16384, 32768],
     "default_spm_vocab": 16384,
+    "chinese_default_spm_vocab": 8192,
     "min_char_frequency": 3,
     "max_dialect_tags": 200
   },
@@ -30,7 +46,9 @@
     "precision": "bf16",
     "label_smoothing": 0.1,
     "f2en_easy_source_weight": 0.05,
-    "en2f_easy_source_weight": 0.15
+    "en2f_easy_source_weight": 0.15,
+    "f2zh_easy_source_weight": 0.05,
+    "zh2f_easy_source_weight": 0.15
   },
   "dae_defaults": {
     "steps": 100000,

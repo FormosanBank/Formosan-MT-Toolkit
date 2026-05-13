@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build tiered, leakage-controlled Formosan-English MT experiment splits.
+"""Build tiered, leakage-controlled Formosan MT experiment splits.
 
 The script ignores any existing split column and emits one full CSV per eval tier:
 
@@ -27,31 +27,36 @@ from mt_common import (
     EASY_BUCKETS,
     add_normalized_columns,
     bucket_counts,
+    normalize_target_language,
     overlap_stats,
     read_parallel_csv,
     source_bucket,
     split_counts,
     split_counts_by_language,
-    token_count,
+    target_col_for,
+    target_tag_for,
     write_json,
 )
 
 
 TIERS = ("lexical", "in_domain_hard", "hard_global")
-KEEP_COLUMNS = (
-    "row_id",
-    "lang_code",
-    "formosan_sentence",
-    "english_sentence",
-    "source",
-    "dialect",
-    "split",
-    "eval_tier",
-    "source_bucket",
-    "formosan_tokens",
-    "target_tokens",
-    "short_entry",
-)
+
+
+def keep_columns(target_col: str) -> list[str]:
+    return [
+        "row_id",
+        "lang_code",
+        "formosan_sentence",
+        target_col,
+        "source",
+        "dialect",
+        "split",
+        "eval_tier",
+        "source_bucket",
+        "formosan_tokens",
+        "target_tokens",
+        "short_entry",
+    ]
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,7 @@ def choose_sources(
 def build_tier(
     df: pd.DataFrame,
     tier: str,
+    target_col: str,
     test_ratio: float,
     val_ratio: float,
     seed: int,
@@ -272,7 +278,7 @@ def build_tier(
         "hard_global_target_unique_eval": hard_global_target_unique,
         "languages": language_reports,
     }
-    return out[list(KEEP_COLUMNS)], report
+    return out[keep_columns(target_col)], report
 
 
 def validate_report(report: dict) -> None:
@@ -294,9 +300,11 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("formosan_mt_experiments/data/splits_en_v1"),
+        default=None,
     )
-    parser.add_argument("--target-col", default="english_sentence")
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
+    parser.add_argument("--output-prefix", default=None)
     parser.add_argument("--train-ratio", type=float, default=0.90)
     parser.add_argument("--val-ratio", type=float, default=0.025)
     parser.add_argument("--test-ratio", type=float, default=0.075)
@@ -311,6 +319,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    target_lang = normalize_target_language(args.target_lang, args.target_col)
+    target_col = args.target_col or target_col_for(target_lang)
+    target_tag = target_tag_for(target_lang)
+    file_short = "en" if target_tag == "eng" else target_tag
+    output_prefix = args.output_prefix or f"big_corpus_{file_short}"
+    if args.output_dir is None:
+        args.output_dir = Path(f"formosan_mt_experiments/data/splits_{file_short}_v1")
+
     if abs((args.train_ratio + args.val_ratio + args.test_ratio) - 1.0) > 1e-6:
         raise SystemExit("--train-ratio + --val-ratio + --test-ratio must equal 1.0")
 
@@ -321,14 +337,17 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw = read_parallel_csv(args.input, target_col=args.target_col)
+    raw = read_parallel_csv(args.input, target_col=target_col)
     raw = raw.copy()
     raw["row_id"] = range(len(raw))
-    df = add_normalized_columns(raw, target_col=args.target_col)
+    df = add_normalized_columns(raw, target_col=target_col, target_lang=target_lang)
 
     all_reports = {
         "input": str(args.input),
         "output_dir": str(args.output_dir),
+        "target_lang": target_lang,
+        "target_col": target_col,
+        "output_prefix": output_prefix,
         "ratios": {
             "train": args.train_ratio,
             "validate": args.val_ratio,
@@ -342,6 +361,7 @@ def main() -> None:
         out, report = build_tier(
             df,
             tier=tier,
+            target_col=target_col,
             test_ratio=args.test_ratio,
             val_ratio=args.val_ratio,
             seed=args.seed,
@@ -351,9 +371,9 @@ def main() -> None:
         )
         validate_report(report)
 
-        full_path = args.output_dir / f"big_corpus_en_{tier}.csv"
-        test_path = args.output_dir / f"big_corpus_en_{tier}_test.csv"
-        val_path = args.output_dir / f"big_corpus_en_{tier}_validate.csv"
+        full_path = args.output_dir / f"{output_prefix}_{tier}.csv"
+        test_path = args.output_dir / f"{output_prefix}_{tier}_test.csv"
+        val_path = args.output_dir / f"{output_prefix}_{tier}_validate.csv"
         out.to_csv(full_path, index=False)
         out[out["split"].eq("test")].to_csv(test_path, index=False)
         out[out["split"].eq("validate")].to_csv(val_path, index=False)

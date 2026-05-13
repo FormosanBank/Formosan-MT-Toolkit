@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
 
 DEFAULT_INPUT = PROJECT_ROOT / "pivot_corpora_final" / "big_corpus_en.csv"
+DEFAULT_ZH_INPUT = PROJECT_ROOT / "pivot_corpora_final" / "big_corpus_zh.csv"
 DEFAULT_SETUP_SCRIPT = PROJECT_ROOT / "scripts" / "mt" / "nllb" / "prelims" / "setup_formosan_nllb200.py"
 DEFAULT_LEGACY_TRAIN_SCRIPT = (
     PROJECT_ROOT
@@ -83,6 +84,11 @@ CODE_TO_LID = {
     "zh": "zho_Hant",
 }
 
+TARGET_CONFIGS = {
+    "english": {"short": "eng", "tag": "eng", "col": "english_sentence", "lid": "eng_Latn"},
+    "chinese": {"short": "zh", "tag": "zh", "col": "chinese_sentence", "lid": "zho_Hant"},
+}
+
 EASY_BUCKETS = ("dictionary", "learning_vocab", "classroom_context")
 
 DEFAULT_DOMAIN_BUCKETS = (
@@ -121,8 +127,75 @@ def normalize_text(value: object) -> str:
 
 
 def token_count(value: object) -> int:
+    """Whitespace token count for Formosan/English-like text."""
     text = normalize_text(value)
     return 0 if not text else len(text.split())
+
+
+def cjk_token_count(value: object) -> int:
+    """Character-aware token proxy for Chinese text without whitespace."""
+    text = normalize_text(value)
+    if not text:
+        return 0
+    cjk_chars = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text)
+    non_cjk = re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", " ", text)
+    non_cjk_tokens = [tok for tok in non_cjk.split() if tok]
+    return len(cjk_chars) + len(non_cjk_tokens)
+
+
+def normalize_target_language(target_lang: str | None = None, target_col: str | None = None) -> str:
+    if target_lang:
+        key = str(target_lang).strip().lower()
+        if key in {"en", "eng", "english"}:
+            return "english"
+        if key in {"zh", "zho", "chinese"}:
+            return "chinese"
+        raise KeyError(f"Unsupported target language: {target_lang}")
+    if target_col == "chinese_sentence":
+        return "chinese"
+    return "english"
+
+
+def target_col_for(target_lang: str) -> str:
+    return TARGET_CONFIGS[normalize_target_language(target_lang)]["col"]
+
+
+def target_tag_for(target_lang: str) -> str:
+    return TARGET_CONFIGS[normalize_target_language(target_lang)]["tag"]
+
+
+def target_lid_for(target_lang: str) -> str:
+    return TARGET_CONFIGS[normalize_target_language(target_lang)]["lid"]
+
+
+def target_token_count(value: object, target_lang: str | None = None, target_col: str | None = None) -> int:
+    lang = normalize_target_language(target_lang, target_col)
+    if lang == "chinese":
+        return cjk_token_count(value)
+    return token_count(value)
+
+
+def target_language_from_direction(direction: str, target_lang: str | None = None) -> str:
+    direction = str(direction).strip().lower()
+    if direction in {"f2en", "en2f"}:
+        return "english"
+    if direction in {"f2zh", "zh2f"}:
+        return "chinese"
+    return normalize_target_language(target_lang)
+
+
+def is_formosan_to_target(direction: str) -> bool:
+    direction = str(direction).strip().lower()
+    return direction.startswith("f2") and direction != "dae"
+
+
+def is_target_to_formosan(direction: str) -> bool:
+    direction = str(direction).strip().lower()
+    return direction.endswith("2f") and direction != "dae"
+
+
+def direction_choices() -> list[str]:
+    return ["f2en", "en2f", "f2zh", "zh2f"]
 
 
 def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -> str:
@@ -163,15 +236,20 @@ def source_bucket(source: object) -> str:
     return s.split("/")[0] if s else "unknown"
 
 
-def add_normalized_columns(df: pd.DataFrame, target_col: str = "english_sentence") -> pd.DataFrame:
+def add_normalized_columns(
+    df: pd.DataFrame,
+    target_col: str = "english_sentence",
+    target_lang: str | None = None,
+) -> pd.DataFrame:
     out = df.copy()
+    lang = normalize_target_language(target_lang, target_col)
     out["_source_key"] = out["source"].fillna("").astype(str) if "source" in out else ""
     out["_source_bucket"] = out["_source_key"].map(source_bucket)
     out["_formosan_key"] = out["formosan_sentence"].map(normalize_text)
     out["_target_key"] = out[target_col].map(normalize_text)
     out["_pair_key"] = out["_formosan_key"] + PAIR_SEP + out["_target_key"]
     out["_formosan_tokens"] = out["formosan_sentence"].map(token_count)
-    out["_target_tokens"] = out[target_col].map(token_count)
+    out["_target_tokens"] = out[target_col].map(lambda x: target_token_count(x, target_lang=lang))
     out["_short_entry"] = (out["_formosan_tokens"] <= 2) & (out["_target_tokens"] <= 3)
     out["_lang_source_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"]
     out["_target_group_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"] + PAIR_SEP + out["_target_key"]
@@ -254,7 +332,9 @@ def get_lid(code: str) -> str:
 
 
 def base_special_tokens() -> list[str]:
-    tokens = ["<to_eng>", "<src_eng>", "<dae>", "<mask>"]
+    tokens = ["<dae>", "<mask>"]
+    for config in TARGET_CONFIGS.values():
+        tokens.extend([f"<to_{config['tag']}>", f"<src_{config['tag']}>"])
     for code in FORMOSAN_CODES:
         tokens.extend([f"<to_{code}>", f"<src_{code}>"])
     for bucket in DEFAULT_DOMAIN_BUCKETS:
@@ -280,16 +360,18 @@ def special_tokens_from_corpus(
     return sorted(tokens)
 
 
-def build_prefix(row: Mapping, direction: str) -> str:
+def build_prefix(row: Mapping, direction: str, target_lang: str | None = None) -> str:
     code = str(row.get("lang_code", "")).strip().lower()
     bucket = row.get("source_bucket", row.get("_source_bucket", source_bucket(row.get("source", ""))))
     dialect = row.get("dialect", "default")
     domain_tag = f"<dom_{safe_tag_value(bucket)}>"
     dialect_tag = f"<dialect_{safe_tag_value(dialect)}>"
-    if direction == "f2en":
-        return f"<to_eng> <src_{code}> {domain_tag} {dialect_tag}"
-    if direction == "en2f":
-        return f"<to_{code}> <src_eng> {domain_tag} {dialect_tag}"
+    if is_formosan_to_target(direction):
+        target_tag = target_tag_for(target_language_from_direction(direction, target_lang))
+        return f"<to_{target_tag}> <src_{code}> {domain_tag} {dialect_tag}"
+    if is_target_to_formosan(direction):
+        source_tag = target_tag_for(target_language_from_direction(direction, target_lang))
+        return f"<to_{code}> <src_{source_tag}> {domain_tag} {dialect_tag}"
     if direction == "dae":
         return f"<dae> <src_{code}> {domain_tag} {dialect_tag}"
     raise ValueError(f"Unsupported direction: {direction}")
@@ -299,6 +381,7 @@ def with_tagged_columns(
     df: pd.DataFrame,
     direction: str,
     target_col: str = "english_sentence",
+    target_lang: str | None = None,
     use_tags: bool = True,
 ) -> pd.DataFrame:
     out = df.copy()
@@ -306,10 +389,10 @@ def with_tagged_columns(
         return out
     if "source_bucket" not in out.columns:
         out["source_bucket"] = out["source"].map(source_bucket)
-    prefixes = out.apply(lambda row: build_prefix(row, direction), axis=1)
-    if direction in {"f2en", "dae"}:
+    prefixes = out.apply(lambda row: build_prefix(row, direction, target_lang=target_lang), axis=1)
+    if is_formosan_to_target(direction) or direction == "dae":
         out["formosan_sentence"] = prefixes + " " + out["formosan_sentence"].fillna("").astype(str)
-    elif direction == "en2f":
+    elif is_target_to_formosan(direction):
         out[target_col] = prefixes + " " + out[target_col].fillna("").astype(str)
     else:
         raise ValueError(f"Unsupported direction: {direction}")

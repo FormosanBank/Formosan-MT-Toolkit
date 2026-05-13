@@ -29,10 +29,31 @@ export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
 TIER="${TIER:-in_domain_hard}"
-DIRECTION="${DIRECTION:-f2en}"  # f2en or en2f
-INPUT="${INPUT:-${SCRATCH}/formosan_mt_experiments/data/splits_en_v1/big_corpus_en_${TIER}.csv}"
-TOKENIZER="${TOKENIZER:-${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep/formosan_multilingual_nllb_spm16384_tokenizer}"
-MODEL="${MODEL:-${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep/formosan_multilingual_nllb_spm16384_model}"
+TARGET_LANG="${TARGET_LANG:-english}"
+case "${TARGET_LANG}" in
+  english)
+    TARGET_COL="${TARGET_COL:-english_sentence}"
+    FILE_SHORT="en"
+    DEFAULT_DIRECTION="f2en"
+    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep"
+    DEFAULT_VOCAB="16384"
+    ;;
+  chinese)
+    TARGET_COL="${TARGET_COL:-chinese_sentence}"
+    FILE_SHORT="zh"
+    DEFAULT_DIRECTION="f2zh"
+    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192"
+    DEFAULT_VOCAB="8192"
+    ;;
+  *)
+    echo "Unsupported TARGET_LANG=${TARGET_LANG}" >&2
+    exit 1
+    ;;
+esac
+DIRECTION="${DIRECTION:-${DEFAULT_DIRECTION}}"
+INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_${TIER}.csv}"
+TOKENIZER="${TOKENIZER:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_tokenizer}"
+MODEL="${MODEL:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_model}"
 OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/E1_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 if [[ "${USE_DAE:-0}" == "1" ]]; then
@@ -52,6 +73,8 @@ srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/train_directional_nllb.py" \
   --tokenizer "${TOKENIZER}" \
   --model "${MODEL}" \
   --output-dir "${OUT_DIR}" \
+  --target-lang "${TARGET_LANG}" \
+  --target-col "${TARGET_COL}" \
   --direction "${DIRECTION}" \
   --steps "${STEPS:-300000}" \
   --batch-size "${BATCH_SIZE:-16}" \

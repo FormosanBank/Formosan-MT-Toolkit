@@ -9,11 +9,20 @@ from pathlib import Path
 import pandas as pd
 from transformers import NllbTokenizer
 
-from mt_common import add_normalized_columns, build_prefix, read_parallel_csv, source_bucket, write_json
+from mt_common import (
+    add_normalized_columns,
+    build_prefix,
+    direction_choices,
+    normalize_target_language,
+    read_parallel_csv,
+    source_bucket,
+    target_col_for,
+    write_json,
+)
 
 
-def validate_splits(df: pd.DataFrame) -> dict:
-    keyed = add_normalized_columns(df)
+def validate_splits(df: pd.DataFrame, target_col: str, target_lang: str) -> dict:
+    keyed = add_normalized_columns(df, target_col=target_col, target_lang=target_lang)
     split = keyed["split"].astype(str).str.lower()
     train = keyed[split.eq("train")]
     eval_df = keyed[split.isin(["validate", "valid", "val", "test"])]
@@ -29,14 +38,14 @@ def validate_splits(df: pd.DataFrame) -> dict:
     return {"ok": not failed, "overlaps": report, "failures": failed}
 
 
-def validate_tags(df: pd.DataFrame, tokenizer_dir: Path, direction: str) -> dict:
+def validate_tags(df: pd.DataFrame, tokenizer_dir: Path, direction: str, target_lang: str) -> dict:
     tok = NllbTokenizer.from_pretrained(tokenizer_dir)
     work = df.copy()
     if "source_bucket" not in work.columns:
         work["source_bucket"] = work["source"].map(source_bucket)
     tags = set()
     for _, row in work.iterrows():
-        tags.update(build_prefix(row, direction).split())
+        tags.update(build_prefix(row, direction, target_lang=target_lang).split())
     bad = []
     for token in sorted(tags):
         tid = tok.convert_tokens_to_ids(token)
@@ -53,18 +62,22 @@ def validate_tags(df: pd.DataFrame, tokenizer_dir: Path, direction: str) -> dict
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
     parser.add_argument("--tokenizer", type=Path, default=None)
-    parser.add_argument("--direction", choices=["f2en", "en2f", "dae"], default=None)
+    parser.add_argument("--direction", choices=direction_choices() + ["dae"], default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
-    df = read_parallel_csv(args.input)
+    target_lang = normalize_target_language(args.target_lang, args.target_col)
+    target_col = args.target_col or target_col_for(target_lang)
+    df = read_parallel_csv(args.input, target_col=target_col)
     if "split" not in df.columns:
         raise SystemExit("Input must have split column.")
-    split_report = validate_splits(df)
+    split_report = validate_splits(df, target_col=target_col, target_lang=target_lang)
     report = {"input": str(args.input), "split_validation": split_report}
     if args.tokenizer and args.direction:
-        report["tag_validation"] = validate_tags(df, args.tokenizer, args.direction)
+        report["tag_validation"] = validate_tags(df, args.tokenizer, args.direction, target_lang=target_lang)
     if args.output_json:
         write_json(args.output_json, report)
     print(report)

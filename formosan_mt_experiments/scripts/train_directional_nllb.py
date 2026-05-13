@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Directional multilingual NLLB fine-tuning for Formosan↔English experiments."""
+"""Directional multilingual NLLB fine-tuning for Formosan↔target-language experiments."""
 
 from __future__ import annotations
 
@@ -22,10 +22,16 @@ from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
     build_prefix,
+    direction_choices,
     get_lid,
+    is_formosan_to_target,
     language_sampling_probs,
+    normalize_target_language,
     read_parallel_csv,
     source_bucket,
+    target_col_for,
+    target_lid_for,
+    target_language_from_direction,
     with_tagged_columns,
     write_json,
 )
@@ -38,10 +44,10 @@ def ensure_lang_token(tokenizer: NllbTokenizer, code: str) -> int:
     return int(tid)
 
 
-def ensure_control_tags(tokenizer: NllbTokenizer, df: pd.DataFrame, direction: str) -> None:
+def ensure_control_tags(tokenizer: NllbTokenizer, df: pd.DataFrame, direction: str, target_lang: str = "english") -> None:
     needed = set()
     for _, row in df.iterrows():
-        needed.update(build_prefix(row, direction).split())
+        needed.update(build_prefix(row, direction, target_lang=target_lang).split())
     bad = []
     for token in sorted(needed):
         tid = tokenizer.convert_tokens_to_ids(token)
@@ -56,15 +62,21 @@ def ensure_control_tags(tokenizer: NllbTokenizer, df: pd.DataFrame, direction: s
 
 
 def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
-    df = read_parallel_csv(args.input)
+    df = read_parallel_csv(args.input, target_col=args.target_col)
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
     df["split"] = df["split"].astype(str).str.lower()
     df["source_bucket"] = df["source"].map(source_bucket)
 
     if args.use_tags and args.validate_tags:
-        ensure_control_tags(tokenizer, df, args.direction)
-    df = with_tagged_columns(df, args.direction, use_tags=args.use_tags)
+        ensure_control_tags(tokenizer, df, args.direction, target_lang=args.target_lang)
+    df = with_tagged_columns(
+        df,
+        args.direction,
+        target_col=args.target_col,
+        target_lang=args.target_lang,
+        use_tags=args.use_tags,
+    )
 
     train = df[df["split"].eq("train")].copy()
     val = df[df["split"].isin(["validate", "valid", "val"])].copy()
@@ -78,18 +90,18 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
             continue
         train_sub = train[train["lang_code"].eq(lang)].copy()
         val_sub = val[val["lang_code"].eq(lang)].copy()
-        if args.direction == "f2en":
+        if is_formosan_to_target(args.direction):
             train_sub["src_text"] = train_sub["formosan_sentence"].astype(str)
-            train_sub["tgt_text"] = train_sub["english_sentence"].astype(str)
+            train_sub["tgt_text"] = train_sub[args.target_col].astype(str)
             val_sub["src_text"] = val_sub["formosan_sentence"].astype(str)
-            val_sub["tgt_text"] = val_sub["english_sentence"].astype(str)
-            src_lid, tgt_lid = get_lid(lang), get_lid("english")
+            val_sub["tgt_text"] = val_sub[args.target_col].astype(str)
+            src_lid, tgt_lid = get_lid(lang), args.target_lid
         else:
-            train_sub["src_text"] = train_sub["english_sentence"].astype(str)
+            train_sub["src_text"] = train_sub[args.target_col].astype(str)
             train_sub["tgt_text"] = train_sub["formosan_sentence"].astype(str)
-            val_sub["src_text"] = val_sub["english_sentence"].astype(str)
+            val_sub["src_text"] = val_sub[args.target_col].astype(str)
             val_sub["tgt_text"] = val_sub["formosan_sentence"].astype(str)
-            src_lid, tgt_lid = get_lid("english"), get_lid(lang)
+            src_lid, tgt_lid = args.target_lid, get_lid(lang)
         train_by_lang[lang] = {
             "df": train_sub.reset_index(drop=True),
             "src_lid": src_lid,
@@ -109,6 +121,8 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
         "train_rows": int(len(train)),
         "validate_rows": int(len(val)),
         "direction": args.direction,
+        "target_lang": args.target_lang,
+        "target_col": args.target_col,
         "use_tags": bool(args.use_tags),
         "train_by_language": {k: int(len(v["df"])) for k, v in train_by_lang.items()},
         "validate_by_language": {k: int(len(v["df"])) for k, v in val_by_lang.items()},
@@ -202,7 +216,9 @@ def main() -> None:
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--direction", choices=["f2en", "en2f"], required=True)
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
+    parser.add_argument("--direction", choices=direction_choices(), required=True)
     parser.add_argument("--use-tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--validate-tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--steps", type=int, default=300000, help="Optimizer update steps.")
@@ -235,9 +251,18 @@ def main() -> None:
     parser.add_argument("--eval-batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    args.target_lang = normalize_target_language(args.target_lang, args.target_col)
+    args.target_col = args.target_col or target_col_for(args.target_lang)
+    args.target_lid = target_lid_for(args.target_lang)
+    direction_target = target_language_from_direction(args.direction, args.target_lang)
+    if direction_target != args.target_lang:
+        raise SystemExit(
+            f"--direction {args.direction!r} targets {direction_target}, "
+            f"but --target-lang is {args.target_lang!r}."
+        )
 
     if args.easy_source_weight is None:
-        args.easy_source_weight = 0.05 if args.direction == "f2en" else 0.15
+        args.easy_source_weight = 0.05 if is_formosan_to_target(args.direction) else 0.15
 
     peft_imports = None
     if args.lora_r > 0:
@@ -272,7 +297,7 @@ def main() -> None:
             model.resize_token_embeddings(len(tokenizer))
         else:
             raise SystemExit("Tokenizer is smaller than model embeddings; load matching artifacts.")
-    for lid in sorted(set(get_lid(c) for c in FORMOSAN_CODES) | {get_lid("english")}):
+    for lid in sorted(set(get_lid(c) for c in FORMOSAN_CODES) | {args.target_lid}):
         ensure_lang_token(tokenizer, lid)
 
     lora_enabled = args.lora_r > 0

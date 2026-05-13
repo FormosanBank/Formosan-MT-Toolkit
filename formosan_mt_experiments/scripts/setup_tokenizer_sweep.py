@@ -13,7 +13,15 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
-from mt_common import DEFAULT_INPUT, DEFAULT_SETUP_SCRIPT, special_tokens_from_corpus, read_parallel_csv, write_json
+from mt_common import (
+    DEFAULT_INPUT,
+    DEFAULT_SETUP_SCRIPT,
+    normalize_target_language,
+    read_parallel_csv,
+    special_tokens_from_corpus,
+    target_col_for,
+    write_json,
+)
 from tokenizer_audit import audit_tokenizer
 
 
@@ -29,10 +37,11 @@ def add_experiment_special_tokens(
     tokenizer_dir: Path,
     model_dir: Path,
     input_csv: Path,
+    target_col: str,
     max_dialect_tags: int,
     min_dialect_frequency: int,
 ) -> dict:
-    df = read_parallel_csv(input_csv)
+    df = read_parallel_csv(input_csv, target_col=target_col)
     desired_tokens = special_tokens_from_corpus(
         df,
         max_dialect_tags=max_dialect_tags,
@@ -94,6 +103,8 @@ def add_experiment_special_tokens(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
     parser.add_argument("--setup-script", type=Path, default=DEFAULT_SETUP_SCRIPT)
     parser.add_argument("--base-model", default="facebook/nllb-200-distilled-600M")
     parser.add_argument(
@@ -118,6 +129,8 @@ def main() -> None:
     parser.add_argument("--samples-per-lang", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    target_lang = normalize_target_language(args.target_lang, args.target_col)
+    target_col = args.target_col or target_col_for(target_lang)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     reports = {}
@@ -174,6 +187,7 @@ def main() -> None:
                 tokenizer_dir=tokenizer_dir,
                 model_dir=model_dir,
                 input_csv=args.input,
+                target_col=target_col,
                 max_dialect_tags=args.max_dialect_tags,
                 min_dialect_frequency=args.min_dialect_frequency,
             )
@@ -185,6 +199,7 @@ def main() -> None:
                 output_json=audit_json,
                 output_csv=audit_csv,
                 max_rows_per_lang=20000,
+                target_col=target_col,
             )
             reports[str(vocab)] = {
                 "setup_prefix": str(prefix),

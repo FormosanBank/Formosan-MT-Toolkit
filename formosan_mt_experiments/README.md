@@ -1,6 +1,6 @@
 # Formosan MT Experiment Stack
 
-This directory is a self-contained experiment layer for Formosan-English MT. It does not replace the older NLLB scripts; it wraps or reuses them where useful and keeps new split, tokenizer, training, DAE, and eval logic here.
+This directory is a self-contained experiment layer for Formosan MT against English and Traditional Chinese. It does not replace the older NLLB scripts; it wraps or reuses them where useful and keeps new split, tokenizer, training, DAE, and eval logic here.
 
 ## Directory Map
 
@@ -15,13 +15,14 @@ Generated files under `data/` and `reports/` are intentionally ignored by git ex
 Expected generated subdirectories:
 
 - `data/splits_en_v1/`: tiered English MT splits and validation reports.
+- `data/splits_zh_v1/`: tiered Traditional Chinese MT splits and validation reports.
 - `data/tokenizer_sweep*/`: tokenizer/model setup outputs and tokenizer fragmentation audits.
 - `data/runs/` or `/scratch/.../formosan_mt_experiments/runs/`: local or cluster training outputs.
 - `reports/E*/`: prediction CSVs and metric JSONs.
 
 The old one-off robust splitter is preserved as `scripts/legacy_rebuild_robust_mt_splits.py` for reference. Use `scripts/build_experiment_splits.py` for new runs.
 
-## E0: Build Tiered Splits
+## Build Tiered Splits
 
 Build all split tiers from the raw English corpus and ignore its current `split` column:
 
@@ -34,18 +35,35 @@ python formosan_mt_experiments/scripts/build_experiment_splits.py \
   --test-ratio 0.075
 ```
 
+Build the matching Traditional Chinese splits:
+
+```bash
+python formosan_mt_experiments/scripts/build_experiment_splits.py \
+  --input pivot_corpora_final/big_corpus_zh.csv \
+  --target-lang chinese \
+  --target-col chinese_sentence \
+  --output-prefix big_corpus_zh \
+  --output-dir formosan_mt_experiments/data/splits_zh_v1 \
+  --train-ratio 0.90 \
+  --val-ratio 0.025 \
+  --test-ratio 0.075
+```
+
 Outputs:
 
 - `big_corpus_en_lexical.csv`: honest lexeme/template eval.
 - `big_corpus_en_in_domain_hard.csv`: headline benchmark.
 - `big_corpus_en_hard_global.csv`: hardest domain-transfer stress test.
+- `big_corpus_zh_*.csv`: same tiers for Traditional Chinese.
 - `report_all_tiers.json`: leakage and count diagnostics.
 
 Validate any tier:
 
 ```bash
 python formosan_mt_experiments/scripts/validate_experiment.py \
-  --input formosan_mt_experiments/data/splits_en_v1/big_corpus_en_in_domain_hard.csv
+  --input formosan_mt_experiments/data/splits_zh_v1/big_corpus_zh_in_domain_hard.csv \
+  --target-lang chinese \
+  --direction f2zh
 ```
 
 ## E1: Build SPM Tokenizers
@@ -62,6 +80,18 @@ python formosan_mt_experiments/scripts/setup_tokenizer_sweep.py \
 ```
 
 Use the tokenizer with the lowest fragmentation that does not bloat outputs. Default candidate is `spm16384`.
+
+For Traditional Chinese, the selected deployable recipe is E3 SPM8k directional:
+
+```bash
+python formosan_mt_experiments/scripts/setup_tokenizer_sweep.py \
+  --input formosan_mt_experiments/data/splits_zh_v1/big_corpus_zh_in_domain_hard.csv \
+  --target-lang chinese \
+  --output-dir formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192 \
+  --spm-vocabs 8192 \
+  --setup-splits train,validate \
+  --run-smoke
+```
 
 ## E1: Directional MT Training
 
@@ -96,6 +126,23 @@ python formosan_mt_experiments/scripts/train_directional_nllb.py \
 ```
 
 Defaults include effective batch size 64, max length 384, language sampling `alpha=0.5`, label smoothing `0.1`, and easy-source downweighting.
+
+Traditional Chinese directions use the same training code with `--target-lang chinese` and directions `f2zh` / `zh2f`:
+
+```bash
+python formosan_mt_experiments/scripts/train_directional_nllb.py \
+  --input formosan_mt_experiments/data/splits_zh_v1/big_corpus_zh_in_domain_hard.csv \
+  --target-lang chinese \
+  --tokenizer formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192/formosan_multilingual_nllb_spm8192_tokenizer \
+  --model formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192/formosan_multilingual_nllb_spm8192_model \
+  --output-dir formosan_mt_experiments/data/runs/E3_zh_spm8192_f2zh \
+  --direction f2zh \
+  --steps 300000 \
+  --batch-size 16 \
+  --grad-accum-steps 4 \
+  --learning-rate 2e-5 \
+  --precision bf16
+```
 
 ## E2: DAE Pre-Adaptation
 
@@ -137,6 +184,19 @@ python formosan_mt_experiments/scripts/evaluate_directional.py \
 
 The evaluator writes global, per-language, per-source-bucket, and per-length-bin metrics. Use `in_domain_hard` as the headline benchmark and `hard_global` as the stress test.
 
+For Traditional Chinese:
+
+```bash
+python formosan_mt_experiments/scripts/evaluate_directional.py \
+  --input formosan_mt_experiments/data/splits_zh_v1/big_corpus_zh_in_domain_hard.csv \
+  --target-lang chinese \
+  --tokenizer formosan_mt_experiments/data/runs/E3_zh_spm8192_f2zh/final \
+  --model formosan_mt_experiments/data/runs/E3_zh_spm8192_f2zh/final \
+  --direction f2zh \
+  --output-csv formosan_mt_experiments/reports/E3_zh_f2zh_predictions.csv \
+  --output-json formosan_mt_experiments/reports/E3_zh_f2zh_metrics.json
+```
+
 ## Completed E0-E4 Comparison
 
 The May 2026 Andromeda comparison used the `in_domain_hard` test split with `36,559` examples per direction. Final checkpoints outperformed the small-validation "best" checkpoints in almost every run.
@@ -156,6 +216,7 @@ Copy this directory to the cluster, then use the templates in `slurm/`. The temp
 
 - experiment directory: `/home/scheppat/formosan_mt_experiments`
 - corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_en.csv`
+- Chinese corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_zh.csv`
 - outputs: `/scratch/scheppat/formosan_mt_experiments`
 
 Override any path with environment variables, for example:
@@ -177,6 +238,15 @@ That submitter queues:
 - `E2`: 16k SPM DAE pre-adaptation, then F→EN and EN→F MT from the DAE best checkpoint.
 - `E3`: 8k and 32k SPM setup plus directional MT. The already-running E1 16k SPM jobs provide the 16k comparison point.
 - `E4`: NLLB-1.3B 16k SPM setup plus LoRA directional MT.
+
+To queue the Chinese E3 SPM8k directional run:
+
+```bash
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  /home/scheppat/jobs/mt/submit_e3_zh_andromeda.sh
+```
+
+The Chinese submitter builds or reuses `splits_zh_v1/big_corpus_zh_in_domain_hard.csv`, builds an SPM8k tokenizer/model with `<to_zh>` and `<src_zh>` control tags, then trains and evaluates `f2zh` and `zh2f` final/best checkpoints.
 
 If Slurm is temporarily down, rerunning the submitter with the same `RUN_STAMP` is safe; it records accepted job IDs in `/home/scheppat/jobs/mt/submission_state_<RUN_STAMP>/`.
 

@@ -22,14 +22,33 @@ SCRATCH="${SCRATCH:-/scratch/scheppat}"
 export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
-INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/big_corpus_en.csv}"
-OUT_DIR="${OUT_DIR:-/scratch/scheppat/formosan_mt_experiments/data/tokenizer_sweep}"
+TARGET_LANG="${TARGET_LANG:-english}"
+case "${TARGET_LANG}" in
+  english)
+    TARGET_COL="${TARGET_COL:-english_sentence}"
+    FILE_SHORT="en"
+    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep"
+    ;;
+  chinese)
+    TARGET_COL="${TARGET_COL:-chinese_sentence}"
+    FILE_SHORT="zh"
+    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_zh"
+    ;;
+  *)
+    echo "Unsupported TARGET_LANG=${TARGET_LANG}" >&2
+    exit 1
+    ;;
+esac
+INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_in_domain_hard.csv}"
+OUT_DIR="${OUT_DIR:-${DEFAULT_OUT}}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-/home/scheppat/nllb-scripts/setup_formosan_nllb200.py}"
 
 mkdir -p "${OUT_DIR}"
 
 python -u "${EXP_DIR}/scripts/setup_tokenizer_sweep.py" \
   --input "${INPUT}" \
+  --target-lang "${TARGET_LANG}" \
+  --target-col "${TARGET_COL}" \
   --setup-script "${SETUP_SCRIPT}" \
   --base-model "${BASE_MODEL:-facebook/nllb-200-distilled-600M}" \
   --output-dir "${OUT_DIR}" \

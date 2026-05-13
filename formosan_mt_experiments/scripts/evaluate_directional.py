@@ -13,7 +13,22 @@ import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
-from mt_common import FORMOSAN_CODES, get_lid, read_parallel_csv, source_bucket, with_tagged_columns, write_json
+from mt_common import (
+    FORMOSAN_CODES,
+    cjk_token_count,
+    direction_choices,
+    get_lid,
+    is_formosan_to_target,
+    normalize_target_language,
+    read_parallel_csv,
+    source_bucket,
+    target_col_for,
+    target_lid_for,
+    target_language_from_direction,
+    token_count,
+    with_tagged_columns,
+    write_json,
+)
 from train_directional_nllb import ensure_control_tags, ensure_lang_token
 
 try:
@@ -24,11 +39,13 @@ except Exception as exc:  # pragma: no cover - exercised only in incomplete envs
     _SACREBLEU_ERROR = exc
 
 
-def score(sys_out: list[str], refs: list[str], lowercase: bool = False) -> dict:
+def score(sys_out: list[str], refs: list[str], lowercase: bool = False, bleu_tokenize: str = "13a") -> dict:
     if _SACREBLEU_ERROR is not None:
         raise SystemExit(f"sacrebleu is required for evaluation: {_SACREBLEU_ERROR}")
     return {
-        "BLEU": float(BLEU(tokenize="13a", effective_order=True, lowercase=lowercase).corpus_score(sys_out, [refs]).score),
+        "BLEU": float(
+            BLEU(tokenize=bleu_tokenize, effective_order=True, lowercase=lowercase).corpus_score(sys_out, [refs]).score
+        ),
         "chrF2": float(CHRF().corpus_score(sys_out, [refs]).score),
         "TER": float(TER().corpus_score(sys_out, [refs]).score),
     }
@@ -46,19 +63,32 @@ def length_bin(tokens: int) -> str:
     return "033_plus"
 
 
-def word_oov_rates(full_df: pd.DataFrame, eval_df: pd.DataFrame, direction: str) -> pd.Series:
+def _lexical_units(text: object, is_chinese: bool) -> list[str]:
+    if is_chinese:
+        return [ch for ch in str(text) if not ch.isspace()]
+    return str(text).lower().split()
+
+
+def word_oov_rates(
+    full_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
+    direction: str,
+    target_col: str,
+    target_lang: str,
+) -> pd.Series:
     train = full_df[full_df["split"].astype(str).str.lower().eq("train")]
-    col = "formosan_sentence" if direction == "f2en" else "english_sentence"
+    col = "formosan_sentence" if is_formosan_to_target(direction) else target_col
+    is_chinese = col == target_col and target_lang == "chinese"
     vocab_by_lang = {}
     for lang, sub in train.groupby("lang_code"):
         vocab = set()
         for text in sub[col].fillna("").astype(str):
-            vocab.update(text.lower().split())
+            vocab.update(_lexical_units(text, is_chinese=is_chinese))
         vocab_by_lang[lang] = vocab
 
     rates = []
     for _, row in eval_df.iterrows():
-        words = str(row[col]).lower().split()
+        words = _lexical_units(row[col], is_chinese=is_chinese)
         vocab = vocab_by_lang.get(row["lang_code"], set())
         if not words:
             rates.append(0.0)
@@ -130,14 +160,19 @@ def generate(
     return [outs[i] for i in restore]
 
 
-def group_scores(preds: pd.DataFrame, group_col: str, lowercase: bool) -> dict:
+def group_scores(preds: pd.DataFrame, group_col: str, lowercase: bool, bleu_tokenize: str) -> dict:
     if group_col not in preds.columns:
         return {}
     out = {}
     for name, sub in preds.groupby(group_col, dropna=False):
         if len(sub) == 0:
             continue
-        out[str(name)] = {"samples": int(len(sub))} | score(sub["hyp"].tolist(), sub["ref"].tolist(), lowercase=lowercase)
+        out[str(name)] = {"samples": int(len(sub))} | score(
+            sub["hyp"].tolist(),
+            sub["ref"].tolist(),
+            lowercase=lowercase,
+            bleu_tokenize=bleu_tokenize,
+        )
     return out
 
 
@@ -148,7 +183,9 @@ def main() -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--direction", choices=["f2en", "en2f"], required=True)
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-col", default=None)
+    parser.add_argument("--direction", choices=direction_choices(), required=True)
     parser.add_argument("--split", default="test", choices=["test", "validate"])
     parser.add_argument("--use-tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--validate-tags", action=argparse.BooleanOptionalAction, default=True)
@@ -164,8 +201,17 @@ def main() -> None:
     parser.add_argument("--lowercase-bleu", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     args = parser.parse_args()
+    args.target_lang = normalize_target_language(args.target_lang, args.target_col)
+    args.target_col = args.target_col or target_col_for(args.target_lang)
+    args.target_lid = target_lid_for(args.target_lang)
+    direction_target = target_language_from_direction(args.direction, args.target_lang)
+    if direction_target != args.target_lang:
+        raise SystemExit(
+            f"--direction {args.direction!r} targets {direction_target}, "
+            f"but --target-lang is {args.target_lang!r}."
+        )
 
-    raw = read_parallel_csv(args.input)
+    raw = read_parallel_csv(args.input, target_col=args.target_col)
     if "split" not in raw.columns:
         raise SystemExit("Input CSV must have split column.")
     raw["split"] = raw["split"].astype(str).str.lower()
@@ -179,11 +225,23 @@ def main() -> None:
             sampled_groups.append(group.sample(min(len(group), args.limit_per_lang), random_state=17))
         eval_raw = pd.concat(sampled_groups, ignore_index=True)
     tokenizer = NllbTokenizer.from_pretrained(args.tokenizer)
-    eval_raw["_src_oov_rate"] = word_oov_rates(raw, eval_raw, args.direction)
+    eval_raw["_src_oov_rate"] = word_oov_rates(
+        raw,
+        eval_raw,
+        args.direction,
+        target_col=args.target_col,
+        target_lang=args.target_lang,
+    )
     eval_raw["_formosan_pieces_per_word"] = formosan_fragmentation(tokenizer, eval_raw, args.direction)
     if args.use_tags and args.validate_tags:
-        ensure_control_tags(tokenizer, eval_raw, args.direction)
-    eval_tagged = with_tagged_columns(eval_raw, args.direction, use_tags=args.use_tags)
+        ensure_control_tags(tokenizer, eval_raw, args.direction, target_lang=args.target_lang)
+    eval_tagged = with_tagged_columns(
+        eval_raw,
+        args.direction,
+        target_col=args.target_col,
+        target_lang=args.target_lang,
+        use_tags=args.use_tags,
+    )
 
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model)
     model.config.decoder_start_token_id = tokenizer.eos_token_id
@@ -199,13 +257,13 @@ def main() -> None:
     for lang, sub in eval_tagged.groupby("lang_code", sort=True):
         if lang not in FORMOSAN_CODES:
             continue
-        if args.direction == "f2en":
-            src_lid, tgt_lid = get_lid(lang), get_lid("english")
+        if is_formosan_to_target(args.direction):
+            src_lid, tgt_lid = get_lid(lang), args.target_lid
             src = sub["formosan_sentence"].astype(str).tolist()
-            ref = sub["english_sentence"].astype(str).tolist()
+            ref = sub[args.target_col].astype(str).tolist()
         else:
-            src_lid, tgt_lid = get_lid("english"), get_lid(lang)
-            src = sub["english_sentence"].astype(str).tolist()
+            src_lid, tgt_lid = args.target_lid, get_lid(lang)
+            src = sub[args.target_col].astype(str).tolist()
             ref = sub["formosan_sentence"].astype(str).tolist()
         hyp = generate(tokenizer, model, src, src_lid, tgt_lid, device, args, desc=f"{lang} {args.direction}")
         for idx, (_, original_row) in enumerate(eval_raw.loc[sub.index].iterrows()):
@@ -221,8 +279,8 @@ def main() -> None:
                     "src": src[idx],
                     "ref": ref[idx],
                     "hyp": hyp[idx],
-                    "src_tokens": len(str(src[idx]).split()),
-                    "ref_tokens": len(str(ref[idx]).split()),
+                    "src_tokens": cjk_token_count(src[idx]) if args.target_lang == "chinese" and not is_formosan_to_target(args.direction) else token_count(src[idx]),
+                    "ref_tokens": cjk_token_count(ref[idx]) if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else token_count(ref[idx]),
                     "src_oov_rate": float(original_row.get("_src_oov_rate", 0.0)),
                     "formosan_pieces_per_word": float(original_row.get("_formosan_pieces_per_word", 0.0)),
                 }
@@ -232,18 +290,29 @@ def main() -> None:
     if preds.empty:
         raise SystemExit("No predictions generated.")
     preds["length_bin"] = preds["src_tokens"].map(length_bin)
+    bleu_tokenize = "zh" if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else "13a"
 
     metrics = {
         "input": str(args.input),
         "model": str(args.model),
         "tokenizer": str(args.tokenizer),
         "direction": args.direction,
+        "target_lang": args.target_lang,
+        "bleu_tokenize": bleu_tokenize,
         "split": args.split,
         "samples": int(len(preds)),
-        "global": {"samples": int(len(preds))} | score(preds["hyp"].tolist(), preds["ref"].tolist(), lowercase=args.lowercase_bleu),
-        "by_language": group_scores(preds, "lang_code", lowercase=args.lowercase_bleu),
-        "by_source_bucket": group_scores(preds, "source_bucket", lowercase=args.lowercase_bleu),
-        "by_length_bin": group_scores(preds, "length_bin", lowercase=args.lowercase_bleu),
+        "global": {"samples": int(len(preds))}
+        | score(
+            preds["hyp"].tolist(),
+            preds["ref"].tolist(),
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_language": group_scores(preds, "lang_code", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize),
+        "by_source_bucket": group_scores(
+            preds, "source_bucket", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize
+        ),
+        "by_length_bin": group_scores(preds, "length_bin", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize),
     }
 
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
