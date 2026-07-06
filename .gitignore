@@ -46,3 +46,6 @@ scripts/mt/nllb/prelims/big_corpus_combined.csv
 scripts/mt/nllb/prelims/formosan_multilingual_nllb_language_info.json
 scripts/mt/nllb/prelims/formosan_multilingual_nllb_model/
 scripts/mt/nllb/prelims/formosan_multilingual_nllb_tokenizer/
+
+# public 
+public

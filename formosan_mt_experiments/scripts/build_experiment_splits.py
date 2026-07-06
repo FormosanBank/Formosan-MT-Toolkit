@@ -190,8 +190,15 @@ def build_tier(
         candidates = source_candidates(lang_df, lang_candidate_mask)
         lang_total = len(lang_df)
         eligible_total = int(lang_candidate_mask.sum())
-        target_test = min(eligible_total, max(1, round(lang_total * test_ratio))) if eligible_total else 0
-        target_val = min(max(0, eligible_total - target_test), max(1, round(lang_total * val_ratio))) if eligible_total else 0
+        desired_eval = max(1, round(lang_total * (test_ratio + val_ratio))) if eligible_total else 0
+        target_eval = min(eligible_total, desired_eval)
+        if target_eval >= 2:
+            test_share = test_ratio / (test_ratio + val_ratio)
+            target_test = min(target_eval - 1, max(1, round(target_eval * test_share)))
+            target_val = target_eval - target_test
+        else:
+            target_test = target_eval
+            target_val = 0
 
         test_sources = choose_sources(
             candidates,
