@@ -105,6 +105,7 @@ class DirectionStats:
     output_rows: int = 0
     errors: int = 0
     cache_path: Optional[str] = None
+    read_cache_paths: Optional[list[str]] = None
     output_path: Optional[str] = None
 
 
@@ -459,6 +460,14 @@ def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
     return cache
 
 
+def load_cache_chain(cache_paths: Iterable[Path]) -> dict[str, dict[str, Any]]:
+    """Load cache files in order; later files override earlier records."""
+    merged: dict[str, dict[str, Any]] = {}
+    for cache_path in cache_paths:
+        merged.update(load_cache(cache_path))
+    return merged
+
+
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
@@ -619,10 +628,15 @@ def translate_direction(
     stats.original_rows = len(target_df)
     target_keys = set(target_split_lookup(target_df).keys())
 
+    read_cache_paths = [
+        cache_dir / direction.cache_filename
+        for cache_dir in getattr(args, "read_cache_dir", [])
+    ]
     cache_path = args.cache_dir / direction.cache_filename
     error_path = args.cache_dir / direction.cache_filename.replace(".jsonl", ".errors.jsonl")
-    cache = load_cache(cache_path)
+    cache = load_cache_chain([*read_cache_paths, cache_path])
     stats.cache_path = str(cache_path)
+    stats.read_cache_paths = [str(path) for path in read_cache_paths]
     stats.cached_unique_before = len(cache)
 
     jobs = candidate_jobs(
@@ -820,6 +834,7 @@ def make_row(
     target_text: str,
     source: str,
     dialect: str,
+    row_type: str,
     split: str,
     include_provenance: bool,
     provenance: dict[str, str],
@@ -830,6 +845,7 @@ def make_row(
         target_col: target_text,
         "source": source,
         "dialect": dialect,
+        "row_type": row_type,
         "split": split,
     }
     if include_provenance:
@@ -858,7 +874,15 @@ def write_pivot_output(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
 
-    output_cols = ["lang_code", "formosan_sentence", direction.target_text_col, "source", "dialect", "split"]
+    output_cols = [
+        "lang_code",
+        "formosan_sentence",
+        direction.target_text_col,
+        "source",
+        "dialect",
+        "row_type",
+        "split",
+    ]
     if args.include_provenance:
         output_cols.extend(PROVENANCE_COLUMNS)
 
@@ -887,6 +911,7 @@ def write_pivot_output(
                 target_text=target_text,
                 source=str(row.get("source", "")),
                 dialect=str(row.get("dialect", "")),
+                row_type=str(row.get("row_type", "unknown") or "unknown"),
                 split=split,
                 include_provenance=args.include_provenance,
                 provenance={
@@ -969,6 +994,7 @@ def write_pivot_output(
                 target_text=target_text,
                 source=str(row.get("source", "")),
                 dialect=str(row.get("dialect", "")),
+                row_type=str(row.get("row_type", "unknown") or "unknown"),
                 split=split,
                 include_provenance=args.include_provenance,
                 provenance={
@@ -1085,6 +1111,16 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     ap.add_argument("--big-corpus-zh", type=Path, default=processed / "big_corpus_zh.csv")
     ap.add_argument("--out-dir", type=Path, default=processed / "pivot")
     ap.add_argument("--cache-dir", type=Path, default=None, help="Defaults to OUT_DIR/cache")
+    ap.add_argument(
+        "--read-cache-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Read existing DeepL cache records from this directory before the write cache. "
+            "Can be repeated. New translations are still written only to --cache-dir."
+        ),
+    )
 
     ap.add_argument("--directions", default="both", help="both, en2zh, zh2en, or comma-separated values")
     ap.add_argument("--splits", default="all", help="all or comma-separated train,validate,test")
@@ -1171,6 +1207,7 @@ def main() -> None:
     if args.cache_dir is None:
         args.cache_dir = args.out_dir / "cache"
     args.cache_dir = args.cache_dir.resolve()
+    args.read_cache_dir = [path.resolve() for path in args.read_cache_dir]
     args.batch_size = max(1, min(int(args.batch_size), DEEPL_MAX_TEXTS_PER_REQUEST))
     args.max_request_bytes = max(1024, min(int(args.max_request_bytes), DEEPL_MAX_REQUEST_BYTES))
     if args.model_type == "none":
@@ -1221,6 +1258,8 @@ def main() -> None:
     print(f"Project root: {project_root}")
     print(f"Output dir:   {args.out_dir}")
     print(f"Cache dir:    {args.cache_dir}")
+    if args.read_cache_dir:
+        print("Read caches:  " + ", ".join(str(path) for path in args.read_cache_dir))
     print(f"Directions:   {', '.join(selected_direction_names)}")
     print(f"Splits:       {args.splits}")
     print(f"Split policy: {args.split_policy}")

@@ -126,6 +126,12 @@ def normalize_text(value: object) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def skeleton_text(value: object) -> str:
+    """Aggressive near-duplicate key: normalized letters/numbers/CJK only."""
+    text = normalize_text(value)
+    return "".join(ch for ch in text if unicodedata.category(ch)[0] in {"L", "N", "M"})
+
+
 def token_count(value: object) -> int:
     """Whitespace token count for Formosan/English-like text."""
     text = normalize_text(value)
@@ -243,14 +249,21 @@ def add_normalized_columns(
 ) -> pd.DataFrame:
     out = df.copy()
     lang = normalize_target_language(target_lang, target_col)
+    if "row_type" not in out.columns:
+        out["row_type"] = "unknown"
+    out["row_type"] = out["row_type"].fillna("unknown").astype(str).str.strip().str.lower()
     out["_source_key"] = out["source"].fillna("").astype(str) if "source" in out else ""
     out["_source_bucket"] = out["_source_key"].map(source_bucket)
     out["_formosan_key"] = out["formosan_sentence"].map(normalize_text)
     out["_target_key"] = out[target_col].map(normalize_text)
     out["_pair_key"] = out["_formosan_key"] + PAIR_SEP + out["_target_key"]
+    out["_formosan_skeleton"] = out["formosan_sentence"].map(skeleton_text)
+    out["_target_skeleton"] = out[target_col].map(skeleton_text)
+    out["_pair_skeleton"] = out["_formosan_skeleton"] + PAIR_SEP + out["_target_skeleton"]
     out["_formosan_tokens"] = out["formosan_sentence"].map(token_count)
     out["_target_tokens"] = out[target_col].map(lambda x: target_token_count(x, target_lang=lang))
     out["_short_entry"] = (out["_formosan_tokens"] <= 2) & (out["_target_tokens"] <= 3)
+    out["_is_lexeme"] = out["row_type"].isin({"lexeme", "morpheme"})
     out["_lang_source_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"]
     out["_target_group_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"] + PAIR_SEP + out["_target_key"]
     return out
@@ -267,6 +280,9 @@ def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.Da
     require_columns(df, ["lang_code", "formosan_sentence", target_col, "source", "dialect"], str(path))
     df = df.dropna(subset=["lang_code", "formosan_sentence", target_col]).copy()
     df["lang_code"] = df["lang_code"].astype(str).str.strip().str.lower()
+    if "row_type" not in df.columns:
+        df["row_type"] = "unknown"
+    df["row_type"] = df["row_type"].fillna("unknown").astype(str).str.strip().str.lower()
     df = df[df["lang_code"].isin(FORMOSAN_CODES)].copy()
     return df.reset_index(drop=True)
 

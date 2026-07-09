@@ -26,6 +26,12 @@ def validate_splits(df: pd.DataFrame, target_col: str, target_lang: str) -> dict
     split = keyed["split"].astype(str).str.lower()
     train = keyed[split.eq("train")]
     eval_df = keyed[split.isin(["validate", "valid", "val", "test"])]
+    lexeme_eval_rows = int(
+        (
+            keyed["row_type"].astype(str).str.lower().isin({"lexeme", "morpheme"})
+            & split.isin(["validate", "valid", "val", "test"])
+        ).sum()
+    )
     report = {}
     for name, col in (("formosan", "_formosan_key"), ("target", "_target_key"), ("pair", "_pair_key")):
         overlap = set(train[col]) & set(eval_df[col])
@@ -34,8 +40,30 @@ def validate_splits(df: pd.DataFrame, target_col: str, target_lang: str) -> dict
             "eval_unique": int(eval_df[col].nunique()),
             "overlap_unique": int(len(overlap)),
         }
+    skeleton_report = {}
+    for name, col in (
+        ("formosan", "_formosan_skeleton"),
+        ("target", "_target_skeleton"),
+        ("pair", "_pair_skeleton"),
+    ):
+        overlap = set(train[col]) & set(eval_df[col])
+        skeleton_report[name] = {
+            "train_unique": int(train[col].nunique()),
+            "eval_unique": int(eval_df[col].nunique()),
+            "overlap_unique": int(len(overlap)),
+        }
     failed = {k: v["overlap_unique"] for k, v in report.items() if v["overlap_unique"]}
-    return {"ok": not failed, "overlaps": report, "failures": failed}
+    skeleton_failed = {
+        k: v["overlap_unique"] for k, v in skeleton_report.items() if v["overlap_unique"]
+    }
+    return {
+        "ok": not failed and not skeleton_failed and lexeme_eval_rows == 0,
+        "overlaps": report,
+        "skeleton_overlaps": skeleton_report,
+        "failures": failed,
+        "skeleton_failures": skeleton_failed,
+        "lexeme_eval_rows": lexeme_eval_rows,
+    }
 
 
 def validate_tags(df: pd.DataFrame, tokenizer_dir: Path, direction: str, target_lang: str) -> dict:

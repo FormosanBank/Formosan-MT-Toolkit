@@ -33,8 +33,14 @@ case "${TARGET_LANG}" in
     exit 1
     ;;
 esac
-INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/big_corpus_${FILE_SHORT}.csv}"
-OUT_DIR="${OUT_DIR:-/scratch/scheppat/formosan_mt_experiments/data/splits_${FILE_SHORT}_v1}"
+PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+if [[ -n "${CORPUS_NAME:-}" ]]; then
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}/${CORPUS_NAME}}"
+else
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}}"
+fi
+INPUT="${INPUT:-${CORPUS_DIR}/big_corpus_${FILE_SHORT}.csv}"
+OUT_DIR="${OUT_DIR:-${CORPUS_DIR}/splits_${FILE_SHORT}_v1}"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-big_corpus_${FILE_SHORT}}"
 
 mkdir -p "${OUT_DIR}"

@@ -225,6 +225,27 @@ Override any path with environment variables, for example:
 sbatch --export=ALL,DIRECTION=en2f,TIER=in_domain_hard formosan_mt_experiments/slurm/train_directional.sl
 ```
 
+For public/private corpus comparisons built by `build_corpora.sh
+--build-public-private`, copy each self-contained final corpus directory to the
+project corpus root:
+
+```bash
+rsync -avP corpus_builds/public_no_bible/pivot_corpora_final/ \
+  andromeda:/projects/prudlab/formosan_parallel_corpora/public_no_bible/
+rsync -avP corpus_builds/private_no_bible/pivot_corpora_final/ \
+  andromeda:/projects/prudlab/formosan_parallel_corpora/private_no_bible/
+```
+
+The Slurm templates accept `CORPUS_NAME`, so the default input becomes
+`/projects/prudlab/formosan_parallel_corpora/<CORPUS_NAME>/big_corpus_<en|zh>_<tier>.csv`:
+
+```bash
+sbatch --export=ALL,CORPUS_NAME=public_no_bible,TARGET_LANG=english,DIRECTION=f2en \
+  formosan_mt_experiments/slurm/train_directional.sl
+sbatch --export=ALL,CORPUS_NAME=private_no_bible,TARGET_LANG=chinese,DIRECTION=f2zh \
+  formosan_mt_experiments/slurm/train_directional.sl
+```
+
 To queue the full follow-up comparison stack on Andromeda, use the idempotent submitter:
 
 ```bash

@@ -9,7 +9,8 @@ The script ignores any existing split column and emits one full CSV per eval tie
 
 Each output uses split values train/validate/test, keeps extra metadata columns,
 and removes train rows that would leak exact normalized source, target, or pair
-text into that tier's validation/test rows.
+text into that tier's validation/test rows. XML lexical rows are never assigned
+to validation/test tiers.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ def keep_columns(target_col: str) -> list[str]:
         target_col,
         "source",
         "dialect",
+        "row_type",
         "split",
         "eval_tier",
         "source_bucket",
@@ -75,11 +77,12 @@ def tier_mask(
     min_target_tokens: int,
 ) -> pd.Series:
     hard = (
-        ~df["_source_bucket"].isin(EASY_BUCKETS)
+        ~df["_is_lexeme"]
+        & ~df["_source_bucket"].isin(EASY_BUCKETS)
         & df["_formosan_tokens"].ge(min_formosan_tokens)
         & df["_target_tokens"].ge(min_target_tokens)
     )
-    lexical = df["_source_bucket"].isin(EASY_BUCKETS) | df["_short_entry"]
+    lexical = ~df["_is_lexeme"] & (df["_source_bucket"].isin(EASY_BUCKETS) | df["_short_entry"])
     if tier == "lexical":
         return lexical
     if tier == "in_domain_hard":
@@ -235,25 +238,32 @@ def build_tier(
         }
 
     eval_mask = split.isin(["validate", "test"])
-    eval_keys = {
-        col: set(df.loc[eval_mask, col].dropna())
-        for col in ("_formosan_key", "_target_key", "_pair_key")
-    }
+    leakage_columns = (
+        "_formosan_key",
+        "_target_key",
+        "_pair_key",
+        "_formosan_skeleton",
+        "_target_skeleton",
+        "_pair_skeleton",
+    )
+    eval_keys = {col: set(df.loc[eval_mask, col].dropna()) for col in leakage_columns}
 
-    train_mask = ~heldout_source
+    train_mask = ~heldout_source | df["_is_lexeme"]
     for col, values in eval_keys.items():
         train_mask &= ~df[col].isin(values)
     split.loc[train_mask] = "train"
 
-    # Remove eval rows that still share source/target/pair with another split.
-    active = split.isin(["train", "validate", "test"])
-    for col in ("_formosan_key", "_target_key", "_pair_key"):
+    # Remove rows that still share source/target/pair with another split.
+    for col in leakage_columns:
+        active = split.isin(["train", "validate", "test"])
+        current_eval_mask = split.isin(["validate", "test"])
+        current_train_mask = split.eq("train")
         active_keys = pd.DataFrame({col: df.loc[active, col], "_split": split.loc[active]})
         split_count = active_keys.groupby(col)["_split"].nunique()
         leaking_keys = set(split_count[split_count > 1].index)
         if leaking_keys:
-            split.loc[eval_mask & df[col].isin(leaking_keys)] = ""
-            split.loc[train_mask & df[col].isin(leaking_keys)] = ""
+            split.loc[current_eval_mask & df[col].isin(leaking_keys)] = ""
+            split.loc[current_train_mask & df[col].isin(leaking_keys)] = ""
 
     out = df.loc[split.isin(["train", "validate", "test"])].copy()
     out["split"] = split.loc[out.index].values
@@ -262,10 +272,25 @@ def build_tier(
     out["formosan_tokens"] = out["_formosan_tokens"].astype(int)
     out["target_tokens"] = out["_target_tokens"].astype(int)
     out["short_entry"] = out["_short_entry"].astype(bool)
+    out["row_type"] = out["row_type"].fillna("unknown").astype(str)
 
     train = out[out["split"].eq("train")]
     eval_df = out[out["split"].isin(["validate", "test"])]
     overlaps = overlap_stats(train, eval_df)
+    skeleton_overlaps = {}
+    for name, col in (
+        ("formosan", "_formosan_skeleton"),
+        ("target", "_target_skeleton"),
+        ("pair", "_pair_skeleton"),
+    ):
+        train_values = set(train[col].dropna())
+        eval_values = set(eval_df[col].dropna())
+        overlap = train_values & eval_values
+        skeleton_overlaps[name] = {
+            "train_unique": len(train_values),
+            "eval_unique": len(eval_values),
+            "overlap_unique": len(overlap),
+        }
     hard_global_target_unique = None
     if tier == "hard_global":
         hard_global_target_unique = bool(
@@ -278,10 +303,14 @@ def build_tier(
         "output_rows": int(len(out)),
         "dropped_rows": int(len(df) - len(out)),
         "candidate_rows": int(candidate_mask.sum()),
+        "lexeme_eval_rows": int((out["row_type"].isin(["lexeme", "morpheme"]) & out["split"].isin(["validate", "test"])).sum()),
+        "lexeme_rows_forced_train": int((df["_is_lexeme"] & split.eq("train")).sum()),
+        "lexeme_rows_removed_for_leakage_or_heldout": int(df["_is_lexeme"].sum() - (df["_is_lexeme"] & split.eq("train")).sum()),
         "split_counts": split_counts(out),
         "split_counts_by_language": split_counts_by_language(out),
         "bucket_counts": bucket_counts(out),
         "overlap_stats_train_vs_eval": overlaps,
+        "skeleton_overlap_stats_train_vs_eval": skeleton_overlaps,
         "hard_global_target_unique_eval": hard_global_target_unique,
         "languages": language_reports,
     }
@@ -295,8 +324,22 @@ def validate_report(report: dict) -> None:
         for key, value in overlaps.items()
         if key in {"formosan", "target", "pair"} and value["overlap_unique"] != 0
     }
+    skeleton_failures = {
+        key: value["overlap_unique"]
+        for key, value in report.get("skeleton_overlap_stats_train_vs_eval", {}).items()
+        if key in {"formosan", "target", "pair"} and value["overlap_unique"] != 0
+    }
     if failures:
         raise SystemExit(f"Leakage validation failed for tier={report['tier']}: {failures}")
+    if skeleton_failures:
+        raise SystemExit(
+            f"Near-duplicate skeleton validation failed for tier={report['tier']}: {skeleton_failures}"
+        )
+    if report.get("lexeme_eval_rows", 0):
+        raise SystemExit(
+            f"Lexeme routing validation failed for tier={report['tier']}: "
+            f"{report['lexeme_eval_rows']} lexeme rows in eval"
+        )
     if report["tier"] == "hard_global" and report["hard_global_target_unique_eval"] is not True:
         raise SystemExit("hard_global validation failed: eval target references are not globally unique")
 

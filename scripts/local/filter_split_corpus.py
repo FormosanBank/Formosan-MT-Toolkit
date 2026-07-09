@@ -10,14 +10,14 @@ Pipeline:
   strip *trailing commas*; fix spaces around punctuation; trim stray leading/ending quotes/brackets; squeeze whitespace
 - **Presentation scaffolding drop**: remove "next item / sharing ends" stagey lines (CN + Amis) **and obvious CN headers**
 - **Safety drops**:
-    • drop rows with **Chinese chars in the Formosan/source column**
+    • drop rows with **Han/Kana/Hangul chars in the Formosan/source column**
     • drop rows where **either side is only punctuation/symbols** (or becomes empty)
-    • drop **noisy/jabber** CN targets (dialog/ellipsis/interjection spam) unless --keep-cn-jabber
-- **Lexeme detection**: Single-word pairs (≤1 token both sides) → train only
+    • drop bracket-only grammatical labels and short noisy CN targets unless --keep-cn-jabber
+- **Lexeme detection**: preserve XML `row_type=lexeme`, known vocabulary/dictionary paths, and compact one-token gloss rows → train only
 - **Exact deduplication**: Remove duplicate pairs
-- **Fertility filtering**: Token-ratio outlier removal (0.2-8.0 for sentences)
+- **Fertility filtering**: language-aware target/source unit-ratio outlier removal (0.2-8.0 for sentences)
 - **Equivalence-group 80/10/10 split**:
-    - Build groups where any rows sharing the same source OR the same target
+    - Build groups where any rows sharing the same source OR the same target after skeleton normalization
       are forced into the **same split** (train / val / test).
     - This prevents one-to-many and many-to-one (Formosan ↔ EN/ZH) clusters
       from leaking across splits and inflating BLEU.
@@ -31,6 +31,7 @@ python filter_split_corpus.py --input ami_zh.csv --output ami_zh_processed.csv
 from __future__ import annotations
 
 import argparse
+import json
 import multiprocessing as mp
 import re
 import sys
@@ -57,6 +58,7 @@ ASCII_CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 WHITESPACE_RE = re.compile(r"\s+")
 # CJK block + ext + compatibility ideographs
 CJK_RE = re.compile(r"[\u3400-\u9FFF\U00020000-\U0002B81F\uF900-\uFAFF]")
+NON_FORMOSAN_SOURCE_SCRIPT_RE = re.compile(r"[\u3040-\u30FF\uAC00-\uD7AF]")
 # Sentence-ending punctuation (ASCII and Chinese), allow trailing quotes/brackets
 SENT_END_RE = re.compile(r'[.!?。！？…]+(?:["”」』）】》]*)$')
 MANY_DELIMS_RE = re.compile(r"[\/;|]{1,}|,{2,}")
@@ -65,15 +67,31 @@ MANY_DELIMS_RE = re.compile(r"[\/;|]{1,}|,{2,}")
 LEXEME_SOURCE_HINTS = (
     "學習詞表", "wordlist", "vocab", "dictionary", "dict", "詞表", "lexicon",
     "VirginiaFeyDictionary", "ILRDF_Dicts", "Dicts", "Dict/", "Dict-",
+    "xue_xi_ci_biao_learning_vocabulary",
 )
 
-RESERVED_META_COLS = {"source", "kindOf", "split", "nd_group", "corpus", "dialect"}
+RESERVED_META_COLS = {
+    "source",
+    "kindOf",
+    "split",
+    "nd_group",
+    "group_id",
+    "corpus",
+    "dialect",
+    "row_type",
+    "xml_id",
+}
 
 # ── Extra scrub & small fixes (speaker tags, bracketed glosses, artifacts, commas, spacing, stray brackets/quotes) ──
 SPEAKER_TAG_RE = re.compile(r"^[A-Z][：:]\s*")  # leading "A:" / "A：" + spaces
 META_GLOSS_RE  = re.compile(r"（[^）]{1,10}）|\([^)]{1,10}\)")  # full/half width () content ≤10 chars
 ARTIFACT_RE    = re.compile(r"(全文紀錄|中文紀錄|女子全名)")
 TRAILING_COMMA_RE = re.compile(r"[，,]+\s*$")
+MISSING_TRANSLATION_RE = re.compile(
+    r"(\[?\s*translation\s+missing\s*\]?|\(no\s+record\)|no\s+record|無翻譯|缺翻譯)",
+    flags=re.IGNORECASE,
+)
+REDACTION_RE = re.compile(r"\bX{3,}\b|X{4,}")
 
 # Spacing fixes (remove spaces **before** punctuation / around brackets & quotes)
 SPACE_BEFORE_ASCII_PUNCT_RE = re.compile(r"\s+([,.;:!?%])")
@@ -87,29 +105,137 @@ TRAILING_STRAY_OPENERS_RE   = re.compile(r'[\(\[\{（「『【《“]+$')
 ELLIPSIS_RE = re.compile(r"(…|\.{3,}|。{2,}|！{2,}|？{2,})")
 INTERJ_RE = re.compile(r"(哈|啊|喔|哦|嘿|啦|嘛|呢){2,}")
 SHORT_QUOTED_RE = re.compile(r'^[「『“\(][^」』”\)]{0,12}[」』”\)]?$')
+TARGET_BRACKET_META_RE = re.compile(
+    r"^\s*[\[\【(（]\s*"
+    r"(?:介|虛|虚|名|動|动|形|副|代|助|連|连|量|嘆|叹|語助|语助|語氣|语气|"
+    r"疑問|疑问|感嘆|感叹|pos|particle|prep(?:osition)?|noun|verb|adj(?:ective)?|adv(?:erb)?)"
+    r"\s*[\]\】)）]\s*$",
+    flags=re.IGNORECASE,
+)
+SHORT_BRACKETED_LABEL_RE = re.compile(r"^\s*[\[\【(（]\s*([^\]\】)）]{1,6})\s*[\]\】)）]\s*$")
+
+
+class DropReporter:
+    """Small audit trail for destructive filtering stages."""
+
+    def __init__(self, sample_limit: int = 100):
+        self.sample_limit = max(0, int(sample_limit))
+        self.reason_counts: dict[str, int] = {}
+        self.samples: list[dict] = []
+
+    def record(
+        self,
+        reason: str,
+        df: pd.DataFrame,
+        mask: pd.Series,
+        src_col: str,
+        tgt_col: str,
+    ) -> int:
+        mask = mask.reindex(df.index, fill_value=False).astype(bool)
+        count = int(mask.sum())
+        if count == 0:
+            return 0
+
+        self.reason_counts[reason] = self.reason_counts.get(reason, 0) + count
+        remaining = self.sample_limit - sum(1 for row in self.samples if row.get("drop_reason") == reason)
+        if remaining <= 0:
+            return count
+
+        sample_cols = [
+            src_col,
+            tgt_col,
+            "source",
+            "kindOf",
+            "dialect",
+            "row_type",
+            "xml_id",
+        ]
+        available = [col for col in sample_cols if col in df.columns]
+        for row in df.loc[mask, available].head(remaining).to_dict("records"):
+            row = {"drop_reason": reason, **row}
+            self.samples.append(row)
+        return count
+
+    def write(
+        self,
+        report_dir: Path,
+        *,
+        input_path: Path,
+        output_path: Path,
+        initial_rows: int,
+        final_df: pd.DataFrame,
+        src_col: str,
+        tgt_col: str,
+    ) -> None:
+        report_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "input": str(input_path),
+            "output": str(output_path),
+            "source_column": src_col,
+            "target_column": tgt_col,
+            "initial_rows": int(initial_rows),
+            "final_rows": int(len(final_df)),
+            "drop_counts": self.reason_counts,
+            "row_type_counts": {
+                str(k): int(v)
+                for k, v in final_df.get("row_type", pd.Series(dtype=object)).value_counts(dropna=False).items()
+            },
+            "split_counts": {
+                str(k): int(v)
+                for k, v in final_df.get("split", pd.Series(dtype=object)).value_counts(dropna=False).items()
+            },
+        }
+        (report_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if self.samples:
+            pd.DataFrame(self.samples).to_csv(report_dir / "reject_samples.csv", index=False)
+        print(f"🧾  Filter report: {report_dir}")
 
 def zh_looks_jabber(s: str) -> bool:
     """
     True if a Chinese string looks like performative dialog or punctuation spam:
     - high punctuation ratio,
-    - repeated ellipses / !! / ??,
     - long runs of interjections,
     - very short quoted gasp/exclamation.
+
+    This deliberately does not drop ordinary sentences or lexeme glosses merely
+    because they contain ellipses. Valid targets such as "在...之前" and long
+    narrative sentences with "..." are common in the current data.
     """
     s = "" if s is None else str(s).strip()
     if not s:
         return True
+    cjk_len = _cjk_len(s)
     punct = sum(1 for ch in s if unicodedata.category(ch)[0] in ("P", "S"))
     ratio = punct / max(len(s), 1)
-    if ratio > 0.35:
+    if ratio > 0.60 and cjk_len <= 8:
         return True
-    if ELLIPSIS_RE.search(s):
+    if INTERJ_RE.search(s) and cjk_len <= 12:
         return True
-    if INTERJ_RE.search(s):
-        return True
-    if SHORT_QUOTED_RE.match(s):
+    if SHORT_QUOTED_RE.match(s) and cjk_len <= 4:
         return True
     return False
+
+
+def target_is_meta_only(s: str) -> bool:
+    """Drop bracket-only POS/grammar labels that are not translations."""
+    s = "" if s is None else str(s).strip()
+    if TARGET_BRACKET_META_RE.match(s):
+        return True
+    short = SHORT_BRACKETED_LABEL_RE.match(s)
+    if not short:
+        return False
+    inner = short.group(1).strip()
+    # Current corpora use short bracketed Chinese labels like [主], [介],
+    # [虛]. Treat these as grammatical metadata, not MT targets.
+    return bool(inner) and _cjk_len(inner) == len(inner)
+
+
+def source_has_non_formosan_script(s: str) -> bool:
+    s = "" if s is None else str(s)
+    return _cjk_len(s) > 0 or bool(NON_FORMOSAN_SOURCE_SCRIPT_RE.search(s))
 
 
 def extra_scrub(text: str) -> str:
@@ -186,6 +312,37 @@ def _cjk_len(s: str) -> int:
     s = "" if s is None else str(s)
     return sum(1 for ch in s if CJK_RE.match(ch))
 
+def target_unit_count(s: str) -> int:
+    """
+    Length proxy for target text.
+
+    Chinese targets are mostly unsegmented, so whitespace token count is a bad
+    fertility signal. Count CJK characters plus non-CJK tokens instead; use
+    whitespace tokens for English/Latin targets.
+    """
+    if not isinstance(s, str):
+        s = "" if pd.isna(s) else str(s)
+    cjk_chars = _cjk_len(s)
+    if cjk_chars:
+        non_cjk = CJK_RE.sub(" ", s)
+        return cjk_chars + tok_count(non_cjk)
+    return tok_count(s)
+
+def skeleton_key(s: str) -> str:
+    """Punctuation/spacing-insensitive key for split grouping."""
+    if not isinstance(s, str):
+        s = "" if pd.isna(s) else str(s)
+    text = unicodedata.normalize("NFKC", s).casefold()
+    return "".join(ch for ch in text if unicodedata.category(ch)[0] in ("L", "N", "M"))
+
+def exact_key(s: str) -> str:
+    if not isinstance(s, str):
+        s = "" if pd.isna(s) else str(s)
+    return WHITESPACE_RE.sub(" ", unicodedata.normalize("NFKC", s).casefold()).strip()
+
+def pair_key(src: pd.Series, tgt: pd.Series, key_fn) -> pd.Series:
+    return src.astype(str).map(key_fn) + "\u241f" + tgt.astype(str).map(key_fn)
+
 # Only-punctuation checker (P/S categories allowed; whitespace ignored)
 def _is_only_punct_or_symbols(s: str) -> bool:
     if not isinstance(s, str):
@@ -237,18 +394,49 @@ def detect_lang_cols(df: pd.DataFrame) -> tuple[str, str]:
 
 def looks_like_lexeme(src: str, tgt: str, source_path: str) -> bool:
     """
-    Simple lexeme detection: only single-word pairs (≤1 token both sides) are lexemes.
-    Everything else is treated as a sentence and split normally 80/10/10.
+    Fallback lexeme detection when XML row_type is missing.
+
+    Keep this conservative: XML row_type and lexical source paths are stronger
+    signals than token count.
     """
     s = src if isinstance(src, str) else ""
     t = tgt if isinstance(tgt, str) else ""
+    source_path = source_path if isinstance(source_path, str) else ""
+
+    source_lower = source_path.lower()
+    if any(hint.lower() in source_lower for hint in LEXEME_SOURCE_HINTS):
+        return True
 
     stoks = tok_count(s)
-    ttoks = tok_count(t)
+    ttoks = target_unit_count(t)
 
-    if stoks <= 1 and ttoks <= 1:
+    if stoks <= 2 and target_looks_gloss_list(t):
+        return True
+    if stoks <= 1 and ttoks <= 30:
         return True
     return False
+
+def classify_row_type(existing: object, src: str, tgt: str, source_path: str) -> str:
+    existing_norm = str(existing or "").strip().lower()
+    if existing_norm in {"lexeme", "morpheme"}:
+        return "lexeme"
+    source_lower = str(source_path or "").lower()
+    if any(hint.lower() in source_lower for hint in LEXEME_SOURCE_HINTS):
+        return "lexeme"
+    if existing_norm == "sentence":
+        # Preserve sentence rows unless the text is plainly lexical.
+        return "lexeme" if looks_like_lexeme(src, tgt, source_path) else "sentence"
+    return "lexeme" if looks_like_lexeme(src, tgt, source_path) else "sentence"
+
+def target_looks_gloss_list(s: str) -> bool:
+    if not isinstance(s, str):
+        s = "" if pd.isna(s) else str(s)
+    text = s.strip()
+    if not text or SENT_END_RE.search(text):
+        return False
+    if target_unit_count(text) > 18:
+        return False
+    return any(delim in text for delim in (";", "；", "/", "、"))
 
 def is_listy_sentence_like(s: str) -> bool:
     """
@@ -364,7 +552,17 @@ def clean_text_columns(df: pd.DataFrame, cols: List[str], workers: int | None) -
 
 def remove_exact_duplicates(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.DataFrame:
     n0 = len(df)
-    df2 = df.drop_duplicates(subset=[src_col, tgt_col], keep="first")
+    work = df.copy()
+    if "row_type" in work.columns:
+        priority = {"sentence": 0, "lexeme": 1, "morpheme": 2}
+        work["_dedupe_priority"] = (
+            work["row_type"].astype(str).str.lower().map(priority).fillna(3).astype(int)
+        )
+        work["_dedupe_order"] = range(len(work))
+        work = work.sort_values(["_dedupe_priority", "_dedupe_order"], kind="stable")
+    df2 = work.drop_duplicates(subset=[src_col, tgt_col], keep="first")
+    df2 = df2.sort_index(kind="stable")
+    df2 = df2.drop(columns=[c for c in ("_dedupe_priority", "_dedupe_order") if c in df2.columns])
     print(f"🗑️  Removed {n0 - len(df2):,} exact duplicate pairs")
     return df2
 
@@ -380,31 +578,31 @@ def apply_fertility(
     max_ratio_sent: float,
     min_ratio_lex: float,
     max_ratio_lex: float,
+    reporter: DropReporter | None = None,
 ) -> pd.DataFrame:
     """
-    Use token-count ratio primarily, with char-length as a fallback for super-short rows.
-    Lexemes have looser bounds by default.
+    Use language-aware target/source unit ratios.
+
+    Formosan source is whitespace-tokenized. Chinese targets often are not, so
+    target_unit_count uses CJK characters plus non-CJK tokens instead of plain
+    whitespace tokens.
     """
     df = df.copy()
     s_tok = df[src_col].astype(str).map(tok_count)
-    t_tok = df[tgt_col].astype(str).map(tok_count)
-
-    tok_ratio = (t_tok.replace(0, np.nan) / s_tok.replace(0, np.nan)).astype(float)
-    s_len = df[src_col].astype(str).map(len).replace(0, np.nan)
-    t_len = df[tgt_col].astype(str).map(len).replace(0, np.nan)
-    ch_ratio = (t_len / s_len).astype(float)
-
-    use_tok = (s_tok >= 2) & (t_tok >= 2)
-    ratio = tok_ratio.where(use_tok, ch_ratio)
+    t_units = df[tgt_col].astype(str).map(target_unit_count)
+    ratio = (t_units.replace(0, np.nan) / s_tok.replace(0, np.nan)).astype(float)
 
     is_lex = df.get("row_type", "").eq("lexeme")
     lo = np.where(is_lex, min_ratio_lex, min_ratio_sent)
     hi = np.where(is_lex, max_ratio_lex, max_ratio_sent)
 
     ok = (ratio >= lo) & (ratio <= hi)
-    kept = df[ok.fillna(False)]
+    drop_mask = ~ok.fillna(False)
+    if reporter is not None:
+        reporter.record("fertility_ratio", df, drop_mask, src_col, tgt_col)
+    kept = df[~drop_mask]
     print(f"📏  Fertility filter removed {len(df) - len(kept):,} pairs "
-          f"(sent bounds [{min_ratio_sent},{max_ratio_sent}] | "
+          f"(target/source unit ratio; sent bounds [{min_ratio_sent},{max_ratio_sent}] | "
           f"lex bounds [{min_ratio_lex},{max_ratio_lex}])")
     return kept
 
@@ -523,8 +721,9 @@ def build_near_dups(df: pd.DataFrame, src_col: str, tgt_col: str, workers: int |
 def build_equivalence_groups(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.Series:
     """
     Build equivalence groups so that any rows sharing the same source text OR the same target text
-    end up in the same group. This is what we use for split assignment, so that all one-to-many
-    and many-to-one clusters (after cleaning/normalization) are forced into the same split.
+    end up in the same group. Keys are punctuation/spacing-insensitive, so near
+    duplicates like "Pinsbkan 開始" vs "Pinsbkan開始" are forced into the same
+    split before the later hard-split builder does its corpus-wide pass.
     """
     if df.empty:
         return pd.Series([], index=df.index, dtype=object, name="eq_group")
@@ -535,8 +734,10 @@ def build_equivalence_groups(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd
 
     # group by exact source string
     src_map: dict[str, int] = {}
-    src_values = tmp[src_col].astype(str).tolist()
+    src_values = tmp[src_col].astype(str).map(skeleton_key).tolist()
     for i, s in enumerate(src_values):
+        if not s:
+            continue
         prev = src_map.get(s)
         if prev is not None:
             uf.union(i, prev)
@@ -545,8 +746,10 @@ def build_equivalence_groups(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd
 
     # group by exact target string
     tgt_map: dict[str, int] = {}
-    tgt_values = tmp[tgt_col].astype(str).tolist()
+    tgt_values = tmp[tgt_col].astype(str).map(skeleton_key).tolist()
     for i, t in enumerate(tgt_values):
+        if not t:
+            continue
         prev = tgt_map.get(t)
         if prev is not None:
             uf.union(i, prev)
@@ -562,8 +765,8 @@ def build_equivalence_groups(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd
 # ──────────────────────────────────────────────────────────────────────────────
 
 CN_STAGEY_PAT = re.compile(r"(換下一個(?:說)?|我(?:分享|說明)到這裡)\s*$")
-AMI_STAGEY_PAT = re.compile(
-    r"(?:\bro(?:mato|ma)\b|\bsowal ako\b|\bpisoykay\b|\bpisowal ako\b|\bmahaen ko\b)",
+SOURCE_STAGEY_EXACT_PAT = re.compile(
+    r"^(?:romato|sowal ako|pisoykay|pisowal ako|mahaen ko)[.!?。！？,， ]*$",
     flags=re.IGNORECASE,
 )
 
@@ -586,20 +789,25 @@ def _looks_stagey_or_aside_or_header(s: str, assume_cn: bool) -> bool:
         ):
             return True
         return False
-    return bool(AMI_STAGEY_PAT.search(s))
+    return bool(SOURCE_STAGEY_EXACT_PAT.match(s))
 
-def drop_stagey_rows(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.DataFrame:
-    # Heuristic: target is Chinese if CJK-rich; source is Amis if not
+def stagey_or_header_mask(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.Series:
+    # Heuristic: target is Chinese if CJK-rich; source scaffolding must be an
+    # exact line. Earlier substring matching dropped valid Tayal rows containing
+    # words like "roma".
     cjk_tgt = df[tgt_col].astype(str).map(_cjk_len) > 0
     cjk_src = df[src_col].astype(str).map(_cjk_len) > 0
 
-    mask_drop = (
+    return (
         df[tgt_col].astype(str).where(cjk_tgt, "").map(lambda s: _looks_stagey_or_aside_or_header(s, True)) |
         df[src_col].astype(str).where(~cjk_src, "").map(lambda s: _looks_stagey_or_aside_or_header(s, False))
     )
+
+def drop_stagey_rows(df: pd.DataFrame, src_col: str, tgt_col: str) -> pd.DataFrame:
+    mask_drop = stagey_or_header_mask(df, src_col, tgt_col)
     n = int(mask_drop.sum())
     if n:
-        print(f"🧹  Dropping {n:,} presentation/asides/headers (e.g., 換下一個/我分享到這裡/人物生平 - -/romato/sowal ako)")
+        print(f"🧹  Dropping {n:,} presentation/asides/headers (e.g., 換下一個/我分享到這裡/人物生平 - -)")
     return df[~mask_drop].reset_index(drop=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -701,6 +909,89 @@ def split_by_source(
     )
     return df_out
 
+def prune_train_eval_overlaps(
+    df: pd.DataFrame,
+    src_col: str,
+    tgt_col: str,
+    reporter: DropReporter | None = None,
+) -> pd.DataFrame:
+    """Drop train rows that would leak exact/skeleton source, target, or pair keys into eval."""
+    if "split" not in df.columns or df.empty:
+        return df
+
+    split = df["split"].astype(str).str.lower()
+    train_mask = split.eq("train")
+    eval_mask = split.isin(["validate", "valid", "val", "test"])
+    if not train_mask.any() or not eval_mask.any():
+        return df
+
+    src = df[src_col].astype(str)
+    tgt = df[tgt_col].astype(str)
+    key_columns = {
+        "source_exact": src.map(exact_key),
+        "target_exact": tgt.map(exact_key),
+        "pair_exact": pair_key(src, tgt, exact_key),
+        "source_skeleton": src.map(skeleton_key),
+        "target_skeleton": tgt.map(skeleton_key),
+        "pair_skeleton": pair_key(src, tgt, skeleton_key),
+    }
+
+    leak_mask = pd.Series(False, index=df.index)
+    leak_counts: dict[str, int] = {}
+    for name, keys in key_columns.items():
+        eval_keys = set(keys[eval_mask].dropna())
+        eval_keys.discard("")
+        if not eval_keys:
+            continue
+        col_leaks = train_mask & keys.isin(eval_keys)
+        leak_counts[name] = int(col_leaks.sum())
+        leak_mask |= col_leaks
+
+    n = int(leak_mask.sum())
+    if n:
+        if reporter is not None:
+            reporter.record("train_eval_overlap_removed", df, leak_mask, src_col, tgt_col)
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(leak_counts.items()) if v)
+        print(f"🧯  Dropping {n:,} train rows that overlap validation/test keys ({detail})")
+        df = df[~leak_mask].reset_index(drop=True)
+    return df
+
+def validate_split_invariants(df: pd.DataFrame, src_col: str, tgt_col: str) -> None:
+    if "split" not in df.columns:
+        return
+    split = df["split"].astype(str).str.lower()
+    lex_eval = (
+        df.get("row_type", pd.Series("", index=df.index))
+        .astype(str)
+        .str.lower()
+        .isin({"lexeme", "morpheme"})
+        & split.isin(["validate", "valid", "val", "test"])
+    )
+    if lex_eval.any():
+        raise SystemExit(f"Lexeme routing validation failed: {int(lex_eval.sum())} lexeme rows in eval splits")
+
+    train_mask = split.eq("train")
+    eval_mask = split.isin(["validate", "valid", "val", "test"])
+    if not train_mask.any() or not eval_mask.any():
+        return
+    src = df[src_col].astype(str)
+    tgt = df[tgt_col].astype(str)
+    for name, keys in {
+        "source_exact": src.map(exact_key),
+        "target_exact": tgt.map(exact_key),
+        "pair_exact": pair_key(src, tgt, exact_key),
+        "source_skeleton": src.map(skeleton_key),
+        "target_skeleton": tgt.map(skeleton_key),
+        "pair_skeleton": pair_key(src, tgt, skeleton_key),
+    }.items():
+        train_keys = set(keys[train_mask].dropna())
+        eval_keys = set(keys[eval_mask].dropna())
+        train_keys.discard("")
+        eval_keys.discard("")
+        overlap = train_keys & eval_keys
+        if overlap:
+            raise SystemExit(f"Split leakage validation failed for {name}: {len(overlap)} overlapping keys")
+
 # ──────────────────────────────────────────────────────────────────────────────
 # I/O
 # ──────────────────────────────────────────────────────────────────────────────
@@ -733,6 +1024,14 @@ def main() -> None:
     # I/O
     ap.add_argument("--input", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+        help="Directory for summary.json and reject_samples.csv; defaults beside output.",
+    )
+    ap.add_argument("--no-report", action="store_true", help="Do not write filter audit reports")
+    ap.add_argument("--audit-samples", type=int, default=100, help="Reject samples to keep per drop reason")
 
     # Cleaning & heuristics
     ap.add_argument("--no-clean-text", action="store_true", help="Skip Moses/NFKC cleaning")
@@ -742,8 +1041,9 @@ def main() -> None:
 
     # New: controls for extra safety drops
     ap.add_argument("--keep-stagey", action="store_true", help="Keep presentation/asides/header lines instead of dropping")
-    ap.add_argument("--keep-cjk-in-src", action="store_true", help="Keep rows even if source/Formosan has Chinese chars")
+    ap.add_argument("--keep-cjk-in-src", action="store_true", help="Keep rows even if source/Formosan has Han/Kana/Hangul chars")
     ap.add_argument("--keep-punct-only", action="store_true", help="Keep rows that are only punctuation/symbols")
+    ap.add_argument("--keep-redactions", action="store_true", help="Keep rows containing XXX/XXXX redaction placeholders")
 
     # Slash variant expansion (for lexemes only)
     ap.add_argument("--expand-lexeme-slashes", action="store_true", help="Split 'a/b'→'a' & 'b' for lexeme rows")
@@ -781,22 +1081,25 @@ def main() -> None:
 
     # Load
     df = load_csv(args.input)
+    initial_rows = len(df)
+    reporter = DropReporter(sample_limit=args.audit_samples)
 
     # Detect language columns early (and clean only those)
     src_col, tgt_col = detect_lang_cols(df)
     print(f"🗂️  Language columns: {src_col} ↔ {tgt_col}")
 
-    # Drop rows with "(No Record)" in either column
-    print("🧹  Removing rows with '(No Record)' translations...")
+    # Drop rows with explicit missing-translation markers in either column.
+    print("🧹  Removing rows with explicit missing-translation markers...")
     n_before = len(df)
     mask_no_record = (
-        df[src_col].astype(str).str.strip().eq("(No Record)") |
-        df[tgt_col].astype(str).str.strip().eq("(No Record)")
+        df[src_col].astype(str).map(lambda s: bool(MISSING_TRANSLATION_RE.search(s))) |
+        df[tgt_col].astype(str).map(lambda s: bool(MISSING_TRANSLATION_RE.search(s)))
     )
+    reporter.record("missing_translation_marker", df, mask_no_record, src_col, tgt_col)
     df = df[~mask_no_record].reset_index(drop=True)
     n_dropped = n_before - len(df)
     if n_dropped > 0:
-        print(f"🗑️  Removed {n_dropped:,} rows with '(No Record)'")
+        print(f"🗑️  Removed {n_dropped:,} rows with missing-translation markers")
 
     # Text cleaning
     if not args.no_clean_text:
@@ -809,34 +1112,64 @@ def main() -> None:
 
     # Drop presentation scaffolding (CN + Amis) and obvious CN headers
     if not args.keep_stagey:
-        df = drop_stagey_rows(df, src_col, tgt_col)
-
-    # Drop rows where *source/Formosan* contains Chinese chars
-    if not args.keep_cjk_in_src:
-        m_src_cjk = df[src_col].astype(str).map(_cjk_len) > 0
-        n = int(m_src_cjk.sum())
+        mask_stagey = stagey_or_header_mask(df, src_col, tgt_col)
+        reporter.record("presentation_or_header", df, mask_stagey, src_col, tgt_col)
+        n = int(mask_stagey.sum())
         if n:
-            print(f"🧹  Dropping {n:,} rows with Chinese characters in source/Formosan column '{src_col}'")
-        df = df[~m_src_cjk].reset_index(drop=True)
+            print(f"🧹  Dropping {n:,} presentation/asides/headers (e.g., 換下一個/我分享到這裡/人物生平 - -)")
+        df = df[~mask_stagey].reset_index(drop=True)
+
+    # Drop rows where *source/Formosan* contains Chinese/Japanese/Korean script.
+    if not args.keep_cjk_in_src:
+        m_src_bad_script = df[src_col].astype(str).map(source_has_non_formosan_script)
+        reporter.record("non_formosan_script_in_source", df, m_src_bad_script, src_col, tgt_col)
+        n = int(m_src_bad_script.sum())
+        if n:
+            print(f"🧹  Dropping {n:,} rows with CJK/Kana/Hangul script in source/Formosan column '{src_col}'")
+        df = df[~m_src_bad_script].reset_index(drop=True)
 
     # Drop rows that are only punctuation/symbols or empty on either side
     if not args.keep_punct_only:
         m_bad_src = df[src_col].map(_is_only_punct_or_symbols)
         m_bad_tgt = df[tgt_col].map(_is_only_punct_or_symbols)
         m_bad = m_bad_src | m_bad_tgt
+        reporter.record("empty_or_punctuation_only", df, m_bad, src_col, tgt_col)
         n = int(m_bad.sum())
         if n:
             print(f"🧹  Dropping {n:,} rows that are empty or only punctuation/symbols on either side")
         df = df[~m_bad].reset_index(drop=True)
+
+    # Drop rows with anonymization placeholders by default. These train models
+    # to emit non-language artifacts and can leak into evaluation.
+    if not args.keep_redactions:
+        mask_redacted = (
+            df[src_col].astype(str).map(lambda s: bool(REDACTION_RE.search(s))) |
+            df[tgt_col].astype(str).map(lambda s: bool(REDACTION_RE.search(s)))
+        )
+        reporter.record("redaction_placeholder", df, mask_redacted, src_col, tgt_col)
+        n = int(mask_redacted.sum())
+        if n:
+            print(f"🧹  Dropping {n:,} rows with redaction placeholders (XXX/XXXX)")
+        df = df[~mask_redacted].reset_index(drop=True)
+
+    # Drop bracket-only grammatical labels like [介] / [虛]. They are useful
+    # dictionary metadata, but not translation targets for MT.
+    mask_target_meta = df[tgt_col].astype(str).map(target_is_meta_only)
+    reporter.record("target_meta_label_only", df, mask_target_meta, src_col, tgt_col)
+    n = int(mask_target_meta.sum())
+    if n:
+        print(f"🧹  Dropping {n:,} bracket-only grammatical target labels")
+    df = df[~mask_target_meta].reset_index(drop=True)
 
     # Drop 'jabber' CN targets (performative dialog / ellipses / interjection spam)
     if not args.keep_cn_jabber:
         # Only consider targets that are actually Chinese (have CJK)
         mask_tgt_is_cn = df[tgt_col].astype(str).map(lambda s: _cjk_len(s) >= 1)
         mask_cn_jabber = mask_tgt_is_cn & df[tgt_col].astype(str).map(zh_looks_jabber)
+        reporter.record("short_noisy_chinese_target", df, mask_cn_jabber, src_col, tgt_col)
         n = int(mask_cn_jabber.sum())
         if n:
-            print(f"🧹  Dropping {n:,} rows: noisy/performative Chinese targets (dialog/ellipsis/interjections)")
+            print(f"🧹  Dropping {n:,} rows: short noisy/performative Chinese targets")
         df = df[~mask_cn_jabber].reset_index(drop=True)
 
     # Classify row type (lexeme vs sentence)
@@ -844,14 +1177,17 @@ def main() -> None:
     src_series = df[src_col].astype(str)
     tgt_series = df[tgt_col].astype(str)
     src_paths = df["source"].astype(str) if "source" in df.columns else pd.Series([""] * len(df))
+    existing_row_types = (
+        df["row_type"].astype(str) if "row_type" in df.columns else pd.Series([""] * len(df))
+    )
 
-    kind_col = "kindOf" if "kindOf" in df.columns else None
     row_types: List[str] = []
-    for i, (s, t, sp) in enumerate(tqdm(zip(src_series, tgt_series, src_paths), total=len(df), desc="classify")):
-        if kind_col and str(df[kind_col].iat[i]).strip().lower() == "lexeme":
-            row_types.append("lexeme")
-        else:
-            row_types.append("lexeme" if looks_like_lexeme(s, t, sp) else "sentence")
+    for existing, s, t, sp in tqdm(
+        zip(existing_row_types, src_series, tgt_series, src_paths),
+        total=len(df),
+        desc="classify",
+    ):
+        row_types.append(classify_row_type(existing, s, t, sp))
     df["row_type"] = row_types
 
     # Optionally drop "listy" rows from sentences (kept for lexemes)
@@ -861,6 +1197,7 @@ def main() -> None:
         )
         n_drop = int(mask_listy.sum())
         if n_drop:
+            reporter.record("list_like_sentence", df, mask_listy, src_col, tgt_col)
             print(f"🧹  Dropping {n_drop:,} list-like rows from sentences")
         df = df[~mask_listy].reset_index(drop=True)
 
@@ -868,10 +1205,11 @@ def main() -> None:
     min_tok = max(0, int(args.min_sent_tokens))
     if min_tok > 0:
         s_tok = df[src_col].map(tok_count)
-        t_tok = df[tgt_col].map(tok_count)
+        t_tok = df[tgt_col].map(target_unit_count)
         mask_bad_sent = df["row_type"].eq("sentence") & ~((s_tok >= min_tok) & (t_tok >= min_tok))
         n_drop = int(mask_bad_sent.sum())
         if n_drop:
+            reporter.record("short_sentence", df, mask_bad_sent, src_col, tgt_col)
             print(f"🧹  Dropping {n_drop:,} short sentence rows (<{min_tok} toks on either side)")
             df = df[~mask_bad_sent].reset_index(drop=True)
 
@@ -894,6 +1232,7 @@ def main() -> None:
             max_ratio_sent=args.max_ratio,
             min_ratio_lex=args.lexeme_min_ratio,
             max_ratio_lex=args.lexeme_max_ratio,
+            reporter=reporter,
         )
 
     # Near-duplicate grouping (disabled for now; we use exact-equivalence groups instead)
@@ -914,10 +1253,23 @@ def main() -> None:
             include_lexemes_in_eval=args.include_lexemes_in_eval,
             max_lexeme_frac_train=float(args.max_lexeme_frac) if args.max_lexeme_frac is not None else None,
         )
+        df = prune_train_eval_overlaps(df, src_col, tgt_col, reporter=reporter)
+        validate_split_invariants(df, src_col, tgt_col)
 
     # Save
     print("=" * 80)
     save_csv(df, args.output)
+    if not args.no_report:
+        report_dir = args.report_dir or (args.output.parent / "filter_reports" / args.output.stem)
+        reporter.write(
+            report_dir,
+            input_path=args.input,
+            output_path=args.output,
+            initial_rows=initial_rows,
+            final_df=df,
+            src_col=src_col,
+            tgt_col=tgt_col,
+        )
     print("=" * 80)
     print("✅  Pipeline complete!")
 

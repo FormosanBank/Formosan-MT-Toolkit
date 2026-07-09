@@ -1,66 +1,57 @@
 #!/usr/bin/env python3
-"""
-STEP 2: 
+"""Clean downloaded FormosanBank XML with the real FormosanBank QC package.
 
-Clean the XML files harvested by fetch_xml.py using the official QC scripts 
-from the FormosanBank/FormosanBank repository.
-
-This script:
-1. Downloads/updates the latest QC scripts from FormosanBank repository
-2. Filters XML files to match source language (and optional target language)
-3. Runs the official clean_xml.py and standardize.py scripts in-place
-
-The script intelligently checks for updates to the QC scripts using checksums,
-only downloading when changes are detected or when forced.
-
-Usage examples
---------------
-$ python clean_xml.py --src-lang ami
-$ python clean_xml.py --src-lang ami --force-update  # Force download QC scripts
+The old version of this script downloaded only two standalone QC scripts. That
+breaks with current FormosanBank because utilities such as standardize.py import
+shared modules from the QC package. This version prefers a sibling
+../FormosanBank checkout and otherwise syncs the minimal package tree needed to
+run QC scripts as package-aware code.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import os
+import subprocess
 import sys
 import time
-import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional
+from urllib.parse import quote
 
 import requests
-from tqdm import tqdm
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
+from tqdm import tqdm
 from urllib3.util.retry import Retry
 
 
-# ─────────────────────── env / GitHub session setup ──────────────────────────
-
-# Look for .env in project root (two levels up from scripts/, same as fetch_xml.py)
-project_root = Path(__file__).parent.parent.parent
-load_dotenv(project_root / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 
 GITHUB_API = "https://api.github.com"
+RAW_BASE = "https://raw.githubusercontent.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-
-# Repo where the official QC scripts live
 QC_ORG = "FormosanBank"
 QC_REPO = "FormosanBank"
 QC_BRANCH = "main"
+SYNC_PREFIXES = ("QC/", "Orthographies/")
+DEFAULT_QC_CACHE = PROJECT_ROOT / "scripts" / ".formosan_qc_repo"
 
-# Map local filenames → paths inside the repo
-QC_SCRIPTS = {
-    "clean_xml.py": "QC/cleaning/clean_xml.py",
-    "standardize.py": "QC/utilities/standardize.py",
+LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
+    "zh": {"zh", "zho", "chi", "cmn"},
+    "zho": {"zh", "zho", "chi", "cmn"},
+    "chi": {"zh", "zho", "chi", "cmn"},
+    "cmn": {"zh", "zho", "chi", "cmn"},
+    "en": {"en", "eng"},
+    "eng": {"en", "eng"},
 }
 
-# Requests session with retries
 SESSION = requests.Session()
-SESSION.headers.update({"Authorization": f"token {GITHUB_TOKEN}"})
+if GITHUB_TOKEN:
+    SESSION.headers.update({"Authorization": f"token {GITHUB_TOKEN}"})
 SESSION.mount(
     "https://",
     HTTPAdapter(
@@ -74,297 +65,330 @@ SESSION.mount(
 )
 
 
-# ────────────────────────────── arg parsing ──────────────────────────────────
-
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Clean XML files using FormosanBank QC scripts",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Clean XML files using the FormosanBank QC package.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--src-lang", required=True, help="Source language (e.g. 'ami')")
-    parser.add_argument("--tgt-lang", help="Target language (e.g. 'zho')")
+    parser.add_argument("--src-lang", required=True, help="Source language, e.g. ami")
+    parser.add_argument("--tgt-lang", help="Optional target language filter, e.g. zho or eng")
+    parser.add_argument("--in-dir", help="Directory of raw XML files")
     parser.add_argument(
-        "--in-dir",
-        help="Directory of raw XML files (default: downloaded_{src_lang})",
-    )
-    parser.add_argument(
-        "--force-update",
-        action="store_true",
-        help="Force download of QC scripts even if local versions exist",
+        "--formosanbank-path",
+        type=Path,
+        default=None,
+        help="Path to a full FormosanBank checkout; defaults to sibling ../FormosanBank when present.",
     )
     parser.add_argument(
         "--qc-dir",
-        default="scripts/.formosan_qc_scripts",
-        help="Directory to store downloaded QC scripts [default: %(default)s]",
+        type=Path,
+        default=DEFAULT_QC_CACHE,
+        help="Fallback cache for synced QC/ and Orthographies/ trees.",
+    )
+    parser.add_argument("--force-update", action="store_true", help="Force refresh of fallback synced QC files.")
+    parser.add_argument("--skip-update", action="store_true", help="Do not sync fallback QC files.")
+    parser.add_argument("--skip-standardize", action="store_true", help="Run clean_xml.py only.")
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run validate_xml.py and validate_text.py after cleaning as informational checks.",
     )
     return parser.parse_args()
 
 
-# ───────────────────────────── checksum helpers ──────────────────────────────
+def equivalent_lang_codes(lang_code: str | None) -> set[str]:
+    if not lang_code:
+        return set()
+    key = lang_code.strip().lower()
+    return LANGUAGE_EQUIVALENTS.get(key, {key})
 
-def get_file_checksum(file_path: Path) -> str:
-    """Calculate SHA256 checksum of a file."""
-    if not file_path.exists():
+
+def checksum(path: Path) -> str:
+    if not path.exists():
         return ""
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
 
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+
+def has_qc_package_root(path: Path) -> bool:
+    return (
+        (path / "QC" / "cleaning" / "clean_xml.py").is_file()
+        and (path / "QC" / "utilities" / "standardize.py").is_file()
+    )
 
 
-# ─────────────────────────── GitHub download logic ───────────────────────────
+def raw_url(path: str) -> str:
+    encoded = "/".join(quote(part) for part in path.split("/"))
+    return f"{RAW_BASE}/{QC_ORG}/{QC_REPO}/{QC_BRANCH}/{encoded}"
 
-def download_with_retry(remote_path: str, max_retries: int = 3) -> bytes:
-    """
-    Download content from the FormosanBank/FormosanBank repo using the
-    GitHub Contents API, with retry logic.
 
-    remote_path is the path inside the repo, e.g. 'QC/cleaning/clean_xml.py'.
-    """
-    if not GITHUB_TOKEN:
-        raise Exception("❌ GITHUB_TOKEN is not set; cannot download QC scripts")
+def github_tree() -> list[dict]:
+    url = f"{GITHUB_API}/repos/{QC_ORG}/{QC_REPO}/git/trees/{QC_BRANCH}"
+    resp = SESSION.get(url, params={"recursive": "1"}, timeout=30)
+    if resp.status_code == 403:
+        raise SystemExit(
+            "GitHub returned 403 while syncing FormosanBank QC files. "
+            "Set a GITHUB_TOKEN with access or pass --formosanbank-path ../FormosanBank."
+        )
+    resp.raise_for_status()
+    return resp.json().get("tree", [])
 
-    url = f"{GITHUB_API}/repos/{QC_ORG}/{QC_REPO}/contents/{remote_path}"
-    params = {"ref": QC_BRANCH}
 
-    for attempt in range(1, max_retries + 1):
+def download_raw(path: str) -> bytes:
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
         try:
-            resp = SESSION.get(
-                url,
-                params=params,
-                headers={"Accept": "application/vnd.github.v3.raw"},
-                timeout=30,
-            )
-
-            if resp.status_code == 200:
-                return resp.content
-
-            if resp.status_code == 404:
-                raise Exception(f"HTTP 404 Not Found for {url}")
-            if resp.status_code == 429:
-                # Secondary rate limit / too many requests
-                print(
-                    f"⚠️  Attempt {attempt} failed for {remote_path}: "
-                    f"429 Too Many Requests"
-                )
-                if attempt < max_retries:
-                    print("🔄  Backing off before retry...")
-                    time.sleep(5 * attempt)
-                    continue
-                raise Exception("HTTP 429 Too Many Requests")
-            if resp.status_code >= 400:
-                print(
-                    f"⚠️  Attempt {attempt} failed for {remote_path}: "
-                    f"HTTP {resp.status_code}"
-                )
-                if attempt == max_retries:
-                    resp.raise_for_status()
-                else:
-                    time.sleep(2 * attempt)
-                    continue
-
-            # Fallback; should not normally hit this branch
+            resp = SESSION.get(raw_url(path), timeout=30)
             resp.raise_for_status()
-
-        except requests.RequestException as e:
-            if attempt == max_retries:
-                raise Exception(f"Failed to download after {max_retries} attempts: {e}")
-            print(f"⚠️  Attempt {attempt} failed for {remote_path}: {e}")
-            print("🔄  Retrying in 2 seconds...")
-            time.sleep(2)
-
-    # Should never reach here
-    raise Exception("Unexpected error in download_with_retry")
+            return resp.content
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Failed to download {path}: {last_error}")
 
 
-def validate_python_script(content: bytes, filename: str) -> bool:
-    """Validate that the downloaded content is a valid Python script."""
+def sync_qc_tree(dest: Path, force_update: bool) -> Path:
+    if not GITHUB_TOKEN:
+        raise SystemExit(
+            "No sibling FormosanBank checkout was found and GITHUB_TOKEN is not set, "
+            "so the QC package cannot be synced."
+        )
+
+    dest.mkdir(parents=True, exist_ok=True)
+    tree = github_tree()
+    wanted = [
+        item["path"]
+        for item in tree
+        if item.get("type") == "blob" and item.get("path", "").startswith(SYNC_PREFIXES)
+    ]
+    if not wanted:
+        raise SystemExit("Could not find QC/ or Orthographies/ files in the FormosanBank tree.")
+
+    updated = 0
+    skipped = 0
+    for rel_path in tqdm(wanted, desc="Sync QC package", unit="file"):
+        out_path = dest / rel_path
+        if out_path.exists() and not force_update:
+            skipped += 1
+            continue
+        content = download_raw(rel_path)
+        if out_path.exists() and checksum(out_path) == hashlib.sha256(content).hexdigest():
+            skipped += 1
+            continue
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(content)
+        updated += 1
+
+    print(f"QC package cache: {dest} ({updated} updated, {skipped} skipped)")
+    return dest
+
+
+def resolve_qc_root(args: argparse.Namespace) -> Path:
+    candidates: list[Path] = []
+    if args.formosanbank_path:
+        candidates.append(args.formosanbank_path.expanduser().resolve())
+    candidates.append((PROJECT_ROOT.parent / "FormosanBank").resolve())
+    candidates.append(args.qc_dir.expanduser().resolve())
+
+    for candidate in candidates:
+        if has_qc_package_root(candidate):
+            if candidate == args.qc_dir.expanduser().resolve() and args.force_update and not args.skip_update:
+                return sync_qc_tree(candidate, force_update=True)
+            print(f"Using FormosanBank QC package: {candidate}")
+            return candidate
+
+    if args.skip_update:
+        raise SystemExit(
+            "No usable QC package root found. Pass --formosanbank-path or rerun without --skip-update."
+        )
+    return sync_qc_tree(args.qc_dir.expanduser().resolve(), force_update=args.force_update)
+
+
+def xml_lang(elem: ET.Element) -> str:
+    return (
+        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang")
+        or elem.attrib.get("xml:lang")
+        or ""
+    ).strip().lower()
+
+
+def valid_file(path: Path, src_lang: str, tgt_lang: str | None) -> bool:
     try:
-        # Try to decode as UTF-8
-        script_text = content.decode("utf-8")
-
-        # Basic validation: should contain some expected Python patterns
-        if filename == "clean_xml.py":
-            expected_patterns = ["def ", "import ", "xml"]
-        elif filename == "standardize.py":
-            expected_patterns = ["def ", "import "]
-        else:
-            expected_patterns = ["def ", "import "]
-
-        return all(pattern in script_text for pattern in expected_patterns)
-
-    except UnicodeDecodeError:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        print(f"[skip] Unparseable XML: {path}")
         return False
 
+    if xml_lang(root) != src_lang.strip().lower():
+        return False
+    if not tgt_lang:
+        return True
 
-def download_qc_scripts(dest: Path, force_update: bool = False):
+    target_codes = equivalent_lang_codes(tgt_lang)
+    return any(xml_lang(transl) in target_codes for transl in root.iter("TRANSL"))
+
+
+def filter_invalid_files(in_dir: Path, src_lang: str, tgt_lang: str | None) -> None:
+    xml_files = list(in_dir.rglob("*.xml"))
+    print(f"Filtering {len(xml_files)} XML files in {in_dir}")
+    removed = 0
+    for xml_file in tqdm(xml_files, desc="Filter XML", unit="file"):
+        if not valid_file(xml_file, src_lang, tgt_lang):
+            xml_file.unlink()
+            removed += 1
+    print(f"Removed {removed} non-matching or invalid XML files")
+
+
+def qc_env(qc_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(qc_root) if not existing else f"{qc_root}{os.pathsep}{existing}"
+    return env
+
+
+def run_command(cmd: list[str], qc_root: Path, check: bool = True) -> subprocess.CompletedProcess:
+    print("+ " + " ".join(cmd))
+    return subprocess.run(cmd, cwd=qc_root, env=qc_env(qc_root), check=check)
+
+
+def normalize_form_tiers_for_standardize(corpus_dir: Path) -> dict[str, int]:
+    """Make mixed legacy XML compatible with FormosanBank standardize --copy.
+
+    Some downloaded XML has bare <FORM> tiers with no kindOf at all, or a
+    standard tier but no original tier. FormosanBank's standardizer correctly
+    expects original tiers because it creates standard from original. For the MT
+    build, preserve the existing text by treating the available source FORM as
+    original before standardization.
     """
-    Download QC scripts from FormosanBank repository, with smart updating.
-    
-    Parameters
-    ----------
-    dest : Path
-        Destination directory for scripts
-    force_update : bool
-        If True, always download scripts regardless of existing files
-    """
-    dest.mkdir(parents=True, exist_ok=True)
+    stats = {
+        "files_changed": 0,
+        "untyped_promoted": 0,
+        "standard_copied": 0,
+        "other_copied": 0,
+        "parse_errors": 0,
+    }
 
-    updated_count = 0
-    skipped_count = 0
-
-    for filename, repo_path in QC_SCRIPTS.items():
-        out_path = dest / filename
-
-        print(f"📡 Checking {filename}...")
-
+    for xml_file in corpus_dir.rglob("*.xml"):
         try:
-            # Download the current version from remote (via GitHub API)
-            remote_content = download_with_retry(repo_path)
+            tree = ET.parse(xml_file)
+        except ET.ParseError:
+            stats["parse_errors"] += 1
+            continue
 
-            # Validate the downloaded content
-            if not validate_python_script(remote_content, filename):
-                print(
-                    f"⚠️  Warning: Downloaded {filename} doesn't appear to be a valid Python script"
-                )
+        root = tree.getroot()
+        changed = False
+        for elem in root.iter():
+            forms = elem.findall("FORM")
+            if not forms or any((form.get("kindOf") or "").strip().lower() == "original" for form in forms):
                 continue
 
-            # Calculate checksum of remote content
-            remote_checksum = hashlib.sha256(remote_content).hexdigest()
+            standard = next(
+                (form for form in forms if (form.get("kindOf") or "").strip().lower() == "standard"),
+                None,
+            )
+            untyped = [form for form in forms if not (form.get("kindOf") or "").strip()]
 
-            # Check if we need to update
-            if not force_update and out_path.exists():
-                local_checksum = get_file_checksum(out_path)
-                if local_checksum == remote_checksum:
-                    print(
-                        f"✅ {filename} is up to date "
-                        f"(checksum: {local_checksum[:8]}...)"
-                    )
-                    skipped_count += 1
-                    continue
-                else:
-                    print(f"🔄 {filename} has updates available")
-                    print(f"   Local:  {local_checksum[:8]}...")
-                    print(f"   Remote: {remote_checksum[:8]}...")
+            if len(forms) == 1 and untyped:
+                untyped[0].set("kindOf", "original")
+                stats["untyped_promoted"] += 1
+                changed = True
+                continue
 
-            # Write the new content
-            print(f"⬇️  Downloading {filename}...")
-            with open(out_path, "wb") as f:
-                f.write(remote_content)
-
-            # Verify the write was successful
-            if get_file_checksum(out_path) == remote_checksum:
-                print(f"✅ Successfully updated {filename}")
-                updated_count += 1
+            source_form = standard or (untyped[0] if untyped else forms[0])
+            original = copy.deepcopy(source_form)
+            original.set("kindOf", "original")
+            children = list(elem)
+            try:
+                insert_at = children.index(source_form)
+            except ValueError:
+                insert_at = 0
+            elem.insert(insert_at, original)
+            if standard is not None:
+                stats["standard_copied"] += 1
             else:
-                raise Exception(f"Checksum verification failed for {filename}")
+                stats["other_copied"] += 1
+            changed = True
 
-        except Exception as e:
-            print(f"❌ Failed to download {filename}: {e}")
-            if not out_path.exists():
-                print(f"💥 Cannot continue without {filename}")
-                raise
-            else:
-                print(f"⚠️  Using existing version of {filename}")
+        if changed:
+            tree.write(xml_file, encoding="utf-8", xml_declaration=True)
+            stats["files_changed"] += 1
 
-    # Summary
-    if updated_count > 0:
-        print(f"🎉 Updated {updated_count} QC script(s)")
-    if skipped_count > 0:
-        print(f"⏭️  Skipped {skipped_count} up-to-date script(s)")
-
-    # Make scripts executable
-    for filename in QC_SCRIPTS.keys():
-        script_path = dest / filename
-        if script_path.exists():
-            script_path.chmod(0o755)
-
-
-# ───────────────────────── XML filtering helpers ─────────────────────────────
-
-def is_valid_file(path: Path, src_lang: str, tgt_lang: Optional[str]) -> bool:
-    try:
-        tree = ET.parse(path)
-        root = tree.getroot()
-
-        text_lang = root.attrib.get("xml:lang") or root.attrib.get(
-            "{http://www.w3.org/XML/1998/namespace}lang"
+    if any(stats[key] for key in ("untyped_promoted", "standard_copied", "other_copied")):
+        print(
+            "Normalized FORM tiers before standardization: "
+            f"{stats['untyped_promoted']} bare FORM -> original, "
+            f"{stats['standard_copied']} standard-only copied to original, "
+            f"{stats['other_copied']} other FORM copied to original "
+            f"across {stats['files_changed']} files"
         )
-        if text_lang != src_lang:
-            return False
-
-        if tgt_lang:
-            for s in root.findall(".//S"):
-                for child in s:
-                    if child.tag == "TRANSL" and (
-                        child.attrib.get("xml:lang") == tgt_lang
-                        or child.attrib.get(
-                            "{http://www.w3.org/XML/1998/namespace}lang"
-                        )
-                        == tgt_lang
-                    ):
-                        return True
-            return False
-        return True
-    except ET.ParseError:
-        print(f"[!] Skipping unparseable file: {path}")
-        return False
+    if stats["parse_errors"]:
+        print(f"Skipped {stats['parse_errors']} unparseable XML files during FORM tier normalization")
+    return stats
 
 
-def filter_invalid_files(in_dir: Path, src_lang: str, tgt_lang: Optional[str]):
-    xml_files = list(in_dir.rglob("*.xml"))
-    print(f"Filtering {len(xml_files)} files...")
-    for xml_file in tqdm(xml_files):
-        if not is_valid_file(xml_file, src_lang, tgt_lang):
-            xml_file.unlink()  # Delete invalid file
+def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, standardize: bool, validate: bool) -> None:
+    clean_script = qc_root / "QC" / "cleaning" / "clean_xml.py"
+    std_script = qc_root / "QC" / "utilities" / "standardize.py"
+
+    run_command([sys.executable, str(clean_script), "--corpora_path", str(corpus_dir)], qc_root)
+
+    if standardize:
+        normalize_form_tiers_for_standardize(corpus_dir)
+        run_command(
+            [sys.executable, str(std_script), "--corpora_path", str(corpus_dir), "--copy"],
+            qc_root,
+        )
+
+    if validate:
+        validate_xml = qc_root / "QC" / "validation" / "validate_xml.py"
+        validate_text = qc_root / "QC" / "validation" / "validate_text.py"
+        if validate_xml.exists():
+            run_command(
+                [
+                    sys.executable,
+                    str(validate_xml),
+                    "by_path",
+                    "--path",
+                    str(corpus_dir),
+                    "--no-exit-on-hard",
+                ],
+                qc_root,
+                check=False,
+            )
+        if validate_text.exists():
+            run_command(
+                [
+                    sys.executable,
+                    str(validate_text),
+                    "by_path",
+                    "--path",
+                    str(corpus_dir),
+                    "--no-exit-on-hard",
+                ],
+                qc_root,
+                check=False,
+            )
 
 
-# ───────────────────────────── run QC scripts ────────────────────────────────
-
-def run_qc_scripts(corpus_dir: Path, qc_dir: Path):
-    clean_script = qc_dir / "clean_xml.py"
-    std_script = qc_dir / "standardize.py"
-
-    print("Running cleaning script...")
-    subprocess.run(
-        ["python", str(clean_script), "--corpora_path", str(corpus_dir)],
-        check=True,
-    )
-
-    print("Running standardization script...")
-    subprocess.run(
-        ["python", str(std_script), "--corpora_path", str(corpus_dir), "--copy"],
-        check=True,
-    )
-
-
-# ─────────────────────────────────── main ────────────────────────────────────
-
-def main():
+def main() -> None:
     args = parse_args()
+    in_dir = Path(args.in_dir or f"downloaded_{args.src_lang}").resolve()
+    if not in_dir.exists():
+        raise SystemExit(f"Input directory does not exist: {in_dir}")
 
-    if not GITHUB_TOKEN:
-        sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
-
-    # Set default input directory if none provided
-    if args.in_dir is None:
-        args.in_dir = f"downloaded_{args.src_lang}"
-
-    in_dir = Path(args.in_dir).resolve()
-    qc_dir = Path(args.qc_dir).resolve()
-
-    print("🔄 Checking for QC script updates...")
-    download_qc_scripts(qc_dir, force_update=args.force_update)
-
-    print("🧹 Filtering XML files...")
+    qc_root = resolve_qc_root(args)
     filter_invalid_files(in_dir, args.src_lang, args.tgt_lang)
-
-    print("⚙️  Running QC scripts on in-place XML data...")
-    run_qc_scripts(in_dir, qc_dir)
-
-    print("✅ Done!")
+    run_qc_scripts(
+        in_dir,
+        qc_root,
+        standardize=not args.skip_standardize,
+        validate=args.validate,
+    )
+    print("Done.")
 
 
 if __name__ == "__main__":

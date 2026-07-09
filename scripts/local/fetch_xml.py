@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as fut
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -55,9 +56,10 @@ load_dotenv(project_root / ".env")
 # Map language codes to their equivalent sets (same as make_corpus.py)
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     # Chinese variants
-    "zh": {"zh", "zho", "chi"},
-    "zho": {"zh", "zho", "chi"},
-    "chi": {"zh", "zho", "chi"},
+    "zh": {"zh", "zho", "chi", "cmn"},
+    "zho": {"zh", "zho", "chi", "cmn"},
+    "chi": {"zh", "zho", "chi", "cmn"},
+    "cmn": {"zh", "zho", "chi", "cmn"},
     # English variants
     "en": {"en", "eng"},
     "eng": {"en", "eng"},
@@ -67,6 +69,46 @@ LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
     """Get all equivalent language codes for a given language code."""
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
+
+
+def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
+    """Parse repeatable or comma-separated case-insensitive substring patterns."""
+    patterns: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            pattern = part.strip().lower()
+            if pattern and pattern not in patterns:
+                patterns.append(pattern)
+    return patterns
+
+
+DEFAULT_BIBLE_REPO_EXCLUDE_PATTERNS = (
+    "bible",
+    "taiwan-bible-society",
+    "taiwan bible society",
+    "taiwan_bible_society",
+)
+
+DEFAULT_BIBLE_PATH_EXCLUDE_PATTERNS = (
+    "fhl_bible",
+    "fhlbible",
+    "taiwan-bible-society",
+    "taiwan bible society",
+    "taiwan_bible_society",
+)
+
+
+def add_patterns(patterns: list[str], defaults: Iterable[str]) -> list[str]:
+    out = list(patterns)
+    for pattern in defaults:
+        if pattern not in out:
+            out.append(pattern)
+    return out
+
+
+def matches_exclude_pattern(value: str, patterns: Iterable[str]) -> bool:
+    haystack = value.lower()
+    return any(pattern in haystack for pattern in patterns)
 
 
 # ─────────────────────────────  config  ──────────────────────────────────────
@@ -282,6 +324,11 @@ def main():
         help="where to store the files (default: downloaded_{src_lang})",
     )
     parser.add_argument(
+        "--clean-output",
+        action="store_true",
+        help="Remove the output directory before downloading so stale XML cannot survive.",
+    )
+    parser.add_argument(
         "--public",
         action="store_true",
         help=(
@@ -290,11 +337,46 @@ def main():
         ),
     )
     parser.add_argument(
+        "--exclude-bible",
+        action="store_true",
+        help="Exclude Bible/Taiwan Bible Society XML from fetch results.",
+    )
+    parser.add_argument(
+        "--exclude-repo-pattern",
+        action="append",
+        default=[],
+        help=(
+            "Case-insensitive substring for repositories to skip before scanning. "
+            "Can be repeated or comma-separated."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-path-pattern",
+        action="append",
+        default=[],
+        help=(
+            "Case-insensitive substring for XML paths to skip after repo scanning. "
+            "Can be repeated or comma-separated."
+        ),
+    )
+    parser.add_argument(
         "--dialect",
         default=None,
         help=("optional dialect filter for if you would like to also filter by the xml:dialect tag"),
     )
     args = parser.parse_args()
+
+    repo_exclude_patterns = parse_exclude_patterns(args.exclude_repo_pattern)
+    path_exclude_patterns = parse_exclude_patterns(args.exclude_path_pattern)
+    if args.exclude_bible:
+        repo_exclude_patterns = add_patterns(
+            repo_exclude_patterns,
+            DEFAULT_BIBLE_REPO_EXCLUDE_PATTERNS,
+        )
+        path_exclude_patterns = add_patterns(
+            path_exclude_patterns,
+            DEFAULT_BIBLE_PATH_EXCLUDE_PATTERNS,
+        )
 
     if not GITHUB_TOKEN:
         sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
@@ -306,6 +388,8 @@ def main():
         f"   tgt_lang   = {args.tgt_lang}\n"
         f"   org        = {args.org}\n"
         f"   public     = {args.public}\n"
+        f"   exclude_repos = {repo_exclude_patterns or None}\n"
+        f"   exclude_paths = {path_exclude_patterns or None}\n"
         f"   branch_arg = {args.branch}\n"
         f"   token_len  = {len(GITHUB_TOKEN)}"
     )
@@ -316,7 +400,10 @@ def main():
         args.out_dir = f"downloaded_{args.src_lang}"
 
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(exist_ok=True)
+    if args.clean_output and out_dir.exists():
+        print(f"🧹  Removing stale download directory: {out_dir.resolve()}")
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     print(f"📂  Output directory: {out_dir.resolve()}")
 
     # Show which language codes will be matched if target language is specified
@@ -337,6 +424,19 @@ def main():
     else:
         repos = list(get_repos(args.org))
         print(f"📦  Found {len(repos)} repos in {args.org}")
+
+    if repo_exclude_patterns:
+        excluded_repos = [
+            repo for repo in repos if matches_exclude_pattern(repo, repo_exclude_patterns)
+        ]
+        repos = [
+            repo for repo in repos if not matches_exclude_pattern(repo, repo_exclude_patterns)
+        ]
+        if excluded_repos:
+            print(
+                f"🚫  Excluded {len(excluded_repos)} repo(s): "
+                + ", ".join(sorted(excluded_repos))
+            )
 
     with fut.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = []
@@ -390,6 +490,17 @@ def main():
                     and i["path"].startswith("Final_XML/")
                     and i["path"].lower().endswith(".xml")
                 ]
+
+            if path_exclude_patterns:
+                before_path_exclude = len(xml_blobs)
+                xml_blobs = [
+                    i
+                    for i in xml_blobs
+                    if not matches_exclude_pattern(i["path"], path_exclude_patterns)
+                ]
+                removed = before_path_exclude - len(xml_blobs)
+                if removed:
+                    print(f"🚫  Repo {repo}: excluded {removed} XML candidates by path pattern")
 
             if not xml_blobs:
                 print(f"ℹ️  Repo {repo}: no XML blobs found (public={args.public})")

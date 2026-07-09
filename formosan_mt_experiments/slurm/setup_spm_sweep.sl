@@ -39,7 +39,15 @@ case "${TARGET_LANG}" in
     exit 1
     ;;
 esac
-INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_in_domain_hard.csv}"
+PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+if [[ -n "${CORPUS_NAME:-}" ]]; then
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}/${CORPUS_NAME}}"
+  DEFAULT_INPUT="${CORPUS_DIR}/big_corpus_${FILE_SHORT}_in_domain_hard.csv"
+else
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}}"
+  DEFAULT_INPUT="${CORPUS_DIR}/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_in_domain_hard.csv"
+fi
+INPUT="${INPUT:-${DEFAULT_INPUT}}"
 OUT_DIR="${OUT_DIR:-${DEFAULT_OUT}}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-/home/scheppat/nllb-scripts/setup_formosan_nllb200.py}"
 

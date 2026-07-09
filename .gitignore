@@ -3,12 +3,14 @@
 downloaded_*
 .venv/
 scripts/.formosan_qc_scripts/
+scripts/.formosan_qc_repo/
 bash/
 artifacts/
 runs/
 logs/
 raw_corpora/
 hf_space_*/
+corpus_builds/
 
 # Python/runtime clutter
 __pycache__/
@@ -17,6 +19,10 @@ __pycache__/
 
 # Generated DeepL pivot corpora and caches. These are expensive to rebuild, so
 # keep protected local copies under protected_corpora/ and mirror them off-box.
+/processed_corpora/*_processed.csv
+/processed_corpora/big_corpus*.csv
+/processed_corpora/mt_build_manifest.json
+/processed_corpora/filter_reports/
 pivot_corpora_final/*.csv
 pivot_corpora_final/*_report.json
 processed_corpora/pivot/*.csv

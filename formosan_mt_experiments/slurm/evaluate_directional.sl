@@ -45,7 +45,15 @@ case "${TARGET_LANG}" in
     ;;
 esac
 DIRECTION="${DIRECTION:-${DEFAULT_DIRECTION}}"
-INPUT="${INPUT:-/projects/prudlab/formosan_parallel_corpora/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_${TIER}.csv}"
+PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+if [[ -n "${CORPUS_NAME:-}" ]]; then
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}/${CORPUS_NAME}}"
+  DEFAULT_INPUT="${CORPUS_DIR}/big_corpus_${FILE_SHORT}_${TIER}.csv"
+else
+  CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}}"
+  DEFAULT_INPUT="${CORPUS_DIR}/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_${TIER}.csv"
+fi
+INPUT="${INPUT:-${DEFAULT_INPUT}}"
 MODEL="${MODEL:?Set MODEL to a trained final/best model directory}"
 TOKENIZER="${TOKENIZER:-${MODEL}}"
 OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/reports/${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"

@@ -112,14 +112,15 @@ Main stages:
 2. `scripts/local/clean_xml.py`
    Syncs the official FormosanBank QC scripts and runs them in place on the downloaded XML.
 3. `scripts/local/make_corpus.py`
-   Extracts parallel pairs and preserves `source`, `kindOf`, and `dialect` metadata.
+   Extracts sentence and word rows from `FORM kindOf="standard"` by default and preserves `source`, `kindOf`, `dialect`, `row_type`, and `xml_id` metadata.
 4. `scripts/local/filter_split_corpus.py`
-   Normalizes text, removes noisy rows, labels `lexeme` vs `sentence`, deduplicates, filters length-ratio outliers, and assigns train/validate/test splits.
+   Normalizes text, removes noisy rows, preserves XML lexical rows, labels obvious vocabulary/dictionary rows as `lexeme`, deduplicates, filters language-aware length-ratio outliers, and assigns train/validate/test splits. It writes an audit report with drop counts and reject samples beside each processed CSV.
 
 Two properties of the released data are important for the experiments:
 
-- `lexeme` rows are routed to `train` only.
-- Sentence splits are assigned by exact shared source or target string to reduce train/eval leakage across one-to-many and many-to-one pairs.
+- `lexeme` rows are routed to `train` only; if a train lexeme would still leak an exact or skeleton source/target/pair key into validation/test, that train row is pruned rather than moved into eval.
+- Sentence splits are assigned by punctuation/spacing-insensitive shared source or target keys to reduce train/eval leakage across one-to-many, many-to-one, and near-duplicate pairs.
+- Aggregate and pivot corpora keep `row_type`, so the hard-split builder can continue excluding XML lexical rows from validation/test after the pairwise CSVs are combined.
 
 ### Repository Hygiene
 
@@ -168,16 +169,114 @@ The bilingual NLLB trainer uses canonical language names in `--src-lang`:
 
 ### Rebuild The Corpora
 
-To rebuild all released corpora from FormosanBank XML:
+The preferred rebuild entrypoint is now `scripts/local/build_mt_corpus.py`. The
+top-level shell script is only a compatibility wrapper around it:
 
 ```bash
 ./build_corpora.sh
 ```
 
-To rebuild a single pair manually:
+This runs the end-to-end MT corpus pipeline:
+
+1. remove stale `downloaded_<lang>/` directories unless `--keep-downloaded` is passed, then download `Final_XML/` files for each Formosan language;
+2. clean with the real FormosanBank QC package (`clean_xml.py` plus
+   `standardize.py --copy`);
+3. extract sentence and word-level rows from standard forms to raw pairwise CSVs;
+4. run MT-specific filtering, deduplication, lexeme routing, and train/eval overlap pruning on each pair;
+5. build multilingual English/Chinese aggregate corpora while preserving `row_type`;
+6. optionally rebuild pivot corpora from DeepL cache or new DeepL translations;
+7. build leakage-resistant hard split tiers with exact and punctuation/spacing
+   skeleton overlap checks and lexeme-in-eval validation.
+
+By default the cleaner uses a sibling `../FormosanBank` checkout when present,
+so current FormosanBank QC imports such as `QC.validation._dialect_inventory`
+work correctly. If that checkout is not available, the script can sync the
+minimal `QC/` and `Orthographies/` trees into `scripts/.formosan_qc_repo/`
+using `GITHUB_TOKEN`.
+
+Useful rebuild commands:
 
 ```bash
-python scripts/local/fetch_xml.py --src-lang ami --public
+# Rebuild a small language subset from already downloaded XML.
+./build_corpora.sh --languages ami,tay --skip-fetch
+
+# Public-only rebuild from FormosanBank/Corpora XML.
+./build_corpora.sh --public
+
+# Rebuild through pivot outputs using existing DeepL cache only.
+./build_corpora.sh --skip-fetch --with-pivot --pivot-skip-translation
+
+# Full rebuild with pivot, excluding Taiwan Bible Society Bible XML at fetch time.
+./build_corpora.sh --with-pivot --exclude-bible
+
+# Same Bible-excluded rebuild, but do not spend DeepL characters.
+./build_corpora.sh --with-pivot --pivot-skip-translation --exclude-bible
+
+# Build separate public and private/all-data no-Bible corpora for model comparison.
+./build_corpora.sh --build-public-private --with-pivot --exclude-bible
+
+# Same public/private comparison build, but do not spend DeepL characters.
+./build_corpora.sh --build-public-private --with-pivot --pivot-skip-translation --exclude-bible
+
+# Rebuild everything from current GitHub XML, but do not spend DeepL characters.
+./build_corpora.sh --with-pivot --pivot-skip-translation
+
+# Build only the public no-Bible corpus into its own namespace.
+./build_corpora.sh --public --with-pivot --exclude-bible --corpus-name public_no_bible
+
+# Build only the private/all-data no-Bible corpus into its own namespace.
+./build_corpora.sh --with-pivot --exclude-bible --corpus-name private_no_bible
+
+# Plan a full command sequence without writing anything.
+./build_corpora.sh --languages ami --dry-run
+```
+
+`--exclude-bible` is applied during fetch. Use it with the default fresh-download
+behavior so stale Bible XML is removed from `downloaded_<lang>/`; do not combine
+it with `--skip-fetch` when the goal is to remove Bible data from the corpus.
+
+Named builds write every generated artifact under `corpus_builds/<name>/`, so
+public and private/all-data runs do not overwrite each other. The comparison
+outputs to train from are:
+
+- `corpus_builds/public_no_bible/pivot_corpora_final/big_corpus_en.csv`
+- `corpus_builds/public_no_bible/pivot_corpora_final/big_corpus_zh.csv`
+- `corpus_builds/private_no_bible/pivot_corpora_final/big_corpus_en.csv`
+- `corpus_builds/private_no_bible/pivot_corpora_final/big_corpus_zh.csv`
+
+Hard split tiers for those corpora live under
+`corpus_builds/<name>/formosan_mt_experiments/data/splits_en_v1/` and
+`corpus_builds/<name>/formosan_mt_experiments/data/splits_zh_v1/`. In this
+context, `private` means the default all-repos fetch available to your
+`GITHUB_TOKEN`, not the public `FormosanBank/Corpora` release snapshot.
+
+Named full rebuilds remove stale generated CSVs and split files before
+rebuilding, while preserving existing pivot cache files. Use
+`--keep-build-output` only for deliberate incremental debugging. Named pivot
+builds also read the existing root cache at `processed_corpora/pivot/cache/`
+without writing to it, so `--pivot-skip-translation` can reuse protected DeepL
+work. Disable that with `--no-shared-pivot-cache` if you need a fully isolated
+cache experiment.
+
+Each build writes `mt_build_manifest.json` in its build root. For completed
+non-dry runs, the manifest includes row counts, byte sizes, and SHA-256 checksums
+for the final aggregate and split CSVs. Use `--skip-artifact-checksums` only when
+you need to avoid hashing large files during exploratory runs.
+
+The generated root-level pairwise and aggregate CSVs are ignored by git:
+
+- `raw_corpora/*.csv`
+- `processed_corpora/*_processed.csv`
+- `processed_corpora/big_corpus*.csv`
+- `processed_corpora/filter_reports/`
+- `formosan_mt_experiments/data/splits_*_v1/`
+- `pivot_corpora_final/*.csv` when `--with-pivot` is used
+- `corpus_builds/` for named public/private comparison builds
+
+To rebuild a single pair manually, the underlying stages remain available:
+
+```bash
+python scripts/local/fetch_xml.py --src-lang ami --public --exclude-bible
 python scripts/local/clean_xml.py --src-lang ami
 python scripts/local/make_corpus.py \
   --xml-dir downloaded_ami \
@@ -189,7 +288,18 @@ python scripts/local/filter_split_corpus.py \
   --workers 32
 ```
 
-The rebuild path creates intermediate XML in `downloaded_*`, raw extracted CSVs in `raw_corpora/`, and filtered experiment-ready CSVs in `processed_corpora/`.
+The rebuild path creates intermediate XML in `downloaded_*`, raw extracted CSVs
+in `raw_corpora/`, filtered pairwise CSVs in `processed_corpora/`, aggregate
+corpora in `processed_corpora/big_corpus_*.csv`, and hard split tiers in
+`formosan_mt_experiments/data/splits_*_v1/`. Filtering reports are written under
+`processed_corpora/filter_reports/`; inspect `summary.json` and
+`reject_samples.csv` when changing filtering thresholds.
+
+The hard split builder ignores the old pairwise `split` assignments when it
+creates tiered experiment files, but it does use the preserved `row_type`.
+Rows marked `lexeme` are never assigned to validation/test in `lexical`,
+`in_domain_hard`, or `hard_global`; they remain train-only unless removed
+because they would leak an exact or skeleton source/target/pair key into eval.
 
 ### Replicate The NLLB Experiments
 
