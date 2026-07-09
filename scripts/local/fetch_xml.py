@@ -32,10 +32,15 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as fut
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 import os
+import random
+import re
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote
@@ -65,10 +70,58 @@ LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     "eng": {"en", "eng"},
 }
 
+LANGUAGE_PATH_HINTS: dict[str, set[str]] = {
+    "ami": {"ami", "amis"},
+    "bnn": {"bnn", "bunun"},
+    "ckv": {"ckv", "kavalan"},
+    "dru": {"dru", "rukai"},
+    "pwn": {"pwn", "paiwan"},
+    "pyu": {"pyu", "puyuma"},
+    "ssf": {"ssf", "thao"},
+    "sxr": {"sxr", "saaroa"},
+    "szy": {"szy", "sakizaya"},
+    "tao": {"tao", "yami"},
+    "tay": {"tay", "atayal"},
+    "trv": {"trv", "seediq", "sedik"},
+    "tsu": {"tsu", "tsou"},
+    "xnb": {"xnb", "kanakanavu"},
+    "xsy": {"xsy", "saisiyat"},
+}
+
+PATH_HINT_TO_LANGUAGE_CODES = {
+    hint: code
+    for code, hints in LANGUAGE_PATH_HINTS.items()
+    for hint in hints
+}
+
 
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
     """Get all equivalent language codes for a given language code."""
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
+
+
+def path_language_hint_codes(path: str) -> set[str]:
+    """Return language codes that are explicitly named by path components/tokens."""
+    tokens: set[str] = set()
+    for component in path.split("/"):
+        lowered = component.lower()
+        if lowered.endswith(".xml"):
+            lowered = lowered[:-4]
+        tokens.add(lowered)
+        tokens.update(part for part in re.split(r"[^a-z0-9]+", lowered) if part)
+    return {
+        PATH_HINT_TO_LANGUAGE_CODES[token]
+        for token in tokens
+        if token in PATH_HINT_TO_LANGUAGE_CODES
+    }
+
+
+def public_path_may_match_src_lang(path: str, src_lang: str) -> bool:
+    """Conservative prefilter for public corpus paths before raw XML download."""
+    hints = path_language_hint_codes(path)
+    if not hints:
+        return True
+    return src_lang.strip().lower() in hints
 
 
 def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
@@ -144,8 +197,9 @@ GITHUB_API = "https://api.github.com"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
-MAX_WORKERS = 16
+MAX_WORKERS = 4
 REQUEST_TIMEOUT = 10  # seconds
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 RETRIES = Retry(
     total=5,
     backoff_factor=0.5,
@@ -158,6 +212,14 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 SESSION.mount("https://", HTTPAdapter(max_retries=RETRIES))
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    status: str
+    path: Path | None = None
+    url: str | None = None
+    error: str | None = None
 
 
 def get_repos(org: str) -> Iterable[str]:
@@ -236,6 +298,38 @@ def raw_url(org: str, repo: str, path: str, branch: str) -> str:
     return f"https://raw.githubusercontent.com/{org}/{repo}/{branch}/{encoded_path}"
 
 
+def retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return max(0.0, float(value))
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def retry_sleep_seconds(
+    response: requests.Response | None,
+    attempt: int,
+    *,
+    base_sleep: float,
+    max_sleep: float,
+) -> float:
+    retry_after = retry_after_seconds(response.headers.get("Retry-After") if response else None)
+    if retry_after is not None:
+        return min(max_sleep, retry_after)
+    backoff = base_sleep * (2 ** attempt)
+    jitter = random.uniform(0.0, max(base_sleep, 0.1))
+    return min(max_sleep, backoff + jitter)
+
+
 def is_public_release_xml_path(path: str) -> bool:
     """
     Return True for any XML file that lives somewhere under a Corpora/.../XML/
@@ -294,7 +388,11 @@ def download_blob(
     branch: str,
     out_dir: Path,
     dialect: str | None,
-):
+    *,
+    download_retries: int,
+    retry_base_sleep: float,
+    retry_max_sleep: float,
+) -> DownloadResult:
     """
     Download → filter → save one blob using raw.githubusercontent.com
     (so we don't burn through the REST API core rate limit).
@@ -304,39 +402,55 @@ def download_blob(
     url = raw_url(org, repo, item["path"], branch)
 
     # retry loop for transient HTTP issues
-    for attempt in range(3):
+    last_error = ""
+    for attempt in range(download_retries):
+        response: requests.Response | None = None
         try:
-            resp = SESSION.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
+            response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                xml_bytes = response.content
+                break
+            last_error = f"HTTP {response.status_code}"
+            if response.status_code not in TRANSIENT_HTTP_STATUSES:
                 print(
-                    f"⚠️  [{repo}] HTTP {resp.status_code} for {url} "
-                    f"(attempt {attempt+1})"
+                    f"❌  [{repo}] Non-retryable HTTP {response.status_code} for {url}"
                 )
-                resp.raise_for_status()
-            xml_bytes = resp.content
-            break
-        except requests.exceptions.RequestException as e:
+                return DownloadResult(status="failed", url=url, error=last_error)
             print(
-                f"⚠️  [{repo}] Error fetching {url} on attempt {attempt+1}: {e}"
+                f"⚠️  [{repo}] HTTP {response.status_code} for {url} "
+                f"(attempt {attempt + 1}/{download_retries})"
             )
-            if attempt == 2:
-                print(f"❌  [{repo}] Giving up on {url} after 3 attempts")
-                return None
-            time.sleep(2 ** attempt)
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            print(
+                f"⚠️  [{repo}] Error fetching {url} "
+                f"on attempt {attempt + 1}/{download_retries}: {e}"
+            )
+        if attempt == download_retries - 1:
+            print(f"❌  [{repo}] Giving up on {url} after {download_retries} attempts")
+            return DownloadResult(status="failed", url=url, error=last_error)
+        time.sleep(
+            retry_sleep_seconds(
+                response,
+                attempt,
+                base_sleep=retry_base_sleep,
+                max_sleep=retry_max_sleep,
+            )
+        )
     else:
-        return None  # never reached
+        return DownloadResult(status="failed", url=url, error=last_error or "unknown error")
 
     if not wants_file(xml_bytes, src_lang, tgt_lang, dialect):
         # Uncomment for super-verbose logging:
         # print(f"   ↷ [{repo}] Skipped {item['path']} (lang filter)")
-        return None
+        return DownloadResult(status="skipped", url=url)
 
     dest = out_dir / repo / item["path"]
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(xml_bytes)
     # Uncomment for per-file success logging:
     # print(f"   ✅ [{repo}] Saved {dest}")
-    return dest
+    return DownloadResult(status="kept", path=dest, url=url)
 
 
 def main():
@@ -357,11 +471,51 @@ def main():
         help="Remove the output directory before downloading so stale XML cannot survive.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_WORKERS,
+        help=(
+            "Concurrent raw GitHub downloads. Lower values are slower but avoid "
+            f"429 rate limiting. Default: {MAX_WORKERS}."
+        ),
+    )
+    parser.add_argument(
+        "--download-retries",
+        type=int,
+        default=8,
+        help="Attempts per XML candidate for transient HTTP failures such as 429.",
+    )
+    parser.add_argument(
+        "--retry-base-sleep",
+        type=float,
+        default=2.0,
+        help="Initial exponential-backoff sleep in seconds for raw XML downloads.",
+    )
+    parser.add_argument(
+        "--retry-max-sleep",
+        type=float,
+        default=60.0,
+        help="Maximum sleep in seconds between raw XML download retries.",
+    )
+    parser.add_argument(
+        "--allow-download-failures",
+        action="store_true",
+        help="Do not abort if one or more XML candidates could not be downloaded.",
+    )
+    parser.add_argument(
         "--public",
         action="store_true",
         help=(
             "Use public release structure: look anywhere under XML/ directories "
             "inside FormosanBank/FormosanBank/Corpora/"
+        ),
+    )
+    parser.add_argument(
+        "--no-public-language-path-prefilter",
+        action="store_true",
+        help=(
+            "In --public mode, do not skip XML paths whose directory/file tokens "
+            "clearly name a different Formosan language."
         ),
     )
     parser.add_argument(
@@ -402,6 +556,14 @@ def main():
         help=("optional dialect filter for if you would like to also filter by the xml:dialect tag"),
     )
     args = parser.parse_args()
+    if args.workers < 1:
+        raise SystemExit("--workers must be >= 1")
+    if args.download_retries < 1:
+        raise SystemExit("--download-retries must be >= 1")
+    if args.retry_base_sleep < 0:
+        raise SystemExit("--retry-base-sleep must be >= 0")
+    if args.retry_max_sleep < 0:
+        raise SystemExit("--retry-max-sleep must be >= 0")
 
     exact_excluded_repos = parse_exact_repos(args.exclude_repo)
     repo_exclude_patterns = parse_exclude_patterns(args.exclude_repo_pattern)
@@ -419,10 +581,14 @@ def main():
         f"   tgt_lang   = {args.tgt_lang}\n"
         f"   org        = {args.org}\n"
         f"   public     = {args.public}\n"
+        f"   public_path_prefilter = {args.public and not args.no_public_language_path_prefilter}\n"
         f"   exclude_repos_exact = {exact_excluded_repos or None}\n"
         f"   exclude_repo_patterns = {repo_exclude_patterns or None}\n"
         f"   exclude_path_patterns = {path_exclude_patterns or None}\n"
         f"   branch_arg = {args.branch}\n"
+        f"   workers    = {args.workers}\n"
+        f"   retries    = {args.download_retries}\n"
+        f"   backoff    = {args.retry_base_sleep}s..{args.retry_max_sleep}s\n"
         f"   token_len  = {len(GITHUB_TOKEN)}"
     )
 
@@ -481,7 +647,7 @@ def main():
                 + ", ".join(sorted(excluded_repos))
             )
 
-    with fut.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    with fut.ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = []
 
         # ── repo-level progress bar ──────────────────────────────────────────
@@ -524,6 +690,19 @@ def main():
                     if i["type"] == "blob"
                     and is_public_release_xml_path(i["path"])
                 ]
+                if not args.no_public_language_path_prefilter:
+                    before_language_prefilter = len(xml_blobs)
+                    xml_blobs = [
+                        i
+                        for i in xml_blobs
+                        if public_path_may_match_src_lang(i["path"], args.src_lang)
+                    ]
+                    removed = before_language_prefilter - len(xml_blobs)
+                    if removed:
+                        print(
+                            f"🚫  Repo {repo}: skipped {removed} XML candidates "
+                            f"whose public path clearly names another language"
+                        )
                 if exact_excluded_repos:
                     before_exact_public_exclude = len(xml_blobs)
                     xml_blobs = [
@@ -578,13 +757,17 @@ def main():
                         args.tgt_lang,
                         branch,  # kept for logging / future use
                         out_dir,
-                        dialect
+                        dialect,
+                        download_retries=args.download_retries,
+                        retry_base_sleep=args.retry_base_sleep,
+                        retry_max_sleep=args.retry_max_sleep,
                     )
                 )
 
         # ── file-download progress bar ──────────────────────────────────────
         print(f"📊  Total XML download tasks queued: {len(futures)}")
         kept: list[Path] = []
+        failures: list[DownloadResult] = []
         for f in tqdm(
             fut.as_completed(futures),
             total=len(futures),
@@ -592,10 +775,23 @@ def main():
             unit="file",
         ):
             res = f.result()
-            if res:
-                kept.append(res)
+            if res.status == "kept" and res.path:
+                kept.append(res.path)
+            elif res.status == "failed":
+                failures.append(res)
 
     print(f"✅  Downloaded {len(kept)} XML files → {out_dir}")
+    if failures:
+        print(f"❌  Failed to download {len(failures)} XML candidate file(s).")
+        for failure in failures[:25]:
+            print(f"   - {failure.url}: {failure.error}")
+        if len(failures) > 25:
+            print(f"   ... and {len(failures) - 25} more")
+        if not args.allow_download_failures:
+            raise SystemExit(
+                "XML fetch incomplete. Re-run the command; completed downloads are "
+                "kept unless --clean-output removes them."
+            )
 
 
 if __name__ == "__main__":

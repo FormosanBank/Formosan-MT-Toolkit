@@ -237,6 +237,21 @@ for `Formosan-Taiwan-Bible-Society-Bibles`. It does not search for generic
 stale XML is removed from `downloaded_<lang>/`; do not combine it with
 `--skip-fetch` when the goal is to remove that repo from the corpus.
 
+Fetching public FormosanBank XML requires many raw GitHub requests. The build
+defaults to conservative fetch settings (`--fetch-workers 4`,
+`--fetch-download-retries 8`) and aborts if any candidate XML cannot be checked
+after retries, rather than silently producing an incomplete corpus. In public
+mode it also skips raw downloads for XML paths that clearly name a different
+Formosan language, while still fetching paths with no clear language hint. If
+GitHub returns `429 Too Many Requests`, rerun with fewer fetch workers; when
+retrying an interrupted fetch, `--keep-downloaded` preserves XML that was
+already saved:
+
+```bash
+./build_corpora.sh --build-public-private --with-pivot --exclude-bible \
+  --fetch-workers 2 --keep-downloaded
+```
+
 Named builds write every generated artifact under `corpus_builds/<name>/`, so
 public and private/all-data runs do not overwrite each other. The comparison
 outputs to train from are:
@@ -300,8 +315,14 @@ corpora in `processed_corpora/big_corpus_*.csv`, and hard split tiers in
 The hard split builder ignores the old pairwise `split` assignments when it
 creates tiered experiment files, but it does use the preserved `row_type`.
 Rows marked `lexeme` are never assigned to validation/test in `lexical`,
-`in_domain_hard`, or `hard_global`; they remain train-only unless removed
-because they would leak an exact or skeleton source/target/pair key into eval.
+`in_domain_hard`, or `hard_global`. The tier builder assigns connected exact
+and punctuation/spacing skeleton duplicate clusters to a single split globally,
+so source, target, and pair near-dupes cannot cross train/eval. It targets the
+90/2.5/7.5 train/dev/test ratios but also has minimum desired eval floors
+(`--min-test-rows 100`, `--min-validate-rows 25`) when enough hard eligible
+rows exist; if a small language has fewer eligible hard rows than the requested
+eval budget, the eligible rows are split roughly 75/25 between test and dev
+rather than letting test collapse to a few dozen examples.
 
 ### Replicate The NLLB Experiments
 

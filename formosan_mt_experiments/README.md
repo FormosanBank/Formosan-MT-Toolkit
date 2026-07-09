@@ -57,6 +57,13 @@ Outputs:
 - `big_corpus_zh_*.csv`: same tiers for Traditional Chinese.
 - `report_all_tiers.json`: leakage and count diagnostics.
 
+The splitter keeps lexemes out of validation/test, assigns connected exact and
+skeleton duplicate clusters to one split globally, and targets 90/2.5/7.5 while
+using minimum desired eval floors of 100 test rows and 25 validation rows when a
+language has enough hard eligible examples. For very small eligible pools, it
+splits the hard eligible rows approximately 75/25 between test and validation
+instead of allowing the headline benchmark to collapse to a handful of rows.
+
 Validate any tier:
 
 ```bash

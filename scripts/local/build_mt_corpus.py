@@ -303,10 +303,18 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
     if not args.skip_fetch:
         cmd = [PYTHON, str(script("scripts/local/fetch_xml.py")), "--src-lang", lang.code]
         cmd.extend(["--out-dir", str(xml_dir)])
+        cmd.extend(["--workers", str(args.fetch_workers)])
+        cmd.extend(["--download-retries", str(args.fetch_download_retries)])
+        cmd.extend(["--retry-base-sleep", str(args.fetch_retry_base_sleep)])
+        cmd.extend(["--retry-max-sleep", str(args.fetch_retry_max_sleep)])
+        if args.allow_download_failures:
+            cmd.append("--allow-download-failures")
         if not args.keep_downloaded:
             cmd.append("--clean-output")
         if args.public:
             cmd.append("--public")
+        if args.no_public_language_path_prefilter:
+            cmd.append("--no-public-language-path-prefilter")
         if args.force_branch:
             cmd.extend(["--branch", args.force_branch])
         if args.exclude_bible:
@@ -464,6 +472,10 @@ def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: P
                 str(args.min_formosan_tokens),
                 "--min-target-tokens",
                 str(args.min_target_tokens),
+                "--min-test-rows",
+                str(args.min_test_rows),
+                "--min-validate-rows",
+                str(args.min_validate_rows),
                 "--tiers",
                 args.tiers,
             ],
@@ -495,6 +507,10 @@ def write_manifest(
                 "validate": args.val_ratio,
                 "test": args.test_ratio,
             },
+            "hard_split_minimum_eval_rows": {
+                "test": args.min_test_rows,
+                "validate": args.min_validate_rows,
+            },
             "with_pivot": args.with_pivot,
             "shared_pivot_cache": args.shared_pivot_cache,
             "pivot_read_cache_dirs": [
@@ -504,6 +520,12 @@ def write_manifest(
             "keep_redactions": args.keep_redactions,
             "fresh_downloads": not args.keep_downloaded,
             "keep_build_output": args.keep_build_output,
+            "fetch_workers": args.fetch_workers,
+            "fetch_download_retries": args.fetch_download_retries,
+            "fetch_retry_base_sleep": args.fetch_retry_base_sleep,
+            "fetch_retry_max_sleep": args.fetch_retry_max_sleep,
+            "allow_download_failures": args.allow_download_failures,
+            "public_language_path_prefilter": not args.no_public_language_path_prefilter,
             "exclude_bible": args.exclude_bible,
             "exclude_bible_exact_repos": list(EXACT_BIBLE_REPOS) if args.exclude_bible else [],
             "exclude_repo_patterns": args.exclude_repo_pattern,
@@ -561,6 +583,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--public", action="store_true", help="Fetch from public FormosanBank/Corpora XML only")
+    parser.add_argument(
+        "--no-public-language-path-prefilter",
+        action="store_true",
+        help=(
+            "Disable the conservative public-mode path-language prefilter before "
+            "raw XML downloads."
+        ),
+    )
     parser.add_argument("--force-branch", default=None, help="Force GitHub branch for fetch_xml.py")
     parser.add_argument(
         "--exclude-bible",
@@ -583,6 +613,35 @@ def parse_args() -> argparse.Namespace:
         "--keep-downloaded",
         action="store_true",
         help="Do not clear downloaded_<lang> before fetching; useful for manual incremental debugging.",
+    )
+    parser.add_argument(
+        "--fetch-workers",
+        type=int,
+        default=4,
+        help="Concurrent raw GitHub XML downloads passed to fetch_xml.py.",
+    )
+    parser.add_argument(
+        "--fetch-download-retries",
+        type=int,
+        default=8,
+        help="Per-file transient HTTP retry attempts passed to fetch_xml.py.",
+    )
+    parser.add_argument(
+        "--fetch-retry-base-sleep",
+        type=float,
+        default=2.0,
+        help="Initial raw GitHub download backoff in seconds passed to fetch_xml.py.",
+    )
+    parser.add_argument(
+        "--fetch-retry-max-sleep",
+        type=float,
+        default=60.0,
+        help="Maximum raw GitHub download backoff in seconds passed to fetch_xml.py.",
+    )
+    parser.add_argument(
+        "--allow-download-failures",
+        action="store_true",
+        help="Allow fetch_xml.py to continue even if some XML candidates never download.",
     )
     parser.add_argument(
         "--keep-build-output",
@@ -644,8 +703,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-ratio", type=float, default=0.075)
     parser.add_argument("--min-formosan-tokens", type=int, default=4)
     parser.add_argument("--min-target-tokens", type=int, default=4)
+    parser.add_argument("--min-test-rows", type=int, default=100)
+    parser.add_argument("--min-validate-rows", type=int, default=25)
     parser.add_argument("--tiers", default="lexical,in_domain_hard,hard_global")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fetch_workers < 1:
+        raise SystemExit("--fetch-workers must be >= 1")
+    if args.fetch_download_retries < 1:
+        raise SystemExit("--fetch-download-retries must be >= 1")
+    if args.fetch_retry_base_sleep < 0:
+        raise SystemExit("--fetch-retry-base-sleep must be >= 0")
+    if args.fetch_retry_max_sleep < 0:
+        raise SystemExit("--fetch-retry-max-sleep must be >= 0")
+    if args.min_test_rows < 0:
+        raise SystemExit("--min-test-rows must be >= 0")
+    if args.min_validate_rows < 0:
+        raise SystemExit("--min-validate-rows must be >= 0")
+    return args
 
 
 def run_build(args: argparse.Namespace) -> Path:

@@ -70,6 +70,60 @@ class SourceCandidate:
     avg_tokens: float
 
 
+@dataclass(frozen=True)
+class GroupCandidate:
+    group_id: int
+    rows: int
+    short_frac: float
+    avg_tokens: float
+
+
+class DisjointSet:
+    def __init__(self, size: int) -> None:
+        self.parent = list(range(size))
+        self.rank = [0] * size
+
+    def find(self, item: int) -> int:
+        parent = self.parent[item]
+        if parent != item:
+            self.parent[item] = self.find(parent)
+        return self.parent[item]
+
+    def union(self, left: int, right: int) -> None:
+        left_root = self.find(left)
+        right_root = self.find(right)
+        if left_root == right_root:
+            return
+        if self.rank[left_root] < self.rank[right_root]:
+            left_root, right_root = right_root, left_root
+        self.parent[right_root] = left_root
+        if self.rank[left_root] == self.rank[right_root]:
+            self.rank[left_root] += 1
+
+
+def leakage_group_ids(df: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
+    """Connected components over exact/skeleton keys so a near-dupe cluster has one split."""
+    dsu = DisjointSet(len(df))
+    for col in columns:
+        owner: dict[str, int] = {}
+        for pos, value in enumerate(df[col].fillna("").astype(str).tolist()):
+            if not value:
+                continue
+            existing = owner.get(value)
+            if existing is None:
+                owner[value] = pos
+            else:
+                dsu.union(existing, pos)
+
+    root_to_group: dict[int, int] = {}
+    group_ids: list[int] = []
+    for pos in range(len(df)):
+        root = dsu.find(pos)
+        group_id = root_to_group.setdefault(root, len(root_to_group))
+        group_ids.append(group_id)
+    return pd.Series(group_ids, index=df.index, dtype="int64")
+
+
 def tier_mask(
     df: pd.DataFrame,
     tier: str,
@@ -172,6 +226,108 @@ def choose_sources(
     return {c.source for c in best}
 
 
+def split_targets(
+    rows_total: int,
+    eligible_total: int,
+    test_ratio: float,
+    val_ratio: float,
+    min_test_rows: int,
+    min_validate_rows: int,
+) -> tuple[int, int]:
+    if eligible_total <= 0:
+        return 0, 0
+    eval_ratio = test_ratio + val_ratio
+    test_share = test_ratio / eval_ratio if eval_ratio else 1.0
+    desired_test = max(1, round(rows_total * test_ratio))
+    desired_validate = max(1, round(rows_total * val_ratio))
+    desired_eval = desired_test + desired_validate
+
+    if eligible_total <= desired_eval:
+        target_test = max(1, round(eligible_total * test_share))
+        target_validate = eligible_total - target_test
+        if eligible_total >= 2 and target_validate == 0:
+            target_test -= 1
+            target_validate = 1
+        return target_test, target_validate
+
+    target_test = max(desired_test, min_test_rows)
+    target_validate = max(desired_validate, min_validate_rows)
+    if target_test + target_validate > eligible_total:
+        target_test = max(1, round(eligible_total * test_share))
+        target_validate = eligible_total - target_test
+    return target_test, target_validate
+
+
+def group_candidates(
+    lang_df: pd.DataFrame,
+    candidate_mask: pd.Series,
+    group_ids: pd.Series,
+    assigned_groups: dict[int, str],
+) -> list[GroupCandidate]:
+    candidates: list[GroupCandidate] = []
+    lang_candidate_mask = candidate_mask.reindex(lang_df.index, fill_value=False)
+    eligible = lang_df[lang_candidate_mask].copy()
+    eligible_group_ids = group_ids.loc[eligible.index]
+    for group_id, group in eligible.groupby(eligible_group_ids, sort=False):
+        group_key = int(group_id)
+        if group_key in assigned_groups:
+            continue
+        avg_tokens = float((group["_formosan_tokens"] + group["_target_tokens"]).mean() / 2.0)
+        candidates.append(
+            GroupCandidate(
+                group_id=group_key,
+                rows=int(len(group)),
+                short_frac=float(group["_short_entry"].mean()),
+                avg_tokens=avg_tokens,
+            )
+        )
+    return candidates
+
+
+def choose_groups(
+    candidates: list[GroupCandidate],
+    target_rows: int,
+    seed: int,
+    attempts: int,
+) -> set[int]:
+    if target_rows <= 0 or not candidates:
+        return set()
+
+    rng = random.Random(seed)
+    best: list[GroupCandidate] = []
+    best_cost = float("inf")
+
+    ordered = sorted(candidates, key=lambda c: (c.short_frac, -c.avg_tokens, -c.rows))
+    current: list[GroupCandidate] = []
+    current_rows = 0
+    for candidate in ordered:
+        current.append(candidate)
+        current_rows += candidate.rows
+        if current_rows >= target_rows:
+            break
+    if current:
+        best = current
+        best_cost = abs(sum(g.rows for g in current) - target_rows)
+
+    for _ in range(attempts):
+        shuffled = candidates[:]
+        rng.shuffle(shuffled)
+        shuffled.sort(key=lambda c: rng.random() + 0.015 * c.short_frac - 0.0005 * c.avg_tokens)
+        selected: list[GroupCandidate] = []
+        selected_rows = 0
+        for candidate in shuffled:
+            selected.append(candidate)
+            selected_rows += candidate.rows
+            if selected_rows >= target_rows:
+                break
+        cost = abs(selected_rows - target_rows)
+        if selected and cost < best_cost:
+            best = selected
+            best_cost = cost
+
+    return {c.group_id for c in best}
+
+
 def build_tier(
     df: pd.DataFrame,
     tier: str,
@@ -182,62 +338,9 @@ def build_tier(
     min_formosan_tokens: int,
     min_target_tokens: int,
     attempts: int,
+    min_test_rows: int,
+    min_validate_rows: int,
 ) -> tuple[pd.DataFrame, dict]:
-    candidate_mask = tier_mask(df, tier, min_formosan_tokens, min_target_tokens)
-    split = pd.Series("", index=df.index, dtype="object")
-    heldout_source = pd.Series(False, index=df.index)
-    language_reports: dict[str, dict] = {}
-
-    for offset, (lang, lang_df) in enumerate(df.groupby("lang_code", sort=True)):
-        lang_candidate_mask = candidate_mask.reindex(lang_df.index, fill_value=False)
-        candidates = source_candidates(lang_df, lang_candidate_mask)
-        lang_total = len(lang_df)
-        eligible_total = int(lang_candidate_mask.sum())
-        desired_eval = max(1, round(lang_total * (test_ratio + val_ratio))) if eligible_total else 0
-        target_eval = min(eligible_total, desired_eval)
-        if target_eval >= 2:
-            test_share = test_ratio / (test_ratio + val_ratio)
-            target_test = min(target_eval - 1, max(1, round(target_eval * test_share)))
-            target_val = target_eval - target_test
-        else:
-            target_test = target_eval
-            target_val = 0
-
-        test_sources = choose_sources(
-            candidates,
-            target_test,
-            seed=seed + 997 * offset,
-            attempts=attempts,
-        )
-        val_sources = choose_sources(
-            candidates,
-            target_val,
-            seed=seed + 997 * offset + 17,
-            attempts=attempts,
-            excluded_sources=test_sources,
-        )
-
-        is_lang_test = lang_df["_source_key"].isin(test_sources)
-        is_lang_val = lang_df["_source_key"].isin(val_sources)
-        is_lang_heldout = is_lang_test | is_lang_val
-        heldout_source.loc[lang_df.index] = is_lang_heldout
-
-        eligible_test = lang_candidate_mask & is_lang_test
-        eligible_val = lang_candidate_mask & is_lang_val
-        split.loc[lang_df.index[eligible_test]] = "test"
-        split.loc[lang_df.index[eligible_val]] = "validate"
-
-        language_reports[str(lang)] = {
-            "rows_total": int(lang_total),
-            "eligible_rows": int(eligible_total),
-            "candidate_sources": int(len(candidates)),
-            "test_sources": int(len(test_sources)),
-            "validate_sources": int(len(val_sources)),
-            "preclean_test_rows": int(eligible_test.sum()),
-            "preclean_validate_rows": int(eligible_val.sum()),
-        }
-
-    eval_mask = split.isin(["validate", "test"])
     leakage_columns = (
         "_formosan_key",
         "_target_key",
@@ -246,24 +349,78 @@ def build_tier(
         "_target_skeleton",
         "_pair_skeleton",
     )
-    eval_keys = {col: set(df.loc[eval_mask, col].dropna()) for col in leakage_columns}
+    group_ids = leakage_group_ids(df, leakage_columns)
+    raw_candidate_mask = tier_mask(df, tier, min_formosan_tokens, min_target_tokens)
+    group_has_lexeme = df.groupby(group_ids)["_is_lexeme"].transform("any")
+    candidate_mask = raw_candidate_mask & ~group_has_lexeme
+    split = pd.Series("", index=df.index, dtype="object")
+    language_reports: dict[str, dict] = {}
+    assigned_groups: dict[int, str] = {}
 
-    train_mask = ~heldout_source | df["_is_lexeme"]
-    for col, values in eval_keys.items():
-        train_mask &= ~df[col].isin(values)
-    split.loc[train_mask] = "train"
+    lang_order = []
+    for lang, lang_df in df.groupby("lang_code", sort=True):
+        eligible_total = int(candidate_mask.loc[lang_df.index].sum())
+        lang_order.append((eligible_total, str(lang), lang_df))
 
-    # Remove rows that still share source/target/pair with another split.
-    for col in leakage_columns:
-        active = split.isin(["train", "validate", "test"])
-        current_eval_mask = split.isin(["validate", "test"])
-        current_train_mask = split.eq("train")
-        active_keys = pd.DataFrame({col: df.loc[active, col], "_split": split.loc[active]})
-        split_count = active_keys.groupby(col)["_split"].nunique()
-        leaking_keys = set(split_count[split_count > 1].index)
-        if leaking_keys:
-            split.loc[current_eval_mask & df[col].isin(leaking_keys)] = ""
-            split.loc[current_train_mask & df[col].isin(leaking_keys)] = ""
+    # Small languages get first claim on scarce leakage groups. Larger languages
+    # can absorb incidental group assignments more easily.
+    for offset, (eligible_sort_key, lang, lang_df) in enumerate(sorted(lang_order, key=lambda item: (item[0], item[1]))):
+        lang_candidate_mask = candidate_mask.reindex(lang_df.index, fill_value=False)
+        lang_total = len(lang_df)
+        eligible_total = int(lang_candidate_mask.sum())
+        target_test, target_val = split_targets(
+            rows_total=lang_total,
+            eligible_total=eligible_total,
+            test_ratio=test_ratio,
+            val_ratio=val_ratio,
+            min_test_rows=min_test_rows,
+            min_validate_rows=min_validate_rows,
+        )
+
+        assigned_for_lang = group_ids.loc[lang_df.index].map(assigned_groups)
+        current_test = int((lang_candidate_mask & assigned_for_lang.eq("test")).sum())
+        current_val = int((lang_candidate_mask & assigned_for_lang.eq("validate")).sum())
+
+        candidates = group_candidates(lang_df, lang_candidate_mask, group_ids, assigned_groups)
+        test_groups = choose_groups(
+            candidates,
+            max(0, target_test - current_test),
+            seed=seed + 997 * offset,
+            attempts=attempts,
+        )
+        for group_id in test_groups:
+            assigned_groups[group_id] = "test"
+
+        candidates = group_candidates(lang_df, lang_candidate_mask, group_ids, assigned_groups)
+        val_groups = choose_groups(
+            candidates,
+            max(0, target_val - current_val),
+            seed=seed + 997 * offset + 17,
+            attempts=attempts,
+        )
+        for group_id in val_groups:
+            assigned_groups[group_id] = "validate"
+
+        assigned_for_lang = group_ids.loc[lang_df.index].map(assigned_groups)
+        final_test = int((lang_candidate_mask & assigned_for_lang.eq("test")).sum())
+        final_val = int((lang_candidate_mask & assigned_for_lang.eq("validate")).sum())
+        language_reports[str(lang)] = {
+            "rows_total": int(lang_total),
+            "eligible_rows": int(eligible_total),
+            "candidate_groups": int(len(set(group_ids.loc[lang_df.index][lang_candidate_mask]))),
+            "target_test_rows": int(target_test),
+            "target_validate_rows": int(target_val),
+            "test_groups": int(sum(1 for group_id in set(group_ids.loc[lang_df.index]) if assigned_groups.get(int(group_id)) == "test")),
+            "validate_groups": int(sum(1 for group_id in set(group_ids.loc[lang_df.index]) if assigned_groups.get(int(group_id)) == "validate")),
+            "preclean_test_rows": final_test,
+            "preclean_validate_rows": final_val,
+            "lexeme_cluster_eval_candidates_removed": int((raw_candidate_mask.loc[lang_df.index] & ~lang_candidate_mask).sum()),
+        }
+
+    assigned = group_ids.map(assigned_groups)
+    split.loc[candidate_mask & assigned.eq("test")] = "test"
+    split.loc[candidate_mask & assigned.eq("validate")] = "validate"
+    split.loc[assigned.isna()] = "train"
 
     out = df.loc[split.isin(["train", "validate", "test"])].copy()
     out["split"] = split.loc[out.index].values
@@ -361,6 +518,24 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-formosan-tokens", type=int, default=4)
     parser.add_argument("--min-target-tokens", type=int, default=4)
+    parser.add_argument(
+        "--min-test-rows",
+        type=int,
+        default=100,
+        help=(
+            "Minimum desired test rows per language when enough hard eligible "
+            "rows exist. Ratios still win when they request more."
+        ),
+    )
+    parser.add_argument(
+        "--min-validate-rows",
+        type=int,
+        default=25,
+        help=(
+            "Minimum desired validation rows per language when enough hard eligible "
+            "rows exist. Ratios still win when they request more."
+        ),
+    )
     parser.add_argument("--selection-attempts", type=int, default=600)
     parser.add_argument(
         "--tiers",
@@ -403,6 +578,10 @@ def main() -> None:
             "validate": args.val_ratio,
             "test": args.test_ratio,
         },
+        "minimum_eval_rows": {
+            "test": args.min_test_rows,
+            "validate": args.min_validate_rows,
+        },
         "seed": args.seed,
         "tiers": {},
     }
@@ -418,6 +597,8 @@ def main() -> None:
             min_formosan_tokens=args.min_formosan_tokens,
             min_target_tokens=args.min_target_tokens,
             attempts=args.selection_attempts,
+            min_test_rows=args.min_test_rows,
+            min_validate_rows=args.min_validate_rows,
         )
         validate_report(report)
 
