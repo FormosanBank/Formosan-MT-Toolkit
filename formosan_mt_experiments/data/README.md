@@ -5,7 +5,7 @@ This directory is for generated experiment artifacts. It is ignored by git excep
 Expected generated layout:
 
 - `splits_en_v1/`: regenerated tiered English MT splits (`lexical`, `in_domain_hard`, `hard_global`) plus split validation reports.
-- `tokenizer_sweep/`, `tokenizer_sweep_spm8192/`, `tokenizer_sweep_spm32768/`: generated tokenizer/model setup outputs and tokenizer audits.
+- `tokenizer_sweep_spm8192/`, `tokenizer_sweep_en_spm8192/`, `tokenizer_sweep_zh_spm8192/`: generated v1 SPM8k tokenizer/model setup outputs and tokenizer audits.
 - `runs/`: optional local training outputs. On Andromeda, put runs under `/scratch/$USER/formosan_mt_experiments/runs/`.
 
 The canonical expensive English/Chinese pivot corpora remain in `../../pivot_corpora_final/`. Protected checksum copies live in `../../protected_corpora/deepl_pivots/`.

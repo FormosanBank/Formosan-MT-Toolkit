@@ -2,7 +2,7 @@
 set -euo pipefail
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
-EXP_DIR="${EXP_DIR:-/home/scheppat/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 SCRATCH="${SCRATCH:-/scratch/scheppat}"
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data}"
 SPLIT_DIR="${SPLIT_DIR:-/projects/prudlab/formosan_parallel_corpora/splits_en_v1}"

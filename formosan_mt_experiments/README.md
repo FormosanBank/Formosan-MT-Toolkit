@@ -79,7 +79,7 @@ python formosan_mt_experiments/scripts/setup_tokenizer_sweep.py \
   --run-smoke
 ```
 
-Use the tokenizer with the lowest fragmentation that does not bloat outputs. Default candidate is `spm16384`.
+Use the tokenizer with the lowest fragmentation that does not bloat outputs. The current deployable v1 recipe is `spm8192`.
 
 For Traditional Chinese, the selected deployable recipe is E3 SPM8k directional:
 
@@ -92,6 +92,43 @@ python formosan_mt_experiments/scripts/setup_tokenizer_sweep.py \
   --setup-splits train,validate \
   --run-smoke
 ```
+
+## V1: SPM8k Directional MT
+
+The deployable v1 architecture is the four-checkpoint E3 SPM8k recipe used for
+the published FormosanBank NLLB models:
+
+- base model: `facebook/nllb-200-distilled-600M`
+- tokenizer: fresh 8k Formosan-aware SentencePiece extension trained on the
+  training/validation side of the current corpus
+- directions: `f2en`, `en2f`, `f2zh`, `zh2f`
+- metadata tags: target direction, source language, source bucket, dialect
+- steps: `300000`
+- batch size: `16`, gradient accumulation: `4`, effective batch size: `64`
+- max sequence length: `384`
+- learning rate: `2e-5`
+- warmup steps: `4000`
+- label smoothing: `0.1`
+- language sampling alpha: `0.5`
+- easy-source weight: `0.05` for Formosan→target, `0.15` for target→Formosan
+
+For a self-contained public/private corpus copied under
+`/projects/prudlab/formosan_parallel_corpora/<CORPUS_NAME>/`, queue the full
+four-direction v1 stack with:
+
+```bash
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  CORPUS_NAME=public_no_bible \
+  /home/scheppat/workspace/projects/mt/formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh
+
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  CORPUS_NAME=private_no_bible \
+  /home/scheppat/workspace/projects/mt/formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh
+```
+
+The submitter records accepted job IDs under
+`/home/scheppat/jobs/mt/submission_state_v1_spm8k_<CORPUS_NAME>_<RUN_STAMP>/`
+and is safe to rerun with the same `RUN_STAMP`.
 
 ## E1: Directional MT Training
 
@@ -125,7 +162,9 @@ python formosan_mt_experiments/scripts/train_directional_nllb.py \
   --precision bf16
 ```
 
-Defaults include effective batch size 64, max length 384, language sampling `alpha=0.5`, label smoothing `0.1`, and easy-source downweighting.
+Defaults include effective batch size 64, max length 384, learning rate `2e-5`,
+language sampling `alpha=0.5`, label smoothing `0.1`, and easy-source
+downweighting.
 
 Traditional Chinese directions use the same training code with `--target-lang chinese` and directions `f2zh` / `zh2f`:
 
@@ -214,7 +253,7 @@ The May 2026 Andromeda comparison used the `in_domain_hard` test split with `36,
 
 Copy this directory to the cluster, then use the templates in `slurm/`. The templates assume:
 
-- experiment directory: `/home/scheppat/formosan_mt_experiments`
+- experiment directory: `/home/scheppat/workspace/projects/mt/formosan_mt_experiments`
 - corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_en.csv`
 - Chinese corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_zh.csv`
 - outputs: `/scratch/scheppat/formosan_mt_experiments`

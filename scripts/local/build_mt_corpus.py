@@ -25,12 +25,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
-BIBLE_SOURCE_PATTERNS = (
-    "formosan-taiwan-bible-society-bibles",
-    "taiwan-bible-society",
-    "taiwan_bible_society",
-    "fhl_bible",
-    "fhlbible",
+EXACT_BIBLE_REPOS = (
+    "Formosan-Taiwan-Bible-Society-Bibles",
 )
 
 
@@ -242,13 +238,18 @@ def count_bible_source_rows(path: Path) -> int:
     if not path.exists() or path.suffix.lower() != ".csv":
         return 0
     count = 0
+    exact_repo_components = {repo.lower() for repo in EXACT_BIBLE_REPOS}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or "source" not in reader.fieldnames:
             return 0
         for row in reader:
-            source = (row.get("source") or "").lower()
-            if any(pattern in source for pattern in BIBLE_SOURCE_PATTERNS):
+            source_parts = [
+                part.strip().lower()
+                for part in (row.get("source") or "").replace("\\", "/").split("/")
+                if part.strip()
+            ]
+            if any(part in exact_repo_components for part in source_parts):
                 count += 1
     return count
 
@@ -504,6 +505,7 @@ def write_manifest(
             "fresh_downloads": not args.keep_downloaded,
             "keep_build_output": args.keep_build_output,
             "exclude_bible": args.exclude_bible,
+            "exclude_bible_exact_repos": list(EXACT_BIBLE_REPOS) if args.exclude_bible else [],
             "exclude_repo_patterns": args.exclude_repo_pattern,
             "exclude_path_patterns": args.exclude_path_pattern,
         },
@@ -560,7 +562,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--public", action="store_true", help="Fetch from public FormosanBank/Corpora XML only")
     parser.add_argument("--force-branch", default=None, help="Force GitHub branch for fetch_xml.py")
-    parser.add_argument("--exclude-bible", action="store_true", help="Exclude Bible/Taiwan Bible Society XML at fetch time")
+    parser.add_argument(
+        "--exclude-bible",
+        action="store_true",
+        help="Exclude the exact Formosan-Taiwan-Bible-Society-Bibles repo/corpus root at fetch time",
+    )
     parser.add_argument(
         "--exclude-repo-pattern",
         action="append",

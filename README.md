@@ -206,10 +206,10 @@ Useful rebuild commands:
 # Rebuild through pivot outputs using existing DeepL cache only.
 ./build_corpora.sh --skip-fetch --with-pivot --pivot-skip-translation
 
-# Full rebuild with pivot, excluding Taiwan Bible Society Bible XML at fetch time.
+# Full rebuild with pivot, excluding the exact Formosan-Taiwan-Bible-Society-Bibles repo/corpus root.
 ./build_corpora.sh --with-pivot --exclude-bible
 
-# Same Bible-excluded rebuild, but do not spend DeepL characters.
+# Same exact-repo Bible-excluded rebuild, but do not spend DeepL characters.
 ./build_corpora.sh --with-pivot --pivot-skip-translation --exclude-bible
 
 # Build separate public and private/all-data no-Bible corpora for model comparison.
@@ -231,9 +231,11 @@ Useful rebuild commands:
 ./build_corpora.sh --languages ami --dry-run
 ```
 
-`--exclude-bible` is applied during fetch. Use it with the default fresh-download
-behavior so stale Bible XML is removed from `downloaded_<lang>/`; do not combine
-it with `--skip-fetch` when the goal is to remove Bible data from the corpus.
+`--exclude-bible` is applied during fetch as an exact repo/corpus-root exclusion
+for `Formosan-Taiwan-Bible-Society-Bibles`. It does not search for generic
+`bible` path substrings. Use it with the default fresh-download behavior so
+stale XML is removed from `downloaded_<lang>/`; do not combine it with
+`--skip-fetch` when the goal is to remove that repo from the corpus.
 
 Named builds write every generated artifact under `corpus_builds/<name>/`, so
 public and private/all-data runs do not overwrite each other. The comparison

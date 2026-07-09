@@ -23,7 +23,7 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 SCRATCH="${SCRATCH:-/scratch/scheppat}"
 export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
@@ -35,8 +35,8 @@ case "${TARGET_LANG}" in
     TARGET_COL="${TARGET_COL:-english_sentence}"
     FILE_SHORT="en"
     DEFAULT_DIRECTION="f2en"
-    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep"
-    DEFAULT_VOCAB="16384"
+    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_spm8192"
+    DEFAULT_VOCAB="8192"
     ;;
   chinese)
     TARGET_COL="${TARGET_COL:-chinese_sentence}"
@@ -62,7 +62,7 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 TOKENIZER="${TOKENIZER:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_tokenizer}"
 MODEL="${MODEL:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_model}"
-OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/E1_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
+OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/E3_spm8192_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 if [[ "${USE_DAE:-0}" == "1" ]]; then
   MODEL="${DAE_MODEL:-${SCRATCH}/formosan_mt_experiments/runs/latest_dae/final}"
@@ -88,7 +88,7 @@ srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/train_directional_nllb.py" \
   --batch-size "${BATCH_SIZE:-16}" \
   --grad-accum-steps "${GRAD_ACCUM_STEPS:-4}" \
   --max-length "${MAX_LENGTH:-384}" \
-  --learning-rate "${LEARNING_RATE:-3e-5}" \
+  --learning-rate "${LEARNING_RATE:-2e-5}" \
   --save-interval "${SAVE_INTERVAL:-25000}" \
   --eval-interval "${EVAL_INTERVAL:-25000}" \
   --log-interval "${LOG_INTERVAL:-1000}" \

@@ -82,33 +82,61 @@ def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
     return patterns
 
 
-DEFAULT_BIBLE_REPO_EXCLUDE_PATTERNS = (
-    "bible",
-    "taiwan-bible-society",
-    "taiwan bible society",
-    "taiwan_bible_society",
-)
-
-DEFAULT_BIBLE_PATH_EXCLUDE_PATTERNS = (
-    "fhl_bible",
-    "fhlbible",
-    "taiwan-bible-society",
-    "taiwan bible society",
-    "taiwan_bible_society",
+EXACT_BIBLE_REPOS = (
+    "Formosan-Taiwan-Bible-Society-Bibles",
 )
 
 
-def add_patterns(patterns: list[str], defaults: Iterable[str]) -> list[str]:
-    out = list(patterns)
-    for pattern in defaults:
-        if pattern not in out:
-            out.append(pattern)
+def normalize_repo_name(value: str) -> str:
+    """Return the repo-name component from a GitHub repo name/full-name/URL."""
+    text = value.strip().rstrip("/")
+    if text.startswith("https://github.com/"):
+        text = text.removeprefix("https://github.com/")
+    if text.startswith("git@github.com:"):
+        text = text.removeprefix("git@github.com:")
+    if text.endswith(".git"):
+        text = text[:-4]
+    return text.split("/")[-1].strip().lower()
+
+
+def parse_exact_repos(values: Iterable[str] | None) -> list[str]:
+    repos: list[str] = []
+    for value in values or []:
+        for part in value.split(","):
+            repo = normalize_repo_name(part)
+            if repo and repo not in repos:
+                repos.append(repo)
+    return repos
+
+
+def add_exact_repos(repos: list[str], defaults: Iterable[str]) -> list[str]:
+    out = list(repos)
+    for repo in defaults:
+        normalized = normalize_repo_name(repo)
+        if normalized not in out:
+            out.append(normalized)
     return out
 
 
 def matches_exclude_pattern(value: str, patterns: Iterable[str]) -> bool:
     haystack = value.lower()
     return any(pattern in haystack for pattern in patterns)
+
+
+def matches_exact_repo(repo: str, excluded_repos: Iterable[str]) -> bool:
+    return normalize_repo_name(repo) in set(excluded_repos)
+
+
+def public_release_corpus_root(path: str) -> str | None:
+    parts = path.split("/")
+    if len(parts) >= 3 and parts[0] == "Corpora":
+        return parts[1]
+    return None
+
+
+def matches_excluded_public_corpus_root(path: str, excluded_repos: Iterable[str]) -> bool:
+    corpus_root = public_release_corpus_root(path)
+    return bool(corpus_root and matches_exact_repo(corpus_root, excluded_repos))
 
 
 # ─────────────────────────────  config  ──────────────────────────────────────
@@ -339,7 +367,16 @@ def main():
     parser.add_argument(
         "--exclude-bible",
         action="store_true",
-        help="Exclude Bible/Taiwan Bible Society XML from fetch results.",
+        help="Exclude the exact Formosan-Taiwan-Bible-Society-Bibles repo/corpus root.",
+    )
+    parser.add_argument(
+        "--exclude-repo",
+        action="append",
+        default=[],
+        help=(
+            "Exact repository name/full-name/URL to skip before scanning. "
+            "Can be repeated or comma-separated."
+        ),
     )
     parser.add_argument(
         "--exclude-repo-pattern",
@@ -366,17 +403,11 @@ def main():
     )
     args = parser.parse_args()
 
+    exact_excluded_repos = parse_exact_repos(args.exclude_repo)
     repo_exclude_patterns = parse_exclude_patterns(args.exclude_repo_pattern)
     path_exclude_patterns = parse_exclude_patterns(args.exclude_path_pattern)
     if args.exclude_bible:
-        repo_exclude_patterns = add_patterns(
-            repo_exclude_patterns,
-            DEFAULT_BIBLE_REPO_EXCLUDE_PATTERNS,
-        )
-        path_exclude_patterns = add_patterns(
-            path_exclude_patterns,
-            DEFAULT_BIBLE_PATH_EXCLUDE_PATTERNS,
-        )
+        exact_excluded_repos = add_exact_repos(exact_excluded_repos, EXACT_BIBLE_REPOS)
 
     if not GITHUB_TOKEN:
         sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
@@ -388,8 +419,9 @@ def main():
         f"   tgt_lang   = {args.tgt_lang}\n"
         f"   org        = {args.org}\n"
         f"   public     = {args.public}\n"
-        f"   exclude_repos = {repo_exclude_patterns or None}\n"
-        f"   exclude_paths = {path_exclude_patterns or None}\n"
+        f"   exclude_repos_exact = {exact_excluded_repos or None}\n"
+        f"   exclude_repo_patterns = {repo_exclude_patterns or None}\n"
+        f"   exclude_path_patterns = {path_exclude_patterns or None}\n"
         f"   branch_arg = {args.branch}\n"
         f"   token_len  = {len(GITHUB_TOKEN)}"
     )
@@ -424,6 +456,17 @@ def main():
     else:
         repos = list(get_repos(args.org))
         print(f"📦  Found {len(repos)} repos in {args.org}")
+
+    if exact_excluded_repos:
+        excluded_repos = [
+            repo for repo in repos if matches_exact_repo(repo, exact_excluded_repos)
+        ]
+        repos = [repo for repo in repos if not matches_exact_repo(repo, exact_excluded_repos)]
+        if excluded_repos:
+            print(
+                f"🚫  Excluded {len(excluded_repos)} exact repo(s): "
+                + ", ".join(sorted(excluded_repos))
+            )
 
     if repo_exclude_patterns:
         excluded_repos = [
@@ -481,6 +524,22 @@ def main():
                     if i["type"] == "blob"
                     and is_public_release_xml_path(i["path"])
                 ]
+                if exact_excluded_repos:
+                    before_exact_public_exclude = len(xml_blobs)
+                    xml_blobs = [
+                        i
+                        for i in xml_blobs
+                        if not matches_excluded_public_corpus_root(
+                            i["path"],
+                            exact_excluded_repos,
+                        )
+                    ]
+                    removed = before_exact_public_exclude - len(xml_blobs)
+                    if removed:
+                        print(
+                            f"🚫  Repo {repo}: excluded {removed} XML candidates "
+                            "from exact public corpus root(s)"
+                        )
             else:
                 # Default: look for Final_XML/*.xml pattern
                 xml_blobs = [

@@ -17,7 +17,7 @@ module purge
 module load miniconda
 conda activate formosan_mt
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 TARGET_LANG="${TARGET_LANG:-english}"
 case "${TARGET_LANG}" in
   english)

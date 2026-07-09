@@ -225,7 +225,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=384)
-    parser.add_argument("--learning-rate", type=float, default=3e-5)
+    parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=4000)
     parser.add_argument("--weight-decay", type=float, default=1e-3)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)

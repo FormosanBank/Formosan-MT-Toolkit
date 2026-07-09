@@ -28,7 +28,7 @@
   "tokenizer": {
     "mode": "spm",
     "spm_vocab_sweep": [8192, 16384, 32768],
-    "default_spm_vocab": 16384,
+    "default_spm_vocab": 8192,
     "chinese_default_spm_vocab": 8192,
     "min_char_frequency": 3,
     "max_dialect_tags": 200
@@ -39,7 +39,7 @@
     "grad_accum_steps": 4,
     "effective_batch_size": 64,
     "max_length": 384,
-    "learning_rate": 0.00003,
+    "learning_rate": 0.00002,
     "warmup_steps": 4000,
     "weight_decay": 0.001,
     "alpha": 0.5,

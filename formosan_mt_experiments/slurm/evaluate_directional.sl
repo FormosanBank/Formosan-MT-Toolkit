@@ -21,7 +21,7 @@ conda activate formosan_mt
 
 export PYTHONUNBUFFERED=1
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 SCRATCH="${SCRATCH:-/scratch/scheppat}"
 export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"

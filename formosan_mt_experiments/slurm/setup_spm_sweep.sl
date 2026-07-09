@@ -17,7 +17,7 @@ module purge
 module load miniconda
 conda activate formosan_mt
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 SCRATCH="${SCRATCH:-/scratch/scheppat}"
 export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
@@ -27,12 +27,12 @@ case "${TARGET_LANG}" in
   english)
     TARGET_COL="${TARGET_COL:-english_sentence}"
     FILE_SHORT="en"
-    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep"
+    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_spm8192"
     ;;
   chinese)
     TARGET_COL="${TARGET_COL:-chinese_sentence}"
     FILE_SHORT="zh"
-    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_zh"
+    DEFAULT_OUT="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192"
     ;;
   *)
     echo "Unsupported TARGET_LANG=${TARGET_LANG}" >&2
@@ -60,7 +60,7 @@ python -u "${EXP_DIR}/scripts/setup_tokenizer_sweep.py" \
   --setup-script "${SETUP_SCRIPT}" \
   --base-model "${BASE_MODEL:-facebook/nllb-200-distilled-600M}" \
   --output-dir "${OUT_DIR}" \
-  --spm-vocabs "${SPM_VOCABS:-8192,16384,32768}" \
+  --spm-vocabs "${SPM_VOCABS:-8192}" \
   --setup-splits "${SETUP_SPLITS:-train,validate,valid,val}" \
   --min-char-frequency 3 \
   --run-smoke \
