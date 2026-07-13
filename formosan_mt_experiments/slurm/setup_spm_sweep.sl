@@ -49,7 +49,7 @@ else
 fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 OUT_DIR="${OUT_DIR:-${DEFAULT_OUT}}"
-SETUP_SCRIPT="${SETUP_SCRIPT:-/home/scheppat/nllb-scripts/setup_formosan_nllb200.py}"
+SETUP_SCRIPT="${SETUP_SCRIPT:-/home/${USER}/nllb-scripts/setup_formosan_nllb200.py}"
 SETUP_SCRIPT_SHA256="${SETUP_SCRIPT_SHA256:-9d78c1516df1fd5bdbe0a834ad02dde473d0275e2fa15e20fe5d22187b6ed58d}"
 
 [[ -r "${SETUP_SCRIPT}" ]] || { echo "Missing NLLB setup implementation: ${SETUP_SCRIPT}" >&2; exit 1; }

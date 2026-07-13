@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from training_code_inventory import build_code_inventory
+
 DIRECTIONS = ("f2en", "en2f", "f2zh", "zh2f")
 
 
@@ -93,6 +95,10 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "run_stamp": args.run_stamp,
         "corpus_name": args.corpus_name,
         "source_git_commit": args.git_commit,
+        "code": build_code_inventory(
+            experiment_root=args.experiment_root,
+            setup_implementation=args.setup_implementation,
+        ),
         "corpora": {
             "english": corpus_record(corpus_dir, "en"),
             "chinese": corpus_record(corpus_dir, "zh"),
@@ -112,6 +118,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--project-data", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument(
+        "--experiment-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+    )
+    parser.add_argument("--setup-implementation", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 

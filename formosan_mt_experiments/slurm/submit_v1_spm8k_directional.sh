@@ -14,6 +14,8 @@ JOBS_DIR="${JOBS_DIR:-/home/scheppat/jobs/mt}"
 STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${RUN_STAMP}}"
 MANIFEST_DIR="${MANIFEST_DIR:-/projects/prudlab/formosan_mt_experiments}"
 PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
+SETUP_IMPLEMENTATION="${SETUP_IMPLEMENTATION:-/home/${USER}/nllb-scripts/setup_formosan_nllb200.py}"
+SETUP_IMPLEMENTATION_SHA256="${SETUP_IMPLEMENTATION_SHA256:-9d78c1516df1fd5bdbe0a834ad02dde473d0275e2fa15e20fe5d22187b6ed58d}"
 
 STEPS="${STEPS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
@@ -38,6 +40,15 @@ for short in en zh; do
   [[ -r "${provenance}" ]] || { echo "Missing corpus provenance: ${provenance}" >&2; exit 1; }
 done
 [[ -r "${PROFILE}" ]] || { echo "Missing experiment profile: ${PROFILE}" >&2; exit 1; }
+[[ -r "${SETUP_IMPLEMENTATION}" ]] || {
+  echo "Missing versioned NLLB setup implementation: ${SETUP_IMPLEMENTATION}" >&2
+  exit 1
+}
+actual_setup_sha256="$(sha256sum "${SETUP_IMPLEMENTATION}" | awk '{print $1}')"
+if [[ "${actual_setup_sha256}" != "${SETUP_IMPLEMENTATION_SHA256}" ]]; then
+  echo "NLLB setup implementation checksum mismatch: ${actual_setup_sha256}" >&2
+  exit 1
+fi
 
 submit_job() {
   local label="$1"
@@ -113,7 +124,7 @@ submit_setup() {
     --cpus-per-task="${SETUP_CPUS:-16}" \
     --mem="${SETUP_MEM:-128G}" \
     --dependency="afterok:$(job_id "validate_${short}")" \
-    --export="$(common_export "${target_lang}"),OUT_DIR=${token_dir},SPM_VOCABS=8192,SETUP_SPLITS=train,validate,BASE_MODEL=facebook/nllb-200-distilled-600M" \
+    --export="$(common_export "${target_lang}"),OUT_DIR=${token_dir},SPM_VOCABS=8192,SETUP_SPLITS=train,validate,BASE_MODEL=facebook/nllb-200-distilled-600M,SETUP_SCRIPT=${SETUP_IMPLEMENTATION},SETUP_SCRIPT_SHA256=${SETUP_IMPLEMENTATION_SHA256}" \
     "${SETUP_SL}"
 }
 
@@ -215,6 +226,8 @@ python -u "${EXP_DIR}/scripts/write_submission_manifest.py" \
   --state-dir "${STATE_DIR}" \
   --project-data "${PROJECT_DATA}" \
   --profile "${PROFILE}" \
+  --experiment-root "${EXP_DIR}" \
+  --setup-implementation "${SETUP_IMPLEMENTATION}" \
   --output "${MANIFEST_DIR}/submission_manifest_v1_spm8k_${CORPUS_NAME}_${RUN_STAMP}.json"
 touch "${STATE_DIR}/DONE"
 echo "DONE_SUBMIT RUN_STAMP=${RUN_STAMP} CORPUS_LABEL=${CORPUS_LABEL}"

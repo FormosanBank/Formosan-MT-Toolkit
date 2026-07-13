@@ -31,6 +31,12 @@ The active flight snapshot is
 It records corpus checksums, split totals, code commit, hyperparameters, and all
 validation/setup/training/evaluation job IDs.
 
+New submission manifests also contain a SHA-256 inventory of every active
+launcher, Slurm wrapper, Python module, configuration file, dependency list,
+and tokenizer-setup implementation. Manifest generation fails if any required
+code artifact is absent. This makes the code actually deployed to Andromeda
+auditable independently of the Git commit label.
+
 Validate its structure and, when the local ignored builds are present, every
 file checksum and split count with `scripts/verify_experiment_manifest.py`.
 
@@ -164,6 +170,7 @@ All resources remain overridable through the launcher's environment variables.
 | `train_directional_nllb.py` | Sampling, optimization, validation metrics, checkpointing, resume. |
 | `evaluate_directional.py` | Full test generation and global/per-language/source-bin metrics. |
 | `mt_metrics.py` | Shared BLEU/chrF2/TER and diagnostic metric implementation. |
+| `training_code_inventory.py` | Required production-code inventory and SHA-256 provenance. |
 | `slurm/submit_v1_spm8k_directional.sh` | Idempotent production DAG submission and manifest emission. |
 
 ## Historical Experiments
