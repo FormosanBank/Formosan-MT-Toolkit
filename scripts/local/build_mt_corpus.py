@@ -676,7 +676,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--with-pivot", action="store_true")
     parser.add_argument("--pivot-directions", default="both")
     parser.add_argument("--pivot-splits", default="all")
-    parser.add_argument("--api-key-env", default="DEEPL_API_KEY,DEEPL_API_KEY_2")
+    parser.add_argument(
+        "--api-key-env",
+        default="auto",
+        help=(
+            "DeepL key environment variables to rotate through. The default 'auto' discovers "
+            "DEEPL_API_KEY and all numbered DEEPL_API_KEY_N variables loaded from .env."
+        ),
+    )
     parser.add_argument("--pivot-skip-translation", action="store_true")
     parser.add_argument("--pivot-dry-run", action="store_true")
     parser.add_argument("--respect-usage-limit", action="store_true")
@@ -703,8 +710,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-ratio", type=float, default=0.075)
     parser.add_argument("--min-formosan-tokens", type=int, default=4)
     parser.add_argument("--min-target-tokens", type=int, default=4)
-    parser.add_argument("--min-test-rows", type=int, default=100)
-    parser.add_argument("--min-validate-rows", type=int, default=25)
+    parser.add_argument("--min-test-rows", type=int, default=500)
+    parser.add_argument("--min-validate-rows", type=int, default=150)
     parser.add_argument("--tiers", default="lexical,in_domain_hard,hard_global")
     args = parser.parse_args()
     if args.fetch_workers < 1:

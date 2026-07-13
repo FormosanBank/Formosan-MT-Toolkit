@@ -31,7 +31,6 @@ from mt_common import (
     normalize_target_language,
     overlap_stats,
     read_parallel_csv,
-    source_bucket,
     split_counts,
     split_counts_by_language,
     target_col_for,
@@ -58,6 +57,8 @@ def keep_columns(target_col: str) -> list[str]:
         "formosan_tokens",
         "target_tokens",
         "short_entry",
+        "pivot_origin",
+        "pivot_direction",
     ]
 
 
@@ -99,6 +100,35 @@ class DisjointSet:
         self.parent[right_root] = left_root
         if self.rank[left_root] == self.rank[right_root]:
             self.rank[left_root] += 1
+
+
+def one_edit_conflicts(train: pd.DataFrame, eval_df: pd.DataFrame, column: str) -> set[int]:
+    """Find train rows within one character edit of evaluation text, per language."""
+    conflicts: set[int] = set()
+    for lang, eval_lang in eval_df.groupby("lang_code", sort=False):
+        train_lang = train[train["lang_code"].eq(lang)]
+        if train_lang.empty:
+            continue
+        eval_values = {str(value) for value in eval_lang[column].fillna("") if str(value)}
+        eval_exact = {hash(value) for value in eval_values}
+        eval_deletes = {
+            hash(value[:pos] + value[pos + 1 :])
+            for value in eval_values
+            for pos in range(len(value))
+        }
+        for index, value in train_lang[column].fillna("").astype(str).items():
+            if not value:
+                continue
+            value_hash = hash(value)
+            if value_hash in eval_exact or value_hash in eval_deletes:
+                conflicts.add(int(index))
+                continue
+            for pos in range(len(value)):
+                deleted_hash = hash(value[:pos] + value[pos + 1 :])
+                if deleted_hash in eval_exact or deleted_hash in eval_deletes:
+                    conflicts.add(int(index))
+                    break
+    return conflicts
 
 
 def leakage_group_ids(df: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
@@ -351,6 +381,24 @@ def build_tier(
     )
     group_ids = leakage_group_ids(df, leakage_columns)
     raw_candidate_mask = tier_mask(df, tier, min_formosan_tokens, min_target_tokens)
+    synthetic_mask = df.get("pivot_origin", pd.Series("original", index=df.index)).fillna("original").eq("synthetic")
+    raw_candidate_mask &= ~synthetic_mask
+    fallback_rows_added = 0
+    if tier == "in_domain_hard":
+        minimum_eval_rows = min_test_rows + min_validate_rows
+        fallback_mask = (
+            ~synthetic_mask
+            & ~df["_is_lexeme"]
+            & df["_formosan_tokens"].ge(2)
+            & df["_target_tokens"].ge(2)
+        )
+        for _lang, lang_df in df.groupby("lang_code", sort=False):
+            lang_index = lang_df.index
+            if int(raw_candidate_mask.loc[lang_index].sum()) >= minimum_eval_rows:
+                continue
+            before = int(raw_candidate_mask.loc[lang_index].sum())
+            raw_candidate_mask.loc[lang_index] |= fallback_mask.loc[lang_index]
+            fallback_rows_added += int(raw_candidate_mask.loc[lang_index].sum()) - before
     group_has_lexeme = df.groupby(group_ids)["_is_lexeme"].transform("any")
     candidate_mask = raw_candidate_mask & ~group_has_lexeme
     split = pd.Series("", index=df.index, dtype="object")
@@ -366,7 +414,7 @@ def build_tier(
     # can absorb incidental group assignments more easily.
     for offset, (eligible_sort_key, lang, lang_df) in enumerate(sorted(lang_order, key=lambda item: (item[0], item[1]))):
         lang_candidate_mask = candidate_mask.reindex(lang_df.index, fill_value=False)
-        lang_total = len(lang_df)
+        lang_total = int((~synthetic_mask.loc[lang_df.index]).sum())
         eligible_total = int(lang_candidate_mask.sum())
         target_test, target_val = split_targets(
             rows_total=lang_total,
@@ -433,6 +481,12 @@ def build_tier(
 
     train = out[out["split"].eq("train")]
     eval_df = out[out["split"].isin(["validate", "test"])]
+    fuzzy_conflicts = one_edit_conflicts(train, eval_df, "_formosan_skeleton")
+    fuzzy_conflicts |= one_edit_conflicts(train, eval_df, "_target_skeleton")
+    if fuzzy_conflicts:
+        out = out.drop(index=sorted(fuzzy_conflicts))
+        train = out[out["split"].eq("train")]
+        eval_df = out[out["split"].isin(["validate", "test"])]
     overlaps = overlap_stats(train, eval_df)
     skeleton_overlaps = {}
     for name, col in (
@@ -460,6 +514,10 @@ def build_tier(
         "output_rows": int(len(out)),
         "dropped_rows": int(len(df) - len(out)),
         "candidate_rows": int(candidate_mask.sum()),
+        "synthetic_rows_forced_train": int((synthetic_mask & split.eq("train")).sum()),
+        "synthetic_rows_removed_for_leakage": int(synthetic_mask.sum() - (synthetic_mask & split.eq("train")).sum()),
+        "human_fallback_candidate_rows_added": fallback_rows_added,
+        "one_edit_train_rows_removed": len(fuzzy_conflicts),
         "lexeme_eval_rows": int((out["row_type"].isin(["lexeme", "morpheme"]) & out["split"].isin(["validate", "test"])).sum()),
         "lexeme_rows_forced_train": int((df["_is_lexeme"] & split.eq("train")).sum()),
         "lexeme_rows_removed_for_leakage_or_heldout": int(df["_is_lexeme"].sum() - (df["_is_lexeme"] & split.eq("train")).sum()),

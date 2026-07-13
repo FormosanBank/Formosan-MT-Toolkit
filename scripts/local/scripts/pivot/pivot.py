@@ -24,13 +24,14 @@ import csv
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 import requests
@@ -370,7 +371,21 @@ def choose_deepl_api_base(auth_key: str, override: Optional[str]) -> str:
     return "https://api.deepl.com"
 
 
+def discover_api_key_envs(environ: Optional[Mapping[str, str]] = None) -> list[str]:
+    """Return configured DEEPL_API_KEY variables in stable numeric order."""
+    source = os.environ if environ is None else environ
+    names: list[tuple[int, str]] = []
+    for env_name, value in source.items():
+        match = re.fullmatch(r"DEEPL_API_KEY(?:_(\d+))?", env_name)
+        if match and str(value).strip():
+            suffix = int(match.group(1) or 1)
+            names.append((suffix, env_name))
+    return [env_name for _, env_name in sorted(names, key=lambda item: (item[0], item[1]))]
+
+
 def parse_api_key_envs(raw: str) -> list[str]:
+    if str(raw or "").strip().lower() == "auto":
+        return discover_api_key_envs()
     envs = [part.strip() for part in str(raw or "").split(",") if part.strip()]
     out: list[str] = []
     seen: set[str] = set()
@@ -1148,8 +1163,11 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
 
     ap.add_argument(
         "--api-key-env",
-        default="DEEPL_API_KEY,DEEPL_API_KEY_2",
-        help="Comma-separated environment variable names for DeepL keys, used in order.",
+        default="auto",
+        help=(
+            "Comma-separated environment variable names for DeepL keys, used in order. "
+            "The default 'auto' discovers DEEPL_API_KEY and all DEEPL_API_KEY_N variables."
+        ),
     )
     ap.add_argument("--api-base", default=None, help="Override DeepL base URL, e.g. https://api-free.deepl.com")
     ap.add_argument("--source-en", default="EN")

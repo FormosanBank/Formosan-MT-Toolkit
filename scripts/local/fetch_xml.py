@@ -34,6 +34,8 @@ import argparse
 import concurrent.futures as fut
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+import hashlib
+import json
 import os
 import random
 import re
@@ -211,6 +213,9 @@ RETRIES = Retry(
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 SESSION.mount("https://", HTTPAdapter(max_retries=RETRIES))
+CACHE_DIR = project_root / "corpus_builds" / ".github_metadata_cache"
+RAW_XML_CACHE_DIR = project_root / "corpus_builds" / ".github_raw_xml_cache"
+CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -222,8 +227,33 @@ class DownloadResult:
     error: str | None = None
 
 
+def read_metadata_cache(name: str):
+    path = CACHE_DIR / name
+    try:
+        if time.time() - path.stat().st_mtime > CACHE_MAX_AGE_SECONDS:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+
+def write_metadata_cache(name: str, payload) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / name
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def get_repos(org: str) -> Iterable[str]:
     """Yield every repository name in the organisation."""
+    cache_name = f"repos_{org.lower()}.json"
+    cached = read_metadata_cache(cache_name)
+    if isinstance(cached, list):
+        yield from (str(name) for name in cached)
+        return
+
+    repos: list[str] = []
     page = 1
     while True:
         r = SESSION.get(
@@ -270,12 +300,31 @@ def get_repos(org: str) -> Iterable[str]:
 
         # remove entry with name "Formosan-Wikipedias"
         data = [repo for repo in data if repo["name"] != "Formosan-Wikipedias"]
-        yield from (repo["name"] for repo in data)
+        repos.extend(repo["name"] for repo in data)
         page += 1
+    write_metadata_cache(cache_name, repos)
+    yield from repos
+
+
+def get_default_branch(org: str, repo: str) -> str:
+    cache_name = f"repo_{org.lower()}_{repo.lower()}.json"
+    cached = read_metadata_cache(cache_name)
+    if isinstance(cached, dict) and cached.get("default_branch"):
+        return str(cached["default_branch"])
+    meta = SESSION.get(f"{GITHUB_API}/repos/{org}/{repo}", timeout=REQUEST_TIMEOUT)
+    meta.raise_for_status()
+    branch = str(meta.json().get("default_branch", "main"))
+    write_metadata_cache(cache_name, {"default_branch": branch})
+    return branch
 
 
 def get_tree(org: str, repo: str, branch: str):
     """Return the full git tree (recursive) for a repo/branch."""
+    cache_name = f"tree_{org.lower()}_{repo.lower()}_{branch.lower()}.json"
+    cached = read_metadata_cache(cache_name)
+    if isinstance(cached, list):
+        print(f"   🌲 {repo}@{branch}: {len(cached)} cached tree entries")
+        return cached
     r = SESSION.get(
         f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{branch}",
         params={"recursive": "1"},
@@ -283,6 +332,7 @@ def get_tree(org: str, repo: str, branch: str):
     )
     r.raise_for_status()
     tree = r.json().get("tree", [])
+    write_metadata_cache(cache_name, tree)
     print(f"   🌲 {repo}@{branch}: {len(tree)} tree entries")
     return tree
 
@@ -400,15 +450,27 @@ def download_blob(
     Returns destination Path or None.
     """
     url = raw_url(org, repo, item["path"], branch)
+    cache_path = RAW_XML_CACHE_DIR / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.xml"
+    try:
+        if time.time() - cache_path.stat().st_mtime <= CACHE_MAX_AGE_SECONDS:
+            xml_bytes = cache_path.read_bytes()
+        else:
+            xml_bytes = b""
+    except OSError:
+        xml_bytes = b""
 
     # retry loop for transient HTTP issues
     last_error = ""
-    for attempt in range(download_retries):
+    for attempt in range(download_retries if not xml_bytes else 0):
         response: requests.Response | None = None
         try:
             response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
                 xml_bytes = response.content
+                RAW_XML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                tmp_cache_path = cache_path.with_suffix(".tmp")
+                tmp_cache_path.write_bytes(xml_bytes)
+                tmp_cache_path.replace(cache_path)
                 break
             last_error = f"HTTP {response.status_code}"
             if response.status_code not in TRANSIENT_HTTP_STATUSES:
@@ -438,7 +500,10 @@ def download_blob(
             )
         )
     else:
-        return DownloadResult(status="failed", url=url, error=last_error or "unknown error")
+        if xml_bytes:
+            pass
+        else:
+            return DownloadResult(status="failed", url=url, error=last_error or "unknown error")
 
     if not wants_file(xml_bytes, src_lang, tgt_lang, dialect):
         # Uncomment for super-verbose logging:
@@ -655,12 +720,7 @@ def main():
             # Determine branch for this repo
             if args.branch is None:
                 try:
-                    meta = SESSION.get(
-                        f"{GITHUB_API}/repos/{args.org}/{repo}",
-                        timeout=REQUEST_TIMEOUT,
-                    )
-                    meta.raise_for_status()
-                    branch = meta.json().get("default_branch", "main")
+                    branch = get_default_branch(args.org, repo)
                     print(f"📦  Repo {repo}: using default branch '{branch}'")
                 except requests.RequestException as e:
                     print(f"❌  Failed to get default branch for {repo}: {e}")

@@ -244,7 +244,7 @@ def main() -> None:
     parser.add_argument("--train-embeddings-with-lora", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--merge-lora-final", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--save-interval", type=int, default=10000)
+    parser.add_argument("--save-interval", type=int, default=10000, help="Checkpoint interval. Use 0 to keep only best/final.")
     parser.add_argument("--eval-interval", type=int, default=5000)
     parser.add_argument("--log-interval", type=int, default=1000)
     parser.add_argument("--eval-samples", type=int, default=512)
@@ -433,7 +433,7 @@ def main() -> None:
                     {"step": step, "best_mean_token_loss": best_loss, "direction": args.direction},
                 )
 
-        if step % args.save_interval == 0:
+        if args.save_interval > 0 and step % args.save_interval == 0:
             save_checkpoint(
                 model,
                 tokenizer,

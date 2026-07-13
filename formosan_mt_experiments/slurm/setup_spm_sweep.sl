@@ -18,8 +18,8 @@ module load miniconda
 conda activate formosan_mt
 
 EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
-SCRATCH="${SCRATCH:-/scratch/scheppat}"
-export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
+SCRATCH="${SCRATCH:-/scratch/scheppat/projects/mt}"
+export HF_HOME="${HF_HOME:-/scratch/scheppat/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
 TARGET_LANG="${TARGET_LANG:-english}"

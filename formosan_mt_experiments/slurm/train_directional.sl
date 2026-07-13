@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=vr80g|vr144g
+#SBATCH --constraint=vr40g|vr80g|vr144g
 #SBATCH --output=/home/scheppat/logs/%x-%j.out
 #SBATCH --error=/home/scheppat/logs/%x-%j.err
 #SBATCH --export=ALL
@@ -24,8 +24,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
-SCRATCH="${SCRATCH:-/scratch/scheppat}"
-export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
+SCRATCH="${SCRATCH:-/scratch/scheppat/projects/mt}"
+export HF_HOME="${HF_HOME:-/scratch/scheppat/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
 TIER="${TIER:-in_domain_hard}"

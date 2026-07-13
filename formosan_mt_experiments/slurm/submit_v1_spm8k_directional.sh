@@ -3,7 +3,7 @@ set -euo pipefail
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
-SCRATCH="${SCRATCH:-/scratch/scheppat}"
+SCRATCH="${SCRATCH:-/scratch/scheppat/projects/mt}"
 PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
 CORPUS_LABEL="${CORPUS_NAME:-legacy}"
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data/${CORPUS_LABEL}}"
@@ -102,10 +102,10 @@ submit_direction() {
 
   local -a train_args=(
     --job-name="v1_${CORPUS_LABEL}_${direction}"
-    --partition="${TRAIN_PARTITION:-medium}"
-    --time="${TRAIN_TIME:-2-00:00:00}"
+    --partition="${TRAIN_PARTITION:-long}"
+    --time="${TRAIN_TIME:-5-00:00:00}"
     --gres="${TRAIN_GRES:-gpu:1}"
-    --constraint="${TRAIN_CONSTRAINT:-vr80g|vr144g}"
+    --constraint="${TRAIN_CONSTRAINT:-vr40g|vr80g|vr144g}"
     --cpus-per-task="${TRAIN_CPUS:-8}"
     --mem="${TRAIN_MEM:-128G}"
   )
@@ -113,7 +113,7 @@ submit_direction() {
     train_args+=("${setup_dep}")
   fi
   train_args+=(
-    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=300000,BATCH_SIZE=16,GRAD_ACCUM_STEPS=4,MAX_LENGTH=384,LEARNING_RATE=2e-5,SAVE_INTERVAL=25000,EVAL_INTERVAL=25000,EVAL_SAMPLES=256,EVAL_BATCH_SIZE=16"
+    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=300000,BATCH_SIZE=16,GRAD_ACCUM_STEPS=4,MAX_LENGTH=384,LEARNING_RATE=2e-5,SAVE_INTERVAL=0,EVAL_INTERVAL=25000,EVAL_SAMPLES=256,EVAL_BATCH_SIZE=16"
     "${TRAIN_SL}"
   )
   submit_job "${train_label}" "${train_args[@]}"
@@ -123,10 +123,10 @@ submit_direction() {
   for checkpoint in final best; do
     submit_job "eval_${direction}_${checkpoint}" \
       --job-name="v1_${CORPUS_LABEL}_${direction}_eval_${checkpoint}" \
-      --partition="${EVAL_PARTITION:-short}" \
-      --time="${EVAL_TIME:-08:00:00}" \
+      --partition="${EVAL_PARTITION:-medium}" \
+      --time="${EVAL_TIME:-1-00:00:00}" \
       --gres="${EVAL_GRES:-gpu:1}" \
-      --constraint="${EVAL_CONSTRAINT:-vr80g|vr144g}" \
+      --constraint="${EVAL_CONSTRAINT:-vr40g|vr80g|vr144g}" \
       --cpus-per-task="${EVAL_CPUS:-8}" \
       --mem="${EVAL_MEM:-96G}" \
       --dependency="afterok:${train_id}" \

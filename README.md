@@ -155,9 +155,14 @@ If you want to build the optional DeepL pivot corpora, set one or more DeepL API
 ```bash
 export DEEPL_API_KEY=...
 export DEEPL_API_KEY_2=...
+export DEEPL_API_KEY_3=...
 ```
 
-The pivot builder also loads these keys from `.env` at the repository root.
+The pivot builder also loads these keys from `.env` at the repository root. By
+default it automatically discovers `DEEPL_API_KEY` and every numbered
+`DEEPL_API_KEY_N` variable and rotates through them in numeric order. Use
+`--api-key-env NAME_1,NAME_2` only when you deliberately want an explicit
+subset.
 
 ### Language Naming
 
@@ -185,8 +190,11 @@ This runs the end-to-end MT corpus pipeline:
 4. run MT-specific filtering, deduplication, lexeme routing, and train/eval overlap pruning on each pair;
 5. build multilingual English/Chinese aggregate corpora while preserving `row_type`;
 6. optionally rebuild pivot corpora from DeepL cache or new DeepL translations;
-7. build leakage-resistant hard split tiers with exact and punctuation/spacing
-   skeleton overlap checks and lexeme-in-eval validation.
+7. preserve DeepL provenance, route every synthetic row to training, and build
+   human-reference-only evaluation tiers with exact, skeleton, and one-edit
+   train/eval leakage removal;
+8. enforce robust per-language evaluation floors (500 test and 150 validation
+   rows when enough human sentence data exists) and write checksummed manifests.
 
 By default the cleaner uses a sibling `../FormosanBank` checkout when present,
 so current FormosanBank QC imports such as `QC.validation._dialect_inventory`
@@ -252,6 +260,12 @@ already saved:
   --fetch-workers 2 --keep-downloaded
 ```
 
+Fetch metadata and raw XML are cached for six hours under ignored
+`corpus_builds/.github_*` directories. This lets all 15 language passes inspect
+the same GitHub snapshot without redownloading every XML blob. These caches are
+disposable after a successful build; DeepL JSONL caches under each named build
+are not disposable.
+
 Named builds write every generated artifact under `corpus_builds/<name>/`, so
 public and private/all-data runs do not overwrite each other. The comparison
 outputs to train from are:
@@ -279,6 +293,10 @@ Each build writes `mt_build_manifest.json` in its build root. For completed
 non-dry runs, the manifest includes row counts, byte sizes, and SHA-256 checksums
 for the final aggregate and split CSVs. Use `--skip-artifact-checksums` only when
 you need to avoid hashing large files during exploratory runs.
+
+The canonical completed no-Bible rebuild, artifact checksums, and human-only
+evaluation policy are recorded in
+[`docs/NO_BIBLE_CORPUS_REBUILD.md`](docs/NO_BIBLE_CORPUS_REBUILD.md).
 
 The generated root-level pairwise and aggregate CSVs are ignored by git:
 
@@ -363,7 +381,6 @@ Run:
 
 ```bash
 python scripts/local/scripts/pivot/pivot.py \
-  --api-key-env DEEPL_API_KEY,DEEPL_API_KEY_2 \
   --directions both \
   --splits all
 ```
