@@ -666,6 +666,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-filter", action="store_true")
     parser.add_argument("--skip-aggregate", action="store_true")
     parser.add_argument("--skip-hard-splits", action="store_true")
+    parser.add_argument(
+        "--resplit-only",
+        action="store_true",
+        help=(
+            "Rebuild hard splits and refresh the manifest from an existing named "
+            "pivot_corpora_final directory without fetching, cleaning, filtering, "
+            "aggregating, or calling DeepL. Requires --corpus-name --with-pivot."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--skip-artifact-checksums",
@@ -726,11 +735,27 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--min-test-rows must be >= 0")
     if args.min_validate_rows < 0:
         raise SystemExit("--min-validate-rows must be >= 0")
+    if args.resplit_only and (not args.corpus_name or not args.with_pivot):
+        raise SystemExit("--resplit-only requires --corpus-name and --with-pivot")
     return args
 
 
 def run_build(args: argparse.Namespace) -> Path:
     paths = resolve_build_paths(args)
+    if args.resplit_only:
+        if not paths.final_dir.is_dir():
+            raise SystemExit(f"Missing finalized pivot corpus for resplit: {paths.final_dir}")
+        previous_languages = []
+        if paths.manifest_path.is_file():
+            previous_languages = json.loads(
+                paths.manifest_path.read_text(encoding="utf-8")
+            ).get("languages", [])
+        build_hard_splits(args, paths.final_dir, paths.split_root)
+        if args.exclude_bible and not args.dry_run:
+            validate_no_bible_sources(paths, paths.final_dir)
+        write_manifest(args, previous_languages, paths.final_dir, paths)
+        return paths.root
+
     languages = parse_languages(args.languages)
     if not paths.legacy_layout:
         print(f"📦  Corpus build root: {paths.root}")

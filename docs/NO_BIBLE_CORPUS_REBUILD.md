@@ -26,6 +26,16 @@ Resume without spending DeepL quota after caches are complete:
   --pivot-skip-translation --exclude-bible --keep-build-output
 ```
 
+Regenerate only the final leakage-controlled splits and checksummed manifests,
+without downloading XML, rerunning cleaning, or calling DeepL:
+
+```bash
+python scripts/local/build_mt_corpus.py --corpus-name public_no_bible \
+  --public --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
+python scripts/local/build_mt_corpus.py --corpus-name private_no_bible \
+  --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
+```
+
 The pipeline excludes exactly
 `FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`, discovers all configured
 DeepL keys in numeric order, reuses response caches by content key, preserves
@@ -36,10 +46,10 @@ rows before these artifacts are considered complete.
 
 | Artifact | Rows | SHA-256 |
 |---|---:|---|
-| public English hard | 451,049 | `277d8fd936334f7ef73bad74351f267816ac4ce0bed792f434555fe3e75afec6` |
-| public Chinese hard | 485,406 | `5989474b6a9357a5aa2c0a9723af89f2761e6293971421cd12097870cd7bc37a` |
-| private English hard | 751,474 | `1ecd445b870d0039dfcb2ab2fc7f5dacf1dc5c3af56f2896d29663efdcd36955` |
-| private Chinese hard | 793,692 | `ca2af32a044ee815a966b120b175a045529efadf122d03393e2113d9dba5ddf7` |
+| public English hard | 461,875 | `579bd9bb84cf0ef91ea45888a7df2d766acc64785f79217fa3b2525051108118` |
+| public Chinese hard | 485,369 | `b16eb04e4dcc43b7c2412672f17e5eb3505853f308a3ed075804d9d1a592ac04` |
+| private English hard | 759,493 | `b9c0ad5147b116abcb7e9cef3878a5c2f25a282c47e5dfc85a1bde7d86b91db9` |
+| private Chinese hard | 791,330 | `39a69195b92a608512f991b1e67f0132cdcb59c2092c6155ef747c463b59cddd` |
 
 The authoritative machine-readable inventories are each build's
 `mt_build_manifest.json`, `processed_corpora/pivot/pivot_manifest.json`, and
@@ -47,19 +57,21 @@ split-directory `report_all_tiers.json`.
 
 ## Evaluation Policy
 
-- DeepL rows and XML lexemes/morphemes: training only.
-- Evaluation references: human translations only.
-- Human split target: approximately 90% train, 7.5% test, 2.5% validation.
+- XML lexemes/morphemes: training only.
+- Evaluation references prefer human translations. Synthetic sentence
+  references are admitted only for a per-language residual shortfall after all
+  eligible human sentence groups are exhausted; reports quantify these rows.
+- Final per-language split minimum: 7.5% test and 2.5% validation, measured
+  against every emitted row including synthetic training rows.
 - Small-language desired floors: 500 test and 150 validation rows.
 - Exact normalized Formosan, target, and pair overlap: zero.
 - Punctuation/spacing skeleton overlap: zero.
 - One-character insertion/deletion/substitution train/eval overlap: removed on
   both Formosan and target sides.
 
-The four rebuilt human-reference subsets land near 88-90% train, 7.6-9.3%
-test, and 2.8-3.4% validation. Public Puyuma English has 498 test rows because
-indivisible leakage groups and final one-edit pruning take precedence over
-meeting the nominal floor exactly.
+The builder expands the human sentence candidate pool when the strict hard pool
+cannot meet those final-corpus percentages. It fails rather than silently
+emitting an undersized evaluation split. Lexemes remain training-only.
 
 ## Storage
 

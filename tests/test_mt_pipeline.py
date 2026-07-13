@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local/scripts/pivot"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
-from build_experiment_splits import one_edit_conflicts  # noqa: E402
+from build_experiment_splits import one_edit_conflicts, split_targets  # noqa: E402
 from mt_metrics import score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
 from train_directional_nllb import metric_improved  # noqa: E402
@@ -48,6 +48,19 @@ class LeakageTests(unittest.TestCase):
             index=[1, 2, 3, 4, 5],
         )
         self.assertEqual(one_edit_conflicts(training, evaluation, "text"), {1, 2, 3})
+
+    def test_split_targets_use_every_final_row_as_denominator(self) -> None:
+        self.assertEqual(
+            split_targets(
+                rows_total=100_000,
+                eligible_total=20_000,
+                test_ratio=0.075,
+                val_ratio=0.025,
+                min_test_rows=500,
+                min_validate_rows=150,
+            ),
+            (7_500, 2_500),
+        )
 
 
 class TrainingMetricTests(unittest.TestCase):

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,7 @@ class GroupCandidate:
     rows: int
     short_frac: float
     avg_tokens: float
+    synthetic_rows: int
 
 
 class DisjointSet:
@@ -309,6 +311,7 @@ def group_candidates(
                 rows=int(len(group)),
                 short_frac=float(group["_short_entry"].mean()),
                 avg_tokens=avg_tokens,
+                synthetic_rows=int(group["_is_synthetic"].sum()),
             )
         )
     return candidates
@@ -325,9 +328,12 @@ def choose_groups(
 
     rng = random.Random(seed)
     best: list[GroupCandidate] = []
-    best_cost = float("inf")
+    best_cost = (float("inf"), float("inf"), float("inf"))
 
-    ordered = sorted(candidates, key=lambda c: (c.short_frac, -c.avg_tokens, -c.rows))
+    ordered = sorted(
+        candidates,
+        key=lambda c: (c.synthetic_rows > 0, c.short_frac, -c.avg_tokens, -c.rows),
+    )
     current: list[GroupCandidate] = []
     current_rows = 0
     for candidate in ordered:
@@ -337,12 +343,21 @@ def choose_groups(
             break
     if current:
         best = current
-        best_cost = abs(sum(g.rows for g in current) - target_rows)
+        best_cost = (
+            abs(sum(g.rows for g in current) - target_rows),
+            sum(g.synthetic_rows for g in current),
+            sum(g.short_frac * g.rows for g in current),
+        )
 
     for _ in range(attempts):
         shuffled = candidates[:]
         rng.shuffle(shuffled)
-        shuffled.sort(key=lambda c: rng.random() + 0.015 * c.short_frac - 0.0005 * c.avg_tokens)
+        shuffled.sort(
+            key=lambda c: 10.0 * (c.synthetic_rows > 0)
+            + rng.random()
+            + 0.015 * c.short_frac
+            - 0.0005 * c.avg_tokens
+        )
         selected: list[GroupCandidate] = []
         selected_rows = 0
         for candidate in shuffled:
@@ -350,7 +365,11 @@ def choose_groups(
             selected_rows += candidate.rows
             if selected_rows >= target_rows:
                 break
-        cost = abs(selected_rows - target_rows)
+        cost = (
+            abs(selected_rows - target_rows),
+            sum(g.synthetic_rows for g in selected),
+            sum(g.short_frac * g.rows for g in selected),
+        )
         if selected and cost < best_cost:
             best = selected
             best_cost = cost
@@ -382,10 +401,13 @@ def build_tier(
     group_ids = leakage_group_ids(df, leakage_columns)
     raw_candidate_mask = tier_mask(df, tier, min_formosan_tokens, min_target_tokens)
     synthetic_mask = df.get("pivot_origin", pd.Series("original", index=df.index)).fillna("original").eq("synthetic")
+    df = df.copy()
+    df["_is_synthetic"] = synthetic_mask
     raw_candidate_mask &= ~synthetic_mask
     fallback_rows_added = 0
+    broad_fallback_rows_added = 0
+    synthetic_fallback_rows_added = 0
     if tier == "in_domain_hard":
-        minimum_eval_rows = min_test_rows + min_validate_rows
         fallback_mask = (
             ~synthetic_mask
             & ~df["_is_lexeme"]
@@ -394,11 +416,40 @@ def build_tier(
         )
         for _lang, lang_df in df.groupby("lang_code", sort=False):
             lang_index = lang_df.index
-            if int(raw_candidate_mask.loc[lang_index].sum()) >= minimum_eval_rows:
-                continue
+            required_eval_rows = max(
+                min_test_rows + min_validate_rows,
+                math.ceil(len(lang_df) * (test_ratio + val_ratio)),
+            )
             before = int(raw_candidate_mask.loc[lang_index].sum())
-            raw_candidate_mask.loc[lang_index] |= fallback_mask.loc[lang_index]
+            if before < required_eval_rows:
+                raw_candidate_mask.loc[lang_index] |= fallback_mask.loc[lang_index]
             fallback_rows_added += int(raw_candidate_mask.loc[lang_index].sum()) - before
+
+            after_standard_fallback = int(raw_candidate_mask.loc[lang_index].sum())
+            if after_standard_fallback < required_eval_rows:
+                broad_fallback = (
+                    ~synthetic_mask.loc[lang_index]
+                    & ~df.loc[lang_index, "_is_lexeme"]
+                    & df.loc[lang_index, "_formosan_tokens"].ge(1)
+                    & df.loc[lang_index, "_target_tokens"].ge(1)
+                )
+                raw_candidate_mask.loc[lang_index] |= broad_fallback
+            broad_fallback_rows_added += (
+                int(raw_candidate_mask.loc[lang_index].sum()) - after_standard_fallback
+            )
+
+            after_human_fallback = int(raw_candidate_mask.loc[lang_index].sum())
+            if after_human_fallback < required_eval_rows:
+                synthetic_fallback = (
+                    synthetic_mask.loc[lang_index]
+                    & ~df.loc[lang_index, "_is_lexeme"]
+                    & df.loc[lang_index, "_formosan_tokens"].ge(1)
+                    & df.loc[lang_index, "_target_tokens"].ge(1)
+                )
+                raw_candidate_mask.loc[lang_index] |= synthetic_fallback
+            synthetic_fallback_rows_added += (
+                int(raw_candidate_mask.loc[lang_index].sum()) - after_human_fallback
+            )
     group_has_lexeme = df.groupby(group_ids)["_is_lexeme"].transform("any")
     candidate_mask = raw_candidate_mask & ~group_has_lexeme
     split = pd.Series("", index=df.index, dtype="object")
@@ -414,7 +465,8 @@ def build_tier(
     # can absorb incidental group assignments more easily.
     for offset, (eligible_sort_key, lang, lang_df) in enumerate(sorted(lang_order, key=lambda item: (item[0], item[1]))):
         lang_candidate_mask = candidate_mask.reindex(lang_df.index, fill_value=False)
-        lang_total = int((~synthetic_mask.loc[lang_df.index]).sum())
+        lang_total = int(len(lang_df))
+        human_total = int((~synthetic_mask.loc[lang_df.index]).sum())
         eligible_total = int(lang_candidate_mask.sum())
         target_test, target_val = split_targets(
             rows_total=lang_total,
@@ -454,6 +506,7 @@ def build_tier(
         final_val = int((lang_candidate_mask & assigned_for_lang.eq("validate")).sum())
         language_reports[str(lang)] = {
             "rows_total": int(lang_total),
+            "human_rows": int(human_total),
             "eligible_rows": int(eligible_total),
             "candidate_groups": int(len(set(group_ids.loc[lang_df.index][lang_candidate_mask]))),
             "target_test_rows": int(target_test),
@@ -487,6 +540,79 @@ def build_tier(
         out = out.drop(index=sorted(fuzzy_conflicts))
         train = out[out["split"].eq("train")]
         eval_df = out[out["split"].isin(["validate", "test"])]
+
+    ratio_trimmed_by_language = {}
+    if tier == "in_domain_hard":
+        trim_indices = []
+        for lang, lang_out in out.groupby("lang_code", sort=True):
+            counts = lang_out["split"].value_counts()
+            actual_test = int(counts.get("test", 0))
+            actual_validate = int(counts.get("validate", 0))
+            maximum_total = min(
+                math.floor(actual_test / test_ratio) if test_ratio else len(lang_out),
+                math.floor(actual_validate / val_ratio) if val_ratio else len(lang_out),
+            )
+            trim_count = max(0, len(lang_out) - maximum_total)
+            if not trim_count:
+                continue
+            train_candidates = lang_out[lang_out["split"].eq("train")].copy()
+            train_candidates["_trim_synthetic"] = synthetic_mask.loc[train_candidates.index]
+            train_candidates["_trim_tokens"] = (
+                train_candidates["_formosan_tokens"] + train_candidates["_target_tokens"]
+            )
+            selected = train_candidates.sort_values(
+                ["_trim_synthetic", "_short_entry", "_trim_tokens"],
+                ascending=[False, False, True],
+                kind="stable",
+            ).head(trim_count)
+            if len(selected) != trim_count:
+                raise SystemExit(
+                    f"Cannot trim enough train rows to satisfy ratios for {lang}: "
+                    f"needed={trim_count} available={len(selected)}"
+                )
+            trim_indices.extend(selected.index.tolist())
+            ratio_trimmed_by_language[str(lang)] = int(trim_count)
+        if trim_indices:
+            out = out.drop(index=trim_indices)
+            train = out[out["split"].eq("train")]
+            eval_df = out[out["split"].isin(["validate", "test"])]
+
+    ratio_shortfalls = {}
+    for lang, lang_out in out.groupby("lang_code", sort=True):
+        counts = lang_out["split"].value_counts()
+        total = int(len(lang_out))
+        actual_test = int(counts.get("test", 0))
+        actual_validate = int(counts.get("validate", 0))
+        synthetic_eval = int(
+            (
+                synthetic_mask.loc[lang_out.index]
+                & lang_out["split"].isin(["validate", "test"])
+            ).sum()
+        )
+        required_test = math.ceil(total * test_ratio)
+        required_validate = math.ceil(total * val_ratio)
+        language_reports[str(lang)].update(
+            {
+                "output_rows": total,
+                "final_test_rows": actual_test,
+                "final_validate_rows": actual_validate,
+                "final_test_fraction": actual_test / max(total, 1),
+                "final_validate_fraction": actual_validate / max(total, 1),
+                "required_test_rows": required_test,
+                "required_validate_rows": required_validate,
+                "synthetic_eval_rows": synthetic_eval,
+            }
+        )
+        if tier == "in_domain_hard" and (
+            actual_test < required_test or actual_validate < required_validate
+        ):
+            ratio_shortfalls[str(lang)] = {
+                "output_rows": total,
+                "test": actual_test,
+                "required_test": required_test,
+                "validate": actual_validate,
+                "required_validate": required_validate,
+            }
     overlaps = overlap_stats(train, eval_df)
     skeleton_overlaps = {}
     for name, col in (
@@ -515,9 +641,20 @@ def build_tier(
         "dropped_rows": int(len(df) - len(out)),
         "candidate_rows": int(candidate_mask.sum()),
         "synthetic_rows_forced_train": int((synthetic_mask & split.eq("train")).sum()),
-        "synthetic_rows_removed_for_leakage": int(synthetic_mask.sum() - (synthetic_mask & split.eq("train")).sum()),
+        "synthetic_eval_rows": int(
+            (synthetic_mask & split.isin(["validate", "test"])).sum()
+        ),
+        "synthetic_rows_removed_for_leakage": int(
+            synthetic_mask.sum()
+            - (synthetic_mask & split.eq("train")).sum()
+            - (synthetic_mask & split.isin(["validate", "test"])).sum()
+        ),
         "human_fallback_candidate_rows_added": fallback_rows_added,
+        "human_broad_fallback_candidate_rows_added": broad_fallback_rows_added,
+        "synthetic_fallback_candidate_rows_added": synthetic_fallback_rows_added,
         "one_edit_train_rows_removed": len(fuzzy_conflicts),
+        "train_rows_trimmed_for_final_ratios": int(sum(ratio_trimmed_by_language.values())),
+        "train_rows_trimmed_for_final_ratios_by_language": ratio_trimmed_by_language,
         "lexeme_eval_rows": int((out["row_type"].isin(["lexeme", "morpheme"]) & out["split"].isin(["validate", "test"])).sum()),
         "lexeme_rows_forced_train": int((df["_is_lexeme"] & split.eq("train")).sum()),
         "lexeme_rows_removed_for_leakage_or_heldout": int(df["_is_lexeme"].sum() - (df["_is_lexeme"] & split.eq("train")).sum()),
@@ -528,6 +665,8 @@ def build_tier(
         "skeleton_overlap_stats_train_vs_eval": skeleton_overlaps,
         "hard_global_target_unique_eval": hard_global_target_unique,
         "languages": language_reports,
+        "ratio_shortfalls": ratio_shortfalls,
+        "required_final_ratios": {"test": test_ratio, "validate": val_ratio},
     }
     return out[keep_columns(target_col)], report
 
@@ -554,6 +693,11 @@ def validate_report(report: dict) -> None:
         raise SystemExit(
             f"Lexeme routing validation failed for tier={report['tier']}: "
             f"{report['lexeme_eval_rows']} lexeme rows in eval"
+        )
+    if report["tier"] == "in_domain_hard" and report.get("ratio_shortfalls"):
+        raise SystemExit(
+            "Final per-language evaluation ratio validation failed: "
+            f"{json.dumps(report['ratio_shortfalls'], sort_keys=True)}"
         )
     if report["tier"] == "hard_global" and report["hard_global_target_unique_eval"] is not True:
         raise SystemExit("hard_global validation failed: eval target references are not globally unique")

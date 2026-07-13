@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import pandas as pd
 from transformers import NllbTokenizer
 
+from build_experiment_splits import one_edit_conflicts
 from mt_common import (
     add_normalized_columns,
     build_prefix,
@@ -21,7 +23,13 @@ from mt_common import (
 )
 
 
-def validate_splits(df: pd.DataFrame, target_col: str, target_lang: str) -> dict:
+def validate_splits(
+    df: pd.DataFrame,
+    target_col: str,
+    target_lang: str,
+    min_test_ratio: float,
+    min_validate_ratio: float,
+) -> dict:
     keyed = add_normalized_columns(df, target_col=target_col, target_lang=target_lang)
     split = keyed["split"].astype(str).str.lower()
     train = keyed[split.eq("train")]
@@ -56,13 +64,54 @@ def validate_splits(df: pd.DataFrame, target_col: str, target_lang: str) -> dict
     skeleton_failed = {
         k: v["overlap_unique"] for k, v in skeleton_report.items() if v["overlap_unique"]
     }
+    one_edit = one_edit_conflicts(train, eval_df, "_formosan_skeleton")
+    one_edit |= one_edit_conflicts(train, eval_df, "_target_skeleton")
+    ratio_by_language = {}
+    ratio_failures = {}
+    for lang, group in keyed.groupby("lang_code", sort=True):
+        group_split = group["split"].astype(str).str.lower()
+        total = int(len(group))
+        test = int(group_split.eq("test").sum())
+        validate = int(group_split.isin(["validate", "valid", "val"]).sum())
+        required_test = math.ceil(total * min_test_ratio)
+        required_validate = math.ceil(total * min_validate_ratio)
+        values = {
+            "rows": total,
+            "test": test,
+            "validate": validate,
+            "test_ratio": test / max(total, 1),
+            "validate_ratio": validate / max(total, 1),
+            "required_test": required_test,
+            "required_validate": required_validate,
+        }
+        ratio_by_language[str(lang)] = values
+        if test < required_test or validate < required_validate:
+            ratio_failures[str(lang)] = values
+    synthetic_mask = keyed.get(
+        "pivot_origin", pd.Series("original", index=keyed.index)
+    ).fillna("original").eq("synthetic")
+    synthetic_eval_rows = int((synthetic_mask & split.isin(["validate", "valid", "val", "test"])).sum())
     return {
-        "ok": not failed and not skeleton_failed and lexeme_eval_rows == 0,
+        "ok": (
+            not failed
+            and not skeleton_failed
+            and not one_edit
+            and not ratio_failures
+            and lexeme_eval_rows == 0
+        ),
         "overlaps": report,
         "skeleton_overlaps": skeleton_report,
         "failures": failed,
         "skeleton_failures": skeleton_failed,
         "lexeme_eval_rows": lexeme_eval_rows,
+        "one_edit_train_conflicts": int(len(one_edit)),
+        "minimum_ratios": {
+            "test": min_test_ratio,
+            "validate": min_validate_ratio,
+        },
+        "ratios_by_language": ratio_by_language,
+        "ratio_failures": ratio_failures,
+        "synthetic_eval_rows": synthetic_eval_rows,
     }
 
 
@@ -94,6 +143,8 @@ def main() -> None:
     parser.add_argument("--target-col", default=None)
     parser.add_argument("--tokenizer", type=Path, default=None)
     parser.add_argument("--direction", choices=direction_choices() + ["dae"], default=None)
+    parser.add_argument("--min-test-ratio", type=float, default=0.075)
+    parser.add_argument("--min-validate-ratio", type=float, default=0.025)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -102,7 +153,13 @@ def main() -> None:
     df = read_parallel_csv(args.input, target_col=target_col)
     if "split" not in df.columns:
         raise SystemExit("Input must have split column.")
-    split_report = validate_splits(df, target_col=target_col, target_lang=target_lang)
+    split_report = validate_splits(
+        df,
+        target_col=target_col,
+        target_lang=target_lang,
+        min_test_ratio=args.min_test_ratio,
+        min_validate_ratio=args.min_validate_ratio,
+    )
     report = {"input": str(args.input), "split_validation": split_report}
     if args.tokenizer and args.direction:
         report["tag_validation"] = validate_tags(df, args.tokenizer, args.direction, target_lang=target_lang)
