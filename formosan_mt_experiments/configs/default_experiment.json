@@ -61,12 +61,6 @@
     "f2zh_easy_source_weight": 0.05,
     "zh2f_easy_source_weight": 0.15
   },
-  "dae_defaults": {
-    "steps": 100000,
-    "word_dropout": 0.1,
-    "span_mask": 0.15,
-    "shuffle_distance": 3
-  },
   "generation_defaults": {
     "beam": 4,
     "max_length": 384,
@@ -75,13 +69,5 @@
     "no_repeat_ngram_size": 0,
     "repetition_penalty": 1.0,
     "length_penalty": 1.0
-  },
-  "lora_defaults": {
-    "enabled": false,
-    "r": 16,
-    "alpha": 32,
-    "dropout": 0.05,
-    "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
-    "merge_lora_final": true
   }
 }

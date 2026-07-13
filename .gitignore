@@ -2,13 +2,11 @@
 .env
 downloaded_*
 .venv/
-scripts/.formosan_qc_scripts/
 scripts/.formosan_qc_repo/
 bash/
 artifacts/
 runs/
 logs/
-raw_corpora/
 hf_space_*/
 corpus_builds/
 
@@ -19,16 +17,6 @@ __pycache__/
 
 # Generated DeepL pivot corpora and caches. These are expensive to rebuild, so
 # keep protected local copies under protected_corpora/ and mirror them off-box.
-/processed_corpora/*_processed.csv
-/processed_corpora/big_corpus*.csv
-/processed_corpora/mt_build_manifest.json
-/processed_corpora/filter_reports/
-pivot_corpora_final/*.csv
-pivot_corpora_final/*_report.json
-processed_corpora/pivot/*.csv
-processed_corpora/pivot/cache/
-processed_corpora/pivot/pivot_manifest.json
-
 # Protected local corpus payloads are intentionally not versioned. Keep the
 # manifest/checksums in git so clones know what should exist locally.
 protected_corpora/*
@@ -46,12 +34,3 @@ formosan_mt_experiments/data/*
 formosan_mt_experiments/reports/*
 !formosan_mt_experiments/reports/.gitkeep
 !formosan_mt_experiments/reports/README.md
-
-# Avoid saving heavy generated model artifacts inside source script folders.
-scripts/mt/nllb/prelims/big_corpus_combined.csv
-scripts/mt/nllb/prelims/formosan_multilingual_nllb_language_info.json
-scripts/mt/nllb/prelims/formosan_multilingual_nllb_model/
-scripts/mt/nllb/prelims/formosan_multilingual_nllb_tokenizer/
-
-# public 
-public

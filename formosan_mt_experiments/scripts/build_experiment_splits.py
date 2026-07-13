@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pandas as pd
 from mt_common import (
-    DEFAULT_INPUT,
     EASY_BUCKETS,
     add_normalized_columns,
     bucket_counts,
@@ -703,7 +702,7 @@ def validate_report(report: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--input", type=Path, required=True)
     parser.add_argument(
         "--output-dir",
         type=Path,

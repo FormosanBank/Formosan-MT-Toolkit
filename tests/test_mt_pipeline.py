@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -9,17 +11,14 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts/local/scripts/pivot"))
+sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
 from build_experiment_splits import one_edit_conflicts, split_targets  # noqa: E402
 from mt_metrics import score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
 from train_directional_nllb import metric_improved  # noqa: E402
-from training_code_inventory import (  # noqa: E402
-    SETUP_IMPLEMENTATION_REPOSITORY_PATH,
-    build_code_inventory,
-)
+from training_code_inventory import build_code_inventory  # noqa: E402
 from verify_experiment_manifest import manifest_errors  # noqa: E402
 from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
 
@@ -87,16 +86,29 @@ class TrainingMetricTests(unittest.TestCase):
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_setup_script_checksum_pins_match_source(self) -> None:
+        setup = ROOT / "formosan_mt_experiments/scripts/setup_formosan_nllb200.py"
+        expected = hashlib.sha256(setup.read_bytes()).hexdigest()
+        launchers = {
+            "setup_spm_sweep.sl": "SETUP_SCRIPT_SHA256",
+            "submit_v1_spm8k_directional.sh": "SETUP_IMPLEMENTATION_SHA256",
+        }
+        for filename, variable in launchers.items():
+            path = ROOT / "formosan_mt_experiments/slurm" / filename
+            match = re.search(rf'{variable}="\$\{{{variable}:-([0-9a-f]{{64}})\}}"', path.read_text())
+            self.assertIsNotNone(match, filename)
+            self.assertEqual(match.group(1), expected, filename)
+
     def test_active_training_code_inventory_is_complete(self) -> None:
         inventory = build_code_inventory(
             experiment_root=ROOT / "formosan_mt_experiments",
-            setup_implementation=(
-                ROOT / "scripts/mt/nllb/prelims/setup_formosan_nllb200.py"
-            ),
         )
         artifacts = inventory["artifacts"]
         repository_paths = {row["repository_path"] for row in artifacts}
-        self.assertIn(SETUP_IMPLEMENTATION_REPOSITORY_PATH, repository_paths)
+        self.assertIn(
+            "formosan_mt_experiments/scripts/setup_formosan_nllb200.py",
+            repository_paths,
+        )
         self.assertIn(
             "formosan_mt_experiments/scripts/train_directional_nllb.py",
             repository_paths,

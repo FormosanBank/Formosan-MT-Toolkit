@@ -43,11 +43,8 @@ class BuildPaths:
     final_dir: Path
     split_root: Path
     manifest_path: Path
-    legacy_layout: bool
 
     def xml_dir(self, lang: Language) -> Path:
-        if self.legacy_layout:
-            return PROJECT_ROOT / f"downloaded_{lang.code}"
         return self.root / f"downloaded_{lang.code}"
 
 
@@ -116,27 +113,20 @@ def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
     if args.corpus_name:
         name = safe_corpus_name(args.corpus_name)
         root = (args.build_root or (PROJECT_ROOT / "corpus_builds")) / name
-        legacy_layout = False
     elif args.build_root:
         root = args.build_root
-        legacy_layout = False
     else:
-        root = PROJECT_ROOT
-        legacy_layout = True
+        raise SystemExit(
+            "Choose an isolated output with --corpus-name or --build-root, "
+            "or use --build-public-private."
+        )
 
     root = root.expanduser().resolve()
-    if legacy_layout:
-        raw_dir = PROJECT_ROOT / "raw_corpora"
-        processed_dir = PROJECT_ROOT / "processed_corpora"
-        final_dir = PROJECT_ROOT / "pivot_corpora_final"
-        split_root = PROJECT_ROOT / "formosan_mt_experiments" / "data"
-        manifest_path = processed_dir / "mt_build_manifest.json"
-    else:
-        raw_dir = root / "raw_corpora"
-        processed_dir = root / "processed_corpora"
-        final_dir = root / "pivot_corpora_final"
-        split_root = root / "formosan_mt_experiments" / "data"
-        manifest_path = root / "mt_build_manifest.json"
+    raw_dir = root / "raw_corpora"
+    processed_dir = root / "processed_corpora"
+    final_dir = root / "pivot_corpora_final"
+    split_root = root / "formosan_mt_experiments" / "data"
+    manifest_path = root / "mt_build_manifest.json"
 
     return BuildPaths(
         root=root,
@@ -145,7 +135,6 @@ def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
         final_dir=final_dir,
         split_root=split_root,
         manifest_path=manifest_path,
-        legacy_layout=legacy_layout,
     )
 
 
@@ -166,8 +155,6 @@ def pivot_read_cache_dirs(args: argparse.Namespace, paths: BuildPaths) -> list[P
 
     for path in getattr(args, "pivot_read_cache_dir", []):
         add(path)
-    if args.shared_pivot_cache:
-        add(PROJECT_ROOT / "processed_corpora" / "pivot" / "cache")
     for path in getattr(args, "extra_pivot_read_cache_dirs", []):
         add(path)
     return dirs
@@ -197,7 +184,7 @@ def clean_generated_outputs(paths: BuildPaths) -> None:
 
 
 def should_clean_generated_outputs(args: argparse.Namespace, paths: BuildPaths) -> bool:
-    if args.dry_run or paths.legacy_layout or args.keep_build_output:
+    if args.dry_run or args.keep_build_output:
         return False
     # Incremental stage skips imply the caller expects existing intermediates.
     return not (args.skip_raw or args.skip_filter or args.skip_aggregate)
@@ -374,9 +361,9 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             "--workers",
             str(args.workers),
             "--val-ratio",
-            str(args.legacy_val_ratio),
+            str(args.pairwise_val_ratio),
             "--test-ratio",
-            str(args.legacy_test_ratio),
+            str(args.pairwise_test_ratio),
         ]
         if args.keep_redactions:
             filter_base.append("--keep-redactions")
@@ -397,7 +384,7 @@ def build_aggregates(args: argparse.Namespace, input_dir: Path, output_dir: Path
     run(
         [
             PYTHON,
-            str(script("processed_corpora/helpers/big_corpus_for_tokenizer.py")),
+            str(script("scripts/local/build_big_corpus.py")),
             "--input-dir",
             str(input_dir),
             "--output-dir",
@@ -410,7 +397,7 @@ def build_aggregates(args: argparse.Namespace, input_dir: Path, output_dir: Path
 def run_pivot(args: argparse.Namespace, paths: BuildPaths) -> None:
     cmd = [
         PYTHON,
-        str(script("scripts/local/scripts/pivot/pivot.py")),
+        str(script("scripts/local/pivot.py")),
         "--big-corpus-en",
         str(paths.processed_dir / "big_corpus_en.csv"),
         "--big-corpus-zh",
@@ -511,7 +498,6 @@ def write_manifest(
                 "validate": args.min_validate_rows,
             },
             "with_pivot": args.with_pivot,
-            "shared_pivot_cache": args.shared_pivot_cache,
             "pivot_read_cache_dirs": [
                 str(path)
                 for path in pivot_read_cache_dirs(args, paths)
@@ -560,8 +546,7 @@ def parse_args() -> argparse.Namespace:
         "--corpus-name",
         default=None,
         help=(
-            "Write all generated artifacts under corpus_builds/<name>/ instead of "
-            "the legacy top-level output directories."
+            "Write all generated artifacts under corpus_builds/<name>/."
         ),
     )
     parser.add_argument(
@@ -655,8 +640,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validate-qc", action="store_true")
     parser.add_argument("--units", default="sentences,words")
     parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 1))
-    parser.add_argument("--legacy-val-ratio", type=float, default=0.10)
-    parser.add_argument("--legacy-test-ratio", type=float, default=0.10)
+    parser.add_argument("--pairwise-val-ratio", type=float, default=0.10)
+    parser.add_argument("--pairwise-test-ratio", type=float, default=0.10)
     parser.add_argument("--keep-redactions", action="store_true")
 
     parser.add_argument("--skip-fetch", action="store_true")
@@ -705,14 +690,6 @@ def parse_args() -> argparse.Namespace:
             "Can be repeated. Writes still go only to the build-local cache."
         ),
     )
-    parser.add_argument(
-        "--no-shared-pivot-cache",
-        dest="shared_pivot_cache",
-        action="store_false",
-        help="Do not seed named pivot builds from processed_corpora/pivot/cache.",
-    )
-    parser.set_defaults(shared_pivot_cache=True)
-
     parser.add_argument("--train-ratio", type=float, default=0.90)
     parser.add_argument("--val-ratio", type=float, default=0.025)
     parser.add_argument("--test-ratio", type=float, default=0.075)
@@ -756,8 +733,7 @@ def run_build(args: argparse.Namespace) -> Path:
         return paths.root
 
     languages = parse_languages(args.languages)
-    if not paths.legacy_layout:
-        print(f"📦  Corpus build root: {paths.root}")
+    print(f"📦  Corpus build root: {paths.root}")
     if should_clean_generated_outputs(args, paths):
         print(f"🧹  Removing stale generated outputs under {paths.root} (pivot caches preserved)")
         clean_generated_outputs(paths)

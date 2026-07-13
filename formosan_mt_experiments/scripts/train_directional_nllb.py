@@ -365,16 +365,6 @@ def main() -> None:
     parser.add_argument("--easy-source-weight", type=float, default=None)
     parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--lora-r", type=int, default=0, help="Enable PEFT LoRA with this rank. 0 disables LoRA.")
-    parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-dropout", type=float, default=0.05)
-    parser.add_argument(
-        "--lora-target-modules",
-        default="q_proj,k_proj,v_proj,out_proj,fc1,fc2",
-        help="Comma-separated module names for PEFT LoRA.",
-    )
-    parser.add_argument("--train-embeddings-with-lora", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--merge-lora-final", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--save-interval", type=int, default=10000, help="Checkpoint interval. Use 0 to keep only best/final.")
     parser.add_argument("--eval-interval", type=int, default=5000)
@@ -415,18 +405,6 @@ def main() -> None:
     if args.early_stopping_patience < 0:
         raise SystemExit("--early-stopping-patience cannot be negative.")
 
-    peft_imports = None
-    if args.lora_r > 0:
-        try:
-            from peft import LoraConfig, TaskType, get_peft_model
-            peft_imports = (LoraConfig, TaskType, get_peft_model)
-        except Exception as exc:
-            raise SystemExit(
-                "LoRA requested but peft is not installed. "
-                "Install it with `pip install -r formosan_mt_experiments/requirements-extras.txt` "
-                "or run with --lora-r 0."
-            ) from exc
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -445,8 +423,6 @@ def main() -> None:
         raise SystemExit(f"Explicit resume checkpoint is incomplete: {resume_path}")
     if resume_arg == "none" or not resume_exists:
         resume_path = None
-    if resume_path is not None and args.lora_r > 0:
-        raise SystemExit("Automatic trainer resume is not supported with LoRA; use --resume-from none.")
     load_path = resume_path or args.model
     tokenizer = NllbTokenizer.from_pretrained(resume_path or args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(load_path)
@@ -460,26 +436,6 @@ def main() -> None:
             raise SystemExit("Tokenizer is smaller than model embeddings; load matching artifacts.")
     for lid in sorted(set(get_lid(c) for c in FORMOSAN_CODES) | {args.target_lid}):
         ensure_lang_token(tokenizer, lid)
-
-    lora_enabled = args.lora_r > 0
-    if lora_enabled:
-        LoraConfig, TaskType, get_peft_model = peft_imports
-        target_modules = [m.strip() for m in args.lora_target_modules.split(",") if m.strip()]
-        lora_config = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=target_modules,
-            bias="none",
-            task_type=TaskType.SEQ_2_SEQ_LM,
-        )
-        model = get_peft_model(model, lora_config)
-        if args.train_embeddings_with_lora:
-            model.get_input_embeddings().weight.requires_grad_(True)
-            output_embeddings = model.get_output_embeddings()
-            if output_embeddings is not None:
-                output_embeddings.weight.requires_grad_(True)
-        model.print_trainable_parameters()
 
     train_by_lang, val_by_lang, data_report = prepare_data(args, tokenizer)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -653,21 +609,20 @@ def main() -> None:
                 )
             elif step >= args.early_stopping_start_step:
                 bad_evaluations += 1
-            if not lora_enabled:
-                save_resume_checkpoint(
-                    model,
-                    tokenizer,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    args.output_dir / "resume",
-                    {
-                        "step": step,
-                        "best_value": best_value,
-                        "best_step": best_step,
-                        "bad_evaluations": bad_evaluations,
-                    },
-                )
+            save_resume_checkpoint(
+                model,
+                tokenizer,
+                optimizer,
+                scheduler,
+                scaler,
+                args.output_dir / "resume",
+                {
+                    "step": step,
+                    "best_value": best_value,
+                    "best_step": best_step,
+                    "bad_evaluations": bad_evaluations,
+                },
+            )
             if args.early_stopping_patience > 0 and bad_evaluations >= args.early_stopping_patience:
                 stopped_early = True
                 print(
@@ -685,11 +640,8 @@ def main() -> None:
                 {"step": step, "direction": args.direction},
             )
 
-    final_model = model
-    if lora_enabled and args.merge_lora_final:
-        final_model = model.merge_and_unload()
     save_checkpoint(
-        final_model,
+        model,
         tokenizer,
         args.output_dir / "final",
         {

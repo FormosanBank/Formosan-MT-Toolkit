@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pandas as pd
 from mt_common import (
-    DEFAULT_INPUT,
     FORMOSAN_CODES,
     normalize_target_language,
     read_parallel_csv,
@@ -89,7 +88,7 @@ def audit_tokenizer(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=Path, required=True)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
     parser.add_argument("--target-col", default=None)
     parser.add_argument("--output-json", type=Path, required=True)

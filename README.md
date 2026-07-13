@@ -7,10 +7,6 @@ Society repository, completes English/Chinese coverage with cached DeepL
 pivots, creates leakage-resistant evaluation splits, and trains four
 unidirectional SPM8k models per corpus variant.
 
-The repository also retains the corpora and baseline code from the 2025
-FormosanMT paper. Those released artifacts are historical inputs, not the
-default 2026 experiment path.
-
 ## Current Production Path
 
 ```text
@@ -40,11 +36,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component ownership and
 |---|---|
 | `build_corpora.sh` | Stable wrapper for the end-to-end corpus builder. |
 | `scripts/local/` | Fetch, QC, XML extraction, pair filtering, aggregation, and orchestration. |
-| `scripts/local/scripts/pivot/` | DeepL key rotation, caching, and pivot provenance. |
+| `scripts/local/pivot.py` | DeepL key rotation, caching, and pivot provenance. |
 | `formosan_mt_experiments/` | Current split, validation, SPM8k training, evaluation, and Slurm stack. |
 | `corpus_builds/<name>/` | Ignored self-contained public/private generated builds. |
-| `processed_corpora/` | Released 2025 pairwise corpora and historical model inputs. |
-| `scripts/mt/` | Historical NLLB/OpenNMT implementations retained for reproducibility. |
 | `protected_corpora/` | Ignored paid-pivot snapshots plus tracked checksums; not the current build namespace. |
 
 ## Setup
@@ -74,6 +68,9 @@ excluding exactly `FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`:
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot --exclude-bible
 ```
+
+The wrapper requires an explicit named build or `--build-public-private`; it
+will not recreate obsolete top-level output directories.
 
 Reuse downloaded XML and paid translation caches without making DeepL calls:
 
@@ -170,7 +167,7 @@ the training contract and metrics.
 
 ```bash
 python -m unittest discover -s tests -v
-ruff check scripts/local/*.py scripts/local/scripts/pivot \
+ruff check scripts/local/*.py \
   formosan_mt_experiments/scripts tests
 python -m compileall -q scripts/local formosan_mt_experiments/scripts tests
 bash -n build_corpora.sh formosan_mt_experiments/slurm/*.sh \

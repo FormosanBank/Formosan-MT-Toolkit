@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import math
-import random
 import re
 import unicodedata
 from pathlib import Path
@@ -16,25 +15,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
 
-DEFAULT_INPUT = PROJECT_ROOT / "pivot_corpora_final" / "big_corpus_en.csv"
-DEFAULT_ZH_INPUT = PROJECT_ROOT / "pivot_corpora_final" / "big_corpus_zh.csv"
-DEFAULT_SETUP_SCRIPT = PROJECT_ROOT / "scripts" / "mt" / "nllb" / "prelims" / "setup_formosan_nllb200.py"
-DEFAULT_LEGACY_TRAIN_SCRIPT = (
-    PROJECT_ROOT
-    / "scripts"
-    / "mt"
-    / "nllb_multilingual"
-    / "training"
-    / "train_formosan_multilingual_nllb200.py"
-)
-DEFAULT_LEGACY_EVAL_SCRIPT = (
-    PROJECT_ROOT
-    / "scripts"
-    / "mt"
-    / "nllb_multilingual"
-    / "eval"
-    / "eval_formosan_multilingual_nllb200.py"
-)
+DEFAULT_SETUP_SCRIPT = EXPERIMENT_ROOT / "scripts" / "setup_formosan_nllb200.py"
 
 PAIR_SEP = "\u241f"
 
@@ -191,12 +172,12 @@ def target_language_from_direction(direction: str, target_lang: str | None = Non
 
 def is_formosan_to_target(direction: str) -> bool:
     direction = str(direction).strip().lower()
-    return direction.startswith("f2") and direction != "dae"
+    return direction.startswith("f2")
 
 
 def is_target_to_formosan(direction: str) -> bool:
     direction = str(direction).strip().lower()
-    return direction.endswith("2f") and direction != "dae"
+    return direction.endswith("2f")
 
 
 def direction_choices() -> list[str]:
@@ -349,7 +330,7 @@ def get_lid(code: str) -> str:
 
 
 def base_special_tokens() -> list[str]:
-    tokens = ["<dae>", "<mask>"]
+    tokens = []
     for config in TARGET_CONFIGS.values():
         tokens.extend([f"<to_{config['tag']}>", f"<src_{config['tag']}>"])
     for code in FORMOSAN_CODES:
@@ -389,8 +370,6 @@ def build_prefix(row: Mapping, direction: str, target_lang: str | None = None) -
     if is_target_to_formosan(direction):
         source_tag = target_tag_for(target_language_from_direction(direction, target_lang))
         return f"<to_{code}> <src_{source_tag}> {domain_tag} {dialect_tag}"
-    if direction == "dae":
-        return f"<dae> <src_{code}> {domain_tag} {dialect_tag}"
     raise ValueError(f"Unsupported direction: {direction}")
 
 
@@ -407,7 +386,7 @@ def with_tagged_columns(
     if "source_bucket" not in out.columns:
         out["source_bucket"] = out["source"].map(source_bucket)
     prefixes = out.apply(lambda row: build_prefix(row, direction, target_lang=target_lang), axis=1)
-    if is_formosan_to_target(direction) or direction == "dae":
+    if is_formosan_to_target(direction):
         out["formosan_sentence"] = prefixes + " " + out["formosan_sentence"].fillna("").astype(str)
     elif is_target_to_formosan(direction):
         out[target_col] = prefixes + " " + out[target_col].fillna("").astype(str)
@@ -420,40 +399,3 @@ def language_sampling_probs(counts: Mapping[str, int], alpha: float) -> dict[str
     weighted = {k: math.pow(max(v, 1), alpha) for k, v in counts.items()}
     total = sum(weighted.values())
     return {k: v / total for k, v in weighted.items()}
-
-
-def random_word_permutation(words: list[str], max_distance: int, rng: random.Random) -> list[str]:
-    if max_distance <= 0 or len(words) <= 1:
-        return words
-    scores = [i + rng.uniform(0, max_distance + 1) for i in range(len(words))]
-    return [w for _, w in sorted(zip(scores, words), key=lambda x: x[0])]
-
-
-def corrupt_text(
-    text: str,
-    rng: random.Random,
-    word_dropout: float = 0.10,
-    span_mask: float = 0.15,
-    shuffle_distance: int = 3,
-    mask_token: str = "<mask>",
-) -> str:
-    words = str(text).split()
-    if not words:
-        return mask_token
-
-    out: list[str] = []
-    i = 0
-    while i < len(words):
-        r = rng.random()
-        if r < word_dropout:
-            i += 1
-            continue
-        if r < word_dropout + span_mask:
-            out.append(mask_token)
-            i += rng.randint(1, min(3, len(words) - i))
-            continue
-        out.append(words[i])
-        i += 1
-    if not out:
-        out = [mask_token]
-    return " ".join(random_word_permutation(out, shuffle_distance, rng))

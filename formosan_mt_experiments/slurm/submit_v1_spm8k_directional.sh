@@ -14,8 +14,8 @@ JOBS_DIR="${JOBS_DIR:-/home/scheppat/jobs/mt}"
 STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${RUN_STAMP}}"
 MANIFEST_DIR="${MANIFEST_DIR:-/projects/prudlab/formosan_mt_experiments}"
 PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
-SETUP_IMPLEMENTATION="${SETUP_IMPLEMENTATION:-/home/${USER}/nllb-scripts/setup_formosan_nllb200.py}"
-SETUP_IMPLEMENTATION_SHA256="${SETUP_IMPLEMENTATION_SHA256:-9d78c1516df1fd5bdbe0a834ad02dde473d0275e2fa15e20fe5d22187b6ed58d}"
+SETUP_IMPLEMENTATION="${SETUP_IMPLEMENTATION:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
+SETUP_IMPLEMENTATION_SHA256="${SETUP_IMPLEMENTATION_SHA256:-89bcb72d8c6b641ddce3a082f22750447cbe0530981ca177c9c91eac0084fa07}"
 
 STEPS="${STEPS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
@@ -227,7 +227,6 @@ python -u "${EXP_DIR}/scripts/write_submission_manifest.py" \
   --project-data "${PROJECT_DATA}" \
   --profile "${PROFILE}" \
   --experiment-root "${EXP_DIR}" \
-  --setup-implementation "${SETUP_IMPLEMENTATION}" \
   --output "${MANIFEST_DIR}/submission_manifest_v1_spm8k_${CORPUS_NAME}_${RUN_STAMP}.json"
 touch "${STATE_DIR}/DONE"
 echo "DONE_SUBMIT RUN_STAMP=${RUN_STAMP} CORPUS_LABEL=${CORPUS_LABEL}"

@@ -46,7 +46,7 @@ rebuilds the authoritative hard split from the aggregate corpus.
 ### 5. Aggregation And Pivoting
 
 The orchestrator combines all pairwise rows while retaining provenance and
-`row_type`. `scripts/local/scripts/pivot/pivot.py` fills missing English or
+`row_type`. `scripts/local/pivot.py` fills missing English or
 Chinese targets, rotates all configured DeepL keys, batches within API limits,
 backs off on transient errors, and writes each successful response immediately
 to a content-keyed JSONL cache. Rebuilds read shared and build-local caches
@@ -83,10 +83,10 @@ contract into a hard training gate.
 
 ### 8. NLLB Training
 
-`setup_tokenizer_sweep.py` learns the 8k Formosan extension, adds metadata tags,
-resizes NLLB, audits tokenization, and smoke-tests generation.
-Its legacy NLLB surgery implementation remains versioned under
-`scripts/mt/nllb/prelims/`; the cluster mirror is checksum-pinned before use.
+`setup_tokenizer_sweep.py` and `setup_formosan_nllb200.py` learn the 8k Formosan
+extension, add metadata tags, resize NLLB, audit tokenization, and smoke-test
+generation. Both live in the production experiment stack and are
+checksum-pinned before use.
 
 `train_directional_nllb.py` trains one direction per checkpoint with
 source-bucket weighting and language-temperature sampling. It performs fixed
@@ -100,7 +100,6 @@ plus global, language, source-bucket, dialect, and length-bin metrics.
 
 | Product | Lifetime | Versioned |
 |---|---|---|
-| Released 2025 pairwise corpora | Historical release | Yes |
 | Downloaded XML and raw/filtered rebuild CSVs | Regenerable | No |
 | DeepL JSONL response caches | Expensive source artifact | No; checksum and back up |
 | Named final no-Bible corpora | Current experiment input | No; manifest/checksum yes |
@@ -108,10 +107,7 @@ plus global, language, source-bucket, dialect, and length-bin metrics.
 | Tokenizers, checkpoints, predictions | Cluster experiment output | No |
 | Experiment configuration and job graph | Reproducibility record | Yes |
 
-## Legacy Boundary
-
-`processed_corpora/`, `scripts/mt/`, historical Slurm submitters, DAE/LoRA code,
-and the May model cards remain intentionally. They reproduce earlier papers and
-architecture searches. New production work should use the named corpus builder,
-`in_domain_hard`, `configs/default_experiment.json`, and
-`submit_v1_spm8k_directional.sh`.
+Historical model implementations and generated training formats remain
+recoverable from Git history rather than occupying the active tree. The
+repository itself contains only the named corpus builder and production SPM8k
+experiment path.

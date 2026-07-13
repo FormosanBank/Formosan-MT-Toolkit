@@ -4,11 +4,8 @@ line-length = 120
 extend-exclude = [
   "corpus_builds",
   "downloaded_*",
-  "processed_corpora",
   "protected_corpora",
   "scripts/.formosan_qc_repo",
-  "scripts/.formosan_qc_scripts",
-  "scripts/local/scripts/.formosan_qc_scripts",
 ]
 
 [tool.ruff.lint]

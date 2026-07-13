@@ -44,23 +44,20 @@ Notes:
 """
 
 from __future__ import annotations
+
 import argparse
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
 import unicodedata
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Tuple, Set, Iterable, Optional, List
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-import numpy as np
 import pandas as pd
 import torch
-from tqdm.auto import tqdm, trange
-
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -168,7 +165,6 @@ def count_char_frequency(texts: Iterable[str], target_chars: Set[str]) -> Dict[s
 
 # ─────────────────────────── tokenizer surgery (≥4.38) ────────────────────────
 def _safe_reload_with_langs_and_optional_spm(base_tokenizer, new_spm_path, extra_lang_codes):
-    import os, shutil, tempfile
     tmp = tempfile.mkdtemp(prefix="nllb_tok_")
     base_tokenizer.save_pretrained(tmp)
 

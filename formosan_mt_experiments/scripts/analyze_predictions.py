@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize prediction CSVs from the experiment evaluator or legacy eval script."""
+"""Summarize prediction CSVs from the production experiment evaluator."""
 
 from __future__ import annotations
 

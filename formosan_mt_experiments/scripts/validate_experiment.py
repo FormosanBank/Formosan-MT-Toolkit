@@ -141,7 +141,7 @@ def main() -> None:
     parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
     parser.add_argument("--target-col", default=None)
     parser.add_argument("--tokenizer", type=Path, default=None)
-    parser.add_argument("--direction", choices=direction_choices() + ["dae"], default=None)
+    parser.add_argument("--direction", choices=direction_choices(), default=None)
     parser.add_argument("--min-test-ratio", type=float, default=0.075)
     parser.add_argument("--min-validate-ratio", type=float, default=0.025)
     parser.add_argument("--output-json", type=Path, default=None)

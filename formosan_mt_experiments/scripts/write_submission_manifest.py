@@ -97,7 +97,6 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "source_git_commit": args.git_commit,
         "code": build_code_inventory(
             experiment_root=args.experiment_root,
-            setup_implementation=args.setup_implementation,
         ),
         "corpora": {
             "english": corpus_record(corpus_dir, "en"),
@@ -123,7 +122,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(__file__).resolve().parents[1],
     )
-    parser.add_argument("--setup-implementation", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 

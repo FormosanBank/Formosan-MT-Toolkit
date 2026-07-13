@@ -62,16 +62,7 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 TOKENIZER="${TOKENIZER:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_tokenizer}"
 MODEL="${MODEL:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_model}"
-OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/E3_spm8192_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
-
-if [[ "${USE_DAE:-0}" == "1" ]]; then
-  MODEL="${DAE_MODEL:-${SCRATCH}/formosan_mt_experiments/runs/latest_dae/final}"
-fi
-
-LORA_ARGS=()
-if [[ "${LORA_R:-0}" != "0" ]]; then
-  LORA_ARGS+=(--lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA:-32}" --lora-dropout "${LORA_DROPOUT:-0.05}")
-fi
+OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/v1_spm8192_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 mkdir -p "${OUT_DIR}"
 nvidia-smi || true
@@ -103,5 +94,4 @@ srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/train_directional_nllb.py" \
   --early-stopping-start-step "${EARLY_STOPPING_START_STEP:-30000}" \
   --resume-from "${RESUME_FROM:-auto}" \
   --precision bf16 \
-  --device cuda \
-  "${LORA_ARGS[@]}"
+  --device cuda

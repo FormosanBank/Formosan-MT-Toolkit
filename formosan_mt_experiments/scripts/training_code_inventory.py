@@ -9,11 +9,11 @@ from typing import Any
 
 ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
-    "requirements-extras.txt",
     "scripts/build_experiment_splits.py",
     "scripts/evaluate_directional.py",
     "scripts/mt_common.py",
     "scripts/mt_metrics.py",
+    "scripts/setup_formosan_nllb200.py",
     "scripts/setup_tokenizer_sweep.py",
     "scripts/tokenizer_audit.py",
     "scripts/train_directional_nllb.py",
@@ -25,9 +25,6 @@ ACTIVE_EXPERIMENT_FILES = (
     "slurm/submit_v1_spm8k_directional.sh",
     "slurm/train_directional.sl",
     "slurm/validate_corpus.sl",
-)
-SETUP_IMPLEMENTATION_REPOSITORY_PATH = (
-    "scripts/mt/nllb/prelims/setup_formosan_nllb200.py"
 )
 
 
@@ -51,7 +48,6 @@ def artifact_record(deployment_path: Path, repository_path: str) -> dict[str, st
 
 def build_code_inventory(
     experiment_root: Path,
-    setup_implementation: Path,
 ) -> dict[str, Any]:
     experiment_root = experiment_root.resolve()
     artifacts = [
@@ -61,12 +57,6 @@ def build_code_inventory(
         )
         for relative_path in ACTIVE_EXPERIMENT_FILES
     ]
-    artifacts.append(
-        artifact_record(
-            setup_implementation,
-            SETUP_IMPLEMENTATION_REPOSITORY_PATH,
-        )
-    )
     artifacts.sort(key=lambda row: row["repository_path"])
     return {
         "experiment_root": str(experiment_root),

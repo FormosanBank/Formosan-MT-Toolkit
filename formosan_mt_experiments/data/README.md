@@ -9,8 +9,8 @@ Expected generated layout:
 - `runs/`: optional local training outputs. On Andromeda, put runs under `/scratch/$USER/projects/mt/formosan_mt_experiments/runs/`.
 
 Current public/private no-Bible corpora live in ignored named build directories
-under `../../corpus_builds/`. `../../pivot_corpora_final/` and
-`../../protected_corpora/deepl_pivots/` retain an older unscoped pivot snapshot.
+under `../../corpus_builds/`. Paid cache backups live under
+`../../protected_corpora/deepl_pivots/`.
 
 Regenerate a named build's primary tiered splits with:
 

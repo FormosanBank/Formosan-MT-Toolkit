@@ -5,10 +5,6 @@ the final `in_domain_hard` corpus artifacts, validates them independently,
 extends NLLB-200 with an 8k Formosan-aware SentencePiece model, trains one model
 per direction, and evaluates both final and best checkpoints.
 
-The May 2026 E0-E4 sweeps remain in this directory for provenance. Their scores
-and older model cards are historical comparisons, not the active data or
-launcher defaults.
-
 ## Production Experiment
 
 Two corpus scopes are trained independently:
@@ -32,8 +28,8 @@ It records corpus checksums, split totals, code commit, hyperparameters, and all
 validation/setup/training/evaluation job IDs.
 
 New submission manifests also contain a SHA-256 inventory of every active
-launcher, Slurm wrapper, Python module, configuration file, dependency list,
-and tokenizer-setup implementation. Manifest generation fails if any required
+launcher, Slurm wrapper, Python module, configuration file, and tokenizer-setup
+implementation. Manifest generation fails if any required
 code artifact is absent. This makes the code actually deployed to Andromeda
 auditable independently of the Git commit label.
 
@@ -72,9 +68,8 @@ jobs. Tokenizer setup uses `afterok` on those validators, so invalid remote data
 cannot start GPU training.
 
 The tokenizer setup wrapper invokes the versioned implementation at
-`../scripts/mt/nllb/prelims/setup_formosan_nllb200.py`. The Andromeda mirror at
-`/home/$USER/nllb-scripts/` is checksum-pinned by `setup_spm_sweep.sl`, so an
-untracked or stale helper cannot silently alter a flight.
+`scripts/setup_formosan_nllb200.py`. `setup_spm_sweep.sl` checksum-pins that
+file, so an untracked or stale helper cannot silently alter a flight.
 
 ## Input Tags
 
@@ -166,27 +161,13 @@ All resources remain overridable through the launcher's environment variables.
 |---|---|
 | `build_experiment_splits.py` | Connected hard groups, ratio floors, fallbacks, leakage pruning, reports. |
 | `validate_experiment.py` | Independent data contract verification. |
+| `setup_formosan_nllb200.py` | Formosan SentencePiece extension and NLLB embedding initialization. |
 | `setup_tokenizer_sweep.py` | SPM extension, NLLB resize, token audit, smoke generation. |
 | `train_directional_nllb.py` | Sampling, optimization, validation metrics, checkpointing, resume. |
 | `evaluate_directional.py` | Full test generation and global/per-language/source-bin metrics. |
 | `mt_metrics.py` | Shared BLEU/chrF2/TER and diagnostic metric implementation. |
 | `training_code_inventory.py` | Required production-code inventory and SHA-256 provenance. |
 | `slurm/submit_v1_spm8k_directional.sh` | Idempotent production DAG submission and manifest emission. |
-
-## Historical Experiments
-
-The following are retained to reproduce the May 2026 architecture search:
-
-- `legacy_rebuild_robust_mt_splits.py`;
-- `pretrain_dae_nllb.py` and `slurm/pretrain_dae.sl`;
-- `slurm/submit_e2_e3_e4_andromeda.sh`;
-- `slurm/submit_e3_zh_andromeda.sh`;
-- `slurm/train_legacy_multilingual.sl`;
-- `hf_cards/` and `reports/README.md`.
-
-That comparison established SPM8k directional NLLB as the strongest practical
-600M architecture. Its metrics used older data and must not be compared as if
-they were results from the current no-Bible corpora.
 
 ## NLLB Invariants
 
@@ -199,7 +180,7 @@ they were results from the current no-Bible corpora.
 
 ```bash
 python -m unittest discover -s ../tests -v
-ruff check scripts ../scripts/local/*.py ../scripts/local/scripts/pivot ../tests
+ruff check scripts ../scripts/local/*.py ../tests
 python -m compileall -q scripts ../scripts/local ../tests
 bash -n slurm/*.sh slurm/*.sl
 ```

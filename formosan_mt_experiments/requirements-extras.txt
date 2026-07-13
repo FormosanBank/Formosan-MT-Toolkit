@@ -1,2 +1,0 @@
-# Optional for E4 LoRA/PEFT experiments.
-peft>=0.13.0
