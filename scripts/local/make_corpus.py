@@ -13,7 +13,6 @@ from typing import Iterable
 
 from tqdm import tqdm
 
-
 TARGET_MAP: dict[str, set[str]] = {
     "chinese": {"zh", "zho", "chi", "cmn"},
     "english": {"en", "eng"},

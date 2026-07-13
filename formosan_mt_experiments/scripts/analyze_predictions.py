@@ -7,7 +7,6 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
-
 from mt_common import source_bucket, write_json
 
 try:
@@ -55,7 +54,7 @@ def main() -> None:
     parser.add_argument("--output-csv", type=Path, default=None)
     args = parser.parse_args()
 
-    df = pd.read_csv(args.predictions)
+    df = pd.read_csv(args.predictions, low_memory=False)
     if "source_bucket" not in df.columns and "source" in df.columns:
         df["source_bucket"] = df["source"].map(source_bucket)
     if "src_tokens" not in df.columns:

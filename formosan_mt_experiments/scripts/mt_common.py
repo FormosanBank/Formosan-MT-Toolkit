@@ -13,7 +13,6 @@ from typing import Iterable, Mapping
 
 import pandas as pd
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
 
@@ -276,7 +275,9 @@ def require_columns(df: pd.DataFrame, columns: Iterable[str], context: str) -> N
 
 
 def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.DataFrame:
-    df = pd.read_csv(path)
+    # Provenance columns mix empty values and strings. Infer against the whole
+    # file so chunk boundaries cannot change dtypes or emit noisy warnings.
+    df = pd.read_csv(path, low_memory=False)
     require_columns(df, ["lang_code", "formosan_sentence", target_col, "source", "dialect"], str(path))
     df = df.dropna(subset=["lang_code", "formosan_sentence", target_col]).copy()
     df["lang_code"] = df["lang_code"].astype(str).str.strip().str.lower()

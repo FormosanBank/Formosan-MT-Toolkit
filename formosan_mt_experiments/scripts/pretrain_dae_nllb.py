@@ -14,10 +14,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
-from tqdm.auto import trange
-from transformers import Adafactor, AutoModelForSeq2SeqLM, NllbTokenizer, get_constant_schedule_with_warmup
-
 from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
@@ -29,7 +25,20 @@ from mt_common import (
     source_bucket,
     write_json,
 )
-from train_directional_nllb import encode_batch, ensure_control_tags, ensure_lang_token, save_checkpoint
+from torch.amp import GradScaler, autocast
+from tqdm.auto import trange
+from train_directional_nllb import (
+    encode_batch,
+    ensure_control_tags,
+    ensure_lang_token,
+    save_checkpoint,
+)
+from transformers import (
+    Adafactor,
+    AutoModelForSeq2SeqLM,
+    NllbTokenizer,
+    get_constant_schedule_with_warmup,
+)
 
 
 def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:

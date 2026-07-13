@@ -38,7 +38,6 @@ import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-
 DEEPL_MAX_TEXTS_PER_REQUEST = 50
 DEEPL_MAX_REQUEST_BYTES = 128 * 1024
 DEFAULT_SAFE_REQUEST_BYTES = 120 * 1024

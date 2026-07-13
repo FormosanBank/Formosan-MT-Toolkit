@@ -16,10 +16,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
-from tqdm.auto import trange
-from transformers import Adafactor, AutoModelForSeq2SeqLM, NllbTokenizer, get_constant_schedule_with_warmup
-
 from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
@@ -32,12 +28,20 @@ from mt_common import (
     read_parallel_csv,
     source_bucket,
     target_col_for,
-    target_lid_for,
     target_language_from_direction,
+    target_lid_for,
     with_tagged_columns,
     write_json,
 )
 from mt_metrics import score_translations
+from torch.amp import GradScaler, autocast
+from tqdm.auto import trange
+from transformers import (
+    Adafactor,
+    AutoModelForSeq2SeqLM,
+    NllbTokenizer,
+    get_constant_schedule_with_warmup,
+)
 
 
 def ensure_lang_token(tokenizer: NllbTokenizer, code: str) -> int:

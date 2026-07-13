@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-
 from mt_common import (
     DEFAULT_INPUT,
     EASY_BUCKETS,
@@ -38,7 +37,6 @@ from mt_common import (
     target_tag_for,
     write_json,
 )
-
 
 TIERS = ("lexical", "in_domain_hard", "hard_global")
 

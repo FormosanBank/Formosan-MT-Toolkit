@@ -10,9 +10,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from tqdm.auto import tqdm
-from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
-
 from mt_common import (
     FORMOSAN_CODES,
     cjk_token_count,
@@ -23,14 +20,16 @@ from mt_common import (
     read_parallel_csv,
     source_bucket,
     target_col_for,
-    target_lid_for,
     target_language_from_direction,
+    target_lid_for,
     token_count,
     with_tagged_columns,
     write_json,
 )
 from mt_metrics import score_translations
+from tqdm.auto import tqdm
 from train_directional_nllb import ensure_control_tags, ensure_lang_token
+from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
 
 def score(sys_out: list[str], refs: list[str], lowercase: bool = False, bleu_tokenize: str = "13a") -> dict:

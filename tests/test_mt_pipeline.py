@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import pandas as pd
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local/scripts/pivot"))
@@ -15,6 +16,8 @@ from build_experiment_splits import one_edit_conflicts, split_targets  # noqa: E
 from mt_metrics import score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
 from train_directional_nllb import metric_improved  # noqa: E402
+from verify_experiment_manifest import manifest_errors  # noqa: E402
+from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
 
 
 class DeepLKeyDiscoveryTests(unittest.TestCase):
@@ -77,6 +80,62 @@ class TrainingMetricTests(unittest.TestCase):
         self.assertTrue(metric_improved(1.8, 2.0, "mean_token_loss", 0.05))
         self.assertFalse(metric_improved(1.98, 2.0, "mean_token_loss", 0.05))
         self.assertTrue(metric_improved(49.0, 50.0, "TER", 0.05))
+
+
+class ExperimentManifestTests(unittest.TestCase):
+    def test_submission_graph_requires_complete_directional_chain(self) -> None:
+        job_ids = {
+            "validate_en": 1,
+            "validate_zh": 2,
+            "setup_en_spm8192": 3,
+            "setup_zh_spm8192": 4,
+        }
+        next_id = 5
+        for direction in ("f2en", "en2f", "f2zh", "zh2f"):
+            for label in (
+                f"train_{direction}",
+                f"eval_{direction}_final",
+                f"eval_{direction}_best",
+            ):
+                job_ids[label] = next_id
+                next_id += 1
+
+        graph = build_job_graph(job_ids)
+        self.assertEqual(graph["f2en"], [5, 6, 7])
+        self.assertEqual(len({job for chain in graph.values() for job in (chain if isinstance(chain, list) else [chain])}), 16)
+
+    def test_submission_state_rejects_non_numeric_job_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "validate_en.id").write_text("2714139\n", encoding="utf-8")
+            self.assertEqual(read_job_ids(state), {"validate_en": 2714139})
+            (state / "validate_zh.id").write_text("not-a-job\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_job_ids(state)
+
+    def test_tracked_current_manifest_is_arithmetically_complete(self) -> None:
+        path = ROOT / "formosan_mt_experiments/manifests/no_bible_v1_20260712.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest_errors(manifest), [])
+        self.assertEqual(set(manifest["corpora"]), {
+            "public_no_bible_en",
+            "public_no_bible_zh",
+            "private_no_bible_en",
+            "private_no_bible_zh",
+        })
+        for corpus in manifest["corpora"].values():
+            self.assertEqual(sum(corpus["splits"].values()), corpus["rows"])
+            self.assertGreaterEqual(corpus["splits"]["test"] / corpus["rows"], 0.075)
+            self.assertGreaterEqual(corpus["splits"]["validate"] / corpus["rows"], 0.025)
+            self.assertTrue(all(value == 0 for value in corpus["validation"].values()))
+
+        jobs = manifest["jobs"]
+        all_ids: list[int] = []
+        for scope in jobs.values():
+            for value in scope.values():
+                all_ids.extend(value if isinstance(value, list) else [value])
+        self.assertEqual(len(all_ids), 32)
+        self.assertEqual(len(set(all_ids)), 32)
 
 
 if __name__ == "__main__":

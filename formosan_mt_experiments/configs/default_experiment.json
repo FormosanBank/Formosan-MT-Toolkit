@@ -1,18 +1,19 @@
 {
   "project_root": ".",
-  "primary_input": "pivot_corpora_final/big_corpus_en.csv",
+  "corpus_variants": ["public_no_bible", "private_no_bible"],
+  "primary_input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_{target}_in_domain_hard.csv",
   "targets": {
     "english": {
-      "input": "pivot_corpora_final/big_corpus_en.csv",
+      "input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_en_in_domain_hard.csv",
       "target_col": "english_sentence",
       "directions": ["f2en", "en2f"],
-      "selected_recipe": "E3 SPM8k directional for deployable demo; E4 1.3B LoRA for best quality"
+      "selected_recipe": "V1 SPM8k unidirectional NLLB-200"
     },
     "chinese": {
-      "input": "pivot_corpora_final/big_corpus_zh.csv",
+      "input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_zh_in_domain_hard.csv",
       "target_col": "chinese_sentence",
       "directions": ["f2zh", "zh2f"],
-      "selected_recipe": "E3 SPM8k directional"
+      "selected_recipe": "V1 SPM8k unidirectional NLLB-200"
     }
   },
   "splits": {
@@ -27,7 +28,7 @@
   },
   "tokenizer": {
     "mode": "spm",
-    "spm_vocab_sweep": [8192, 16384, 32768],
+    "spm_vocab_sweep": [8192],
     "default_spm_vocab": 8192,
     "chinese_default_spm_vocab": 8192,
     "min_char_frequency": 3,
@@ -45,6 +46,16 @@
     "alpha": 0.5,
     "precision": "bf16",
     "label_smoothing": 0.1,
+    "save_interval": 0,
+    "log_interval": 500,
+    "generation_eval_interval": 10000,
+    "generation_eval_samples_per_language": 128,
+    "generation_eval_batch_size": 16,
+    "validation_beam": 2,
+    "best_metric": "chrF2",
+    "early_stopping_patience": 5,
+    "early_stopping_min_delta": 0.05,
+    "early_stopping_start_step": 30000,
     "f2en_easy_source_weight": 0.05,
     "en2f_easy_source_weight": 0.15,
     "f2zh_easy_source_weight": 0.05,

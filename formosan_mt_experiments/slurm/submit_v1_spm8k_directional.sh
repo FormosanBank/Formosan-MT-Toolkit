@@ -5,12 +5,24 @@ RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
 SCRATCH="${SCRATCH:-/scratch/scheppat/projects/mt}"
 PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
-CORPUS_LABEL="${CORPUS_NAME:-legacy}"
+: "${CORPUS_NAME:?Set CORPUS_NAME to a named corpus such as public_no_bible or private_no_bible}"
+CORPUS_LABEL="${CORPUS_NAME}"
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data/${CORPUS_LABEL}}"
 RUNS_DIR="${RUNS_DIR:-${SCRATCH}/formosan_mt_experiments/runs/${CORPUS_LABEL}}"
 REPORTS_DIR="${REPORTS_DIR:-${SCRATCH}/formosan_mt_experiments/reports/${CORPUS_LABEL}}"
 JOBS_DIR="${JOBS_DIR:-/home/scheppat/jobs/mt}"
 STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${RUN_STAMP}}"
+MANIFEST_DIR="${MANIFEST_DIR:-/projects/prudlab/formosan_mt_experiments}"
+PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
+
+STEPS="${STEPS:-300000}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
+MAX_LENGTH="${MAX_LENGTH:-384}"
+LEARNING_RATE="${LEARNING_RATE:-2e-5}"
+EVAL_INTERVAL="${EVAL_INTERVAL:-10000}"
+EVAL_SAMPLES="${EVAL_SAMPLES:-128}"
+BEST_METRIC="${BEST_METRIC:-chrF2}"
 
 SETUP_SL="${SETUP_SL:-${EXP_DIR}/slurm/setup_spm_sweep.sl}"
 TRAIN_SL="${TRAIN_SL:-${EXP_DIR}/slurm/train_directional.sl}"
@@ -18,6 +30,14 @@ EVAL_SL="${EVAL_SL:-${EXP_DIR}/slurm/evaluate_directional.sl}"
 VALIDATE_SL="${VALIDATE_SL:-${EXP_DIR}/slurm/validate_corpus.sl}"
 
 mkdir -p "${STATE_DIR}"
+
+for short in en zh; do
+  input="${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_${short}_in_domain_hard.csv"
+  provenance="${PROJECT_DATA}/${CORPUS_NAME}/provenance/mt_build_manifest.json"
+  [[ -r "${input}" ]] || { echo "Missing corpus input: ${input}" >&2; exit 1; }
+  [[ -r "${provenance}" ]] || { echo "Missing corpus provenance: ${provenance}" >&2; exit 1; }
+done
+[[ -r "${PROFILE}" ]] || { echo "Missing experiment profile: ${PROFILE}" >&2; exit 1; }
 
 submit_job() {
   local label="$1"
@@ -135,8 +155,8 @@ submit_direction() {
 
   local -a train_args=(
     --job-name="v1_${CORPUS_LABEL}_${direction}"
-    --partition="${TRAIN_PARTITION:-long}"
-    --time="${TRAIN_TIME:-5-00:00:00}"
+    --partition="${TRAIN_PARTITION:-medium}"
+    --time="${TRAIN_TIME:-2-00:00:00}"
     --gres="${TRAIN_GRES:-gpu:1}"
     --constraint="${TRAIN_CONSTRAINT:-vr40g|vr80g|vr144g}"
     --cpus-per-task="${TRAIN_CPUS:-8}"
@@ -146,7 +166,7 @@ submit_direction() {
     train_args+=("${setup_dep}")
   fi
   train_args+=(
-    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=300000,BATCH_SIZE=16,GRAD_ACCUM_STEPS=4,MAX_LENGTH=384,LEARNING_RATE=2e-5,SAVE_INTERVAL=0,EVAL_INTERVAL=10000,EVAL_SAMPLES=128,EVAL_BATCH_SIZE=16,GENERATION_BATCH_SIZE=16,VALIDATION_BEAM=2,VALIDATION_MAX_NEW_TOKENS=256,BEST_METRIC=chrF2,EARLY_STOPPING_PATIENCE=5,EARLY_STOPPING_MIN_DELTA=0.05,EARLY_STOPPING_START_STEP=30000,RESUME_FROM=auto,LOG_INTERVAL=500"
+    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=${STEPS},BATCH_SIZE=${BATCH_SIZE},GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS},MAX_LENGTH=${MAX_LENGTH},LEARNING_RATE=${LEARNING_RATE},SAVE_INTERVAL=0,EVAL_INTERVAL=${EVAL_INTERVAL},EVAL_SAMPLES=${EVAL_SAMPLES},EVAL_BATCH_SIZE=16,GENERATION_BATCH_SIZE=16,VALIDATION_BEAM=2,VALIDATION_MAX_NEW_TOKENS=256,BEST_METRIC=${BEST_METRIC},EARLY_STOPPING_PATIENCE=5,EARLY_STOPPING_MIN_DELTA=0.05,EARLY_STOPPING_START_STEP=30000,RESUME_FROM=auto,LOG_INTERVAL=500"
     "${TRAIN_SL}"
   )
   submit_job "${train_label}" "${train_args[@]}"
@@ -187,5 +207,14 @@ submit_direction english en en2f
 submit_direction chinese zh f2zh
 submit_direction chinese zh zh2f
 
+GIT_COMMIT="${GIT_COMMIT:-$(git -C "${EXP_DIR}" rev-parse HEAD 2>/dev/null || printf unknown)}"
+python -u "${EXP_DIR}/scripts/write_submission_manifest.py" \
+  --corpus-name "${CORPUS_NAME}" \
+  --run-stamp "${RUN_STAMP}" \
+  --git-commit "${GIT_COMMIT}" \
+  --state-dir "${STATE_DIR}" \
+  --project-data "${PROJECT_DATA}" \
+  --profile "${PROFILE}" \
+  --output "${MANIFEST_DIR}/submission_manifest_v1_spm8k_${CORPUS_NAME}_${RUN_STAMP}.json"
 touch "${STATE_DIR}/DONE"
 echo "DONE_SUBMIT RUN_STAMP=${RUN_STAMP} CORPUS_LABEL=${CORPUS_LABEL}"

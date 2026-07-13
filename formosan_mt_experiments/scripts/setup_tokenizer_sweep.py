@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pandas as pd
 import torch
-from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
-
 from mt_common import (
     DEFAULT_INPUT,
     DEFAULT_SETUP_SCRIPT,
@@ -23,6 +21,7 @@ from mt_common import (
     write_json,
 )
 from tokenizer_audit import audit_tokenizer
+from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -138,10 +137,10 @@ def main() -> None:
     setup_input = args.input
     temp_dir_obj = None
     setup_df = None
-    probe = pd.read_csv(args.input, nrows=5)
+    probe = pd.read_csv(args.input, nrows=5, low_memory=False)
     setup_splits = parse_split_list(args.setup_splits)
     if setup_splits and setup_splits != {"all"}:
-        full_df = pd.read_csv(args.input)
+        full_df = pd.read_csv(args.input, low_memory=False)
         if "split" not in full_df.columns:
             raise SystemExit("--setup-splits was set but input has no split column.")
         setup_df = full_df[full_df["split"].astype(str).str.lower().isin(setup_splits)].copy()
@@ -152,7 +151,7 @@ def main() -> None:
         # setup runs. Stage a compatibility copy rather than modifying corpus.
         temp_dir_obj = tempfile.TemporaryDirectory(prefix="formosan_mt_setup_")
         setup_input = Path(temp_dir_obj.name) / "setup_input.csv"
-        df = setup_df if setup_df is not None else pd.read_csv(args.input)
+        df = setup_df if setup_df is not None else pd.read_csv(args.input, low_memory=False)
         if "chinese_sentence" not in df.columns:
             df["chinese_sentence"] = ""
         df.to_csv(setup_input, index=False)

@@ -998,7 +998,7 @@ def validate_split_invariants(df: pd.DataFrame, src_col: str, tgt_col: str) -> N
 
 def load_csv(path: Path) -> pd.DataFrame:
     try:
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, low_memory=False)
         print(f"✅  Loaded {len(df):,} rows from {path}")
         return df
     except Exception as e:

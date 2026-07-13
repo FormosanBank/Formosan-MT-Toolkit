@@ -7,9 +7,15 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+from mt_common import (
+    DEFAULT_INPUT,
+    FORMOSAN_CODES,
+    normalize_target_language,
+    read_parallel_csv,
+    target_col_for,
+    write_json,
+)
 from transformers import NllbTokenizer
-
-from mt_common import DEFAULT_INPUT, FORMOSAN_CODES, normalize_target_language, read_parallel_csv, target_col_for, write_json
 
 
 def audit_tokenizer(

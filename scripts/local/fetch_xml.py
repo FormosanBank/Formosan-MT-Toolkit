@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as fut
-from dataclasses import dataclass
-from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
@@ -42,17 +40,19 @@ import re
 import shutil
 import sys
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import quote
 
 import requests
-import xml.etree.ElementTree as ET
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
-from dotenv import load_dotenv
 
 # Load environment variables from .env file
 # Look for .env in project root (two levels up from this script)

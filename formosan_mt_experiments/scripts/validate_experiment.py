@@ -8,8 +8,6 @@ import math
 from pathlib import Path
 
 import pandas as pd
-from transformers import NllbTokenizer
-
 from build_experiment_splits import one_edit_conflicts
 from mt_common import (
     add_normalized_columns,
@@ -21,6 +19,7 @@ from mt_common import (
     target_col_for,
     write_json,
 )
+from transformers import NllbTokenizer
 
 
 def validate_splits(
