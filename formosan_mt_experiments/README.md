@@ -143,6 +143,10 @@ completed jobs are reused. Failed, canceled, timed-out, preempted, node-failed,
 or out-of-memory jobs are resubmitted, and training automatically resumes from
 its last complete validation checkpoint. Setup reuse requires actual tokenizer
 and model files, not just stale directories.
+Before tokenizer setup, separate CPU jobs independently validate the remote
+English and Chinese corpora for per-language split floors, exact and skeleton
+leakage, one-edit conflicts, and lexeme routing. Setup and all downstream GPU
+jobs require those validators to succeed.
 
 ## E1: Directional MT Training
 

@@ -15,6 +15,7 @@ STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${
 SETUP_SL="${SETUP_SL:-${EXP_DIR}/slurm/setup_spm_sweep.sl}"
 TRAIN_SL="${TRAIN_SL:-${EXP_DIR}/slurm/train_directional.sl}"
 EVAL_SL="${EVAL_SL:-${EXP_DIR}/slurm/evaluate_directional.sl}"
+VALIDATE_SL="${VALIDATE_SL:-${EXP_DIR}/slurm/validate_corpus.sl}"
 
 mkdir -p "${STATE_DIR}"
 
@@ -91,8 +92,22 @@ submit_setup() {
     --time="${SETUP_TIME:-12:00:00}" \
     --cpus-per-task="${SETUP_CPUS:-16}" \
     --mem="${SETUP_MEM:-128G}" \
+    --dependency="afterok:$(job_id "validate_${short}")" \
     --export="$(common_export "${target_lang}"),OUT_DIR=${token_dir},SPM_VOCABS=8192,SETUP_SPLITS=train,validate,BASE_MODEL=facebook/nllb-200-distilled-600M" \
     "${SETUP_SL}"
+}
+
+submit_validation() {
+  local target_lang="$1"
+  local short="$2"
+  submit_job "validate_${short}" \
+    --job-name="v1_${CORPUS_LABEL}_${short}_corpus_validate" \
+    --partition="${VALIDATE_PARTITION:-short}" \
+    --time="${VALIDATE_TIME:-02:00:00}" \
+    --cpus-per-task="${VALIDATE_CPUS:-8}" \
+    --mem="${VALIDATE_MEM:-64G}" \
+    --export="$(common_export "${target_lang}"),MIN_TEST_RATIO=0.075,MIN_VALIDATE_RATIO=0.025" \
+    "${VALIDATE_SL}"
 }
 
 setup_dependency() {
@@ -101,6 +116,8 @@ setup_dependency() {
   local record="${STATE_DIR}/${label}.id"
   if [[ -s "${record}" ]]; then
     printf '%s' "--dependency=afterok:$(job_id "${label}")"
+  else
+    printf '%s' "--dependency=afterok:$(job_id "validate_${short}")"
   fi
 }
 
@@ -158,6 +175,9 @@ echo "STATE_DIR=${STATE_DIR}"
 echo "DATA_DIR=${DATA_DIR}"
 echo "RUNS_DIR=${RUNS_DIR}"
 echo "REPORTS_DIR=${REPORTS_DIR}"
+
+submit_validation english en
+submit_validation chinese zh
 
 submit_setup english en
 submit_setup chinese zh
