@@ -138,7 +138,11 @@ RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
 
 The submitter records accepted job IDs under
 `/home/scheppat/jobs/mt/submission_state_v1_spm8k_<CORPUS_NAME>_<RUN_STAMP>/`
-and is safe to rerun with the same `RUN_STAMP`.
+and is safe to rerun with the same `RUN_STAMP`. Recorded pending, running, or
+completed jobs are reused. Failed, canceled, timed-out, preempted, node-failed,
+or out-of-memory jobs are resubmitted, and training automatically resumes from
+its last complete validation checkpoint. Setup reuse requires actual tokenizer
+and model files, not just stale directories.
 
 ## E1: Directional MT Training
 
@@ -175,6 +179,22 @@ python formosan_mt_experiments/scripts/train_directional_nllb.py \
 Defaults include effective batch size 64, max length 384, learning rate `2e-5`,
 language sampling `alpha=0.5`, label smoothing `0.1`, and easy-source
 downweighting.
+
+Production runs also perform fixed, per-language generation validation every
+10,000 updates. They log corpus and per-language BLEU, chrF2, TER, exact-match,
+empty-output, and output/reference length-ratio diagnostics alongside
+teacher-forced token loss and perplexity. The default best checkpoint is the
+highest validation chrF2 checkpoint; training stops after five evaluations
+without an improvement of at least 0.05 chrF2 after step 30,000. This avoids
+selecting a fluent-looking but worse translator solely from token loss.
+
+Each validation writes an atomic `resume/` checkpoint containing model,
+optimizer, scheduler, scaler, and random-number-generator state. Slurm reruns
+resume it automatically and successful completion removes it, retaining only
+`best/` and `final/`. `train_log.jsonl` includes loss, learning rate, gradient
+norm, throughput, and peak CUDA memory. `eval_log.jsonl` is the authoritative
+validation history. Non-interactive jobs disable the high-frequency progress
+bar to keep Slurm logs compact.
 
 Traditional Chinese directions use the same training code with `--target-lang chinese` and directions `f2zh` / `zh2f`:
 
@@ -266,7 +286,7 @@ Copy this directory to the cluster, then use the templates in `slurm/`. The temp
 - experiment directory: `/home/scheppat/workspace/projects/mt/formosan_mt_experiments`
 - corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_en.csv`
 - Chinese corpus: `/projects/prudlab/formosan_parallel_corpora/big_corpus_zh.csv`
-- outputs: `/scratch/scheppat/formosan_mt_experiments`
+- outputs: `/scratch/scheppat/projects/mt/formosan_mt_experiments`
 
 Override any path with environment variables, for example:
 

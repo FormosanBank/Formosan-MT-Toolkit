@@ -94,6 +94,14 @@ srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/train_directional_nllb.py" \
   --log-interval "${LOG_INTERVAL:-1000}" \
   --eval-samples "${EVAL_SAMPLES:-256}" \
   --eval-batch-size "${EVAL_BATCH_SIZE:-16}" \
+  --generation-batch-size "${GENERATION_BATCH_SIZE:-16}" \
+  --validation-beam "${VALIDATION_BEAM:-2}" \
+  --validation-max-new-tokens "${VALIDATION_MAX_NEW_TOKENS:-256}" \
+  --best-metric "${BEST_METRIC:-chrF2}" \
+  --early-stopping-patience "${EARLY_STOPPING_PATIENCE:-5}" \
+  --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA:-0.05}" \
+  --early-stopping-start-step "${EARLY_STOPPING_START_STEP:-30000}" \
+  --resume-from "${RESUME_FROM:-auto}" \
   --precision bf16 \
   --device cuda \
   "${LORA_ARGS[@]}"

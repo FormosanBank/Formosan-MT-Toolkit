@@ -25,12 +25,26 @@ submit_job() {
   local out
   if [[ -s "${record}" ]]; then
     out="$(<"${record}")"
-    echo "${label}=${out} (existing)"
-  else
-    out="$(sbatch --parsable "$@")"
-    printf '%s\n' "${out}" > "${record}"
-    echo "${label}=${out}"
+    local state
+    state="$(sacct -j "${out}" --starttime 2020-01-01 --noheader --parsable2 --allocations --format=State 2>/dev/null | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+    case "${state}" in
+      PENDING*|RUNNING*|CONFIGURING*|COMPLETING*|COMPLETED*)
+        echo "${label}=${out} (existing state=${state})"
+        return 0
+        ;;
+      FAILED*|CANCELLED*|TIMEOUT*|NODE_FAIL*|OUT_OF_MEMORY*|PREEMPTED*|BOOT_FAIL*|DEADLINE*)
+        echo "${label}=${out} terminal state=${state}; resubmitting" >&2
+        rm -f "${record}"
+        ;;
+      *)
+        echo "Cannot safely classify recorded job ${out} for ${label}; sacct state=${state:-unknown}." >&2
+        exit 1
+        ;;
+    esac
   fi
+  out="$(sbatch --parsable "$@")"
+  printf '%s\n' "${out}" > "${record}"
+  echo "${label}=${out}"
 }
 
 job_id() {
@@ -65,7 +79,9 @@ submit_setup() {
   local tokenizer="${token_dir}/formosan_multilingual_nllb_spm8192_tokenizer"
   local model="${token_dir}/formosan_multilingual_nllb_spm8192_model"
   local label="setup_${short}_spm8192"
-  if [[ -d "${tokenizer}" && -d "${model}" ]]; then
+  if [[ -f "${tokenizer}/tokenizer_config.json" && -f "${tokenizer}/sentencepiece.bpe.model" \
+      && -f "${model}/config.json" ]] \
+      && compgen -G "${model}/model*.safetensors" > /dev/null; then
     echo "${label}=already_exists ${token_dir}"
     return 0
   fi
@@ -113,7 +129,7 @@ submit_direction() {
     train_args+=("${setup_dep}")
   fi
   train_args+=(
-    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=300000,BATCH_SIZE=16,GRAD_ACCUM_STEPS=4,MAX_LENGTH=384,LEARNING_RATE=2e-5,SAVE_INTERVAL=0,EVAL_INTERVAL=25000,EVAL_SAMPLES=256,EVAL_BATCH_SIZE=16"
+    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=300000,BATCH_SIZE=16,GRAD_ACCUM_STEPS=4,MAX_LENGTH=384,LEARNING_RATE=2e-5,SAVE_INTERVAL=0,EVAL_INTERVAL=10000,EVAL_SAMPLES=128,EVAL_BATCH_SIZE=16,GENERATION_BATCH_SIZE=16,VALIDATION_BEAM=2,VALIDATION_MAX_NEW_TOKENS=256,BEST_METRIC=chrF2,EARLY_STOPPING_PATIENCE=5,EARLY_STOPPING_MIN_DELTA=0.05,EARLY_STOPPING_START_STEP=30000,RESUME_FROM=auto,LOG_INTERVAL=500"
     "${TRAIN_SL}"
   )
   submit_job "${train_label}" "${train_args[@]}"

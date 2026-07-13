@@ -29,26 +29,12 @@ from mt_common import (
     with_tagged_columns,
     write_json,
 )
+from mt_metrics import score_translations
 from train_directional_nllb import ensure_control_tags, ensure_lang_token
-
-try:
-    from sacrebleu.metrics import BLEU, CHRF, TER
-    _SACREBLEU_ERROR = None
-except Exception as exc:  # pragma: no cover - exercised only in incomplete envs
-    BLEU = CHRF = TER = None  # type: ignore
-    _SACREBLEU_ERROR = exc
 
 
 def score(sys_out: list[str], refs: list[str], lowercase: bool = False, bleu_tokenize: str = "13a") -> dict:
-    if _SACREBLEU_ERROR is not None:
-        raise SystemExit(f"sacrebleu is required for evaluation: {_SACREBLEU_ERROR}")
-    return {
-        "BLEU": float(
-            BLEU(tokenize=bleu_tokenize, effective_order=True, lowercase=lowercase).corpus_score(sys_out, [refs]).score
-        ),
-        "chrF2": float(CHRF().corpus_score(sys_out, [refs]).score),
-        "TER": float(TER().corpus_score(sys_out, [refs]).score),
-    }
+    return score_translations(sys_out, refs, lowercase=lowercase, bleu_tokenize=bleu_tokenize)
 
 
 def length_bin(tokens: int) -> str:
