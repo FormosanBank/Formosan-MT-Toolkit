@@ -86,6 +86,20 @@ class TrainingMetricTests(unittest.TestCase):
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_submitter_uses_scratch_logs_and_handles_completed_trainers(self) -> None:
+        submitter = (
+            ROOT
+            / "formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'LOGS_DIR="${LOGS_DIR:-${SCRATCH}/formosan_mt_experiments/logs/${RUN_STAMP}}"',
+            submitter,
+        )
+        self.assertIn('--output="${LOGS_DIR}/%x-%j.out"', submitter)
+        self.assertIn('--error="${LOGS_DIR}/%x-%j.err"', submitter)
+        self.assertIn("COMPLETED*)", submitter)
+        self.assertIn('eval_dependency+=(--dependency="afterok:${train_id}")', submitter)
+
     def test_setup_script_checksum_pins_match_source(self) -> None:
         setup = ROOT / "formosan_mt_experiments/scripts/setup_formosan_nllb200.py"
         expected = hashlib.sha256(setup.read_bytes()).hexdigest()

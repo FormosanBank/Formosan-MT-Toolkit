@@ -10,6 +10,7 @@ CORPUS_LABEL="${CORPUS_NAME}"
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data/${CORPUS_LABEL}}"
 RUNS_DIR="${RUNS_DIR:-${SCRATCH}/formosan_mt_experiments/runs/${CORPUS_LABEL}}"
 REPORTS_DIR="${REPORTS_DIR:-${SCRATCH}/formosan_mt_experiments/reports/${CORPUS_LABEL}}"
+LOGS_DIR="${LOGS_DIR:-${SCRATCH}/formosan_mt_experiments/logs/${RUN_STAMP}}"
 JOBS_DIR="${JOBS_DIR:-/home/scheppat/jobs/mt}"
 STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${RUN_STAMP}}"
 MANIFEST_DIR="${MANIFEST_DIR:-/projects/prudlab/formosan_mt_experiments}"
@@ -31,7 +32,7 @@ TRAIN_SL="${TRAIN_SL:-${EXP_DIR}/slurm/train_directional.sl}"
 EVAL_SL="${EVAL_SL:-${EXP_DIR}/slurm/evaluate_directional.sl}"
 VALIDATE_SL="${VALIDATE_SL:-${EXP_DIR}/slurm/validate_corpus.sl}"
 
-mkdir -p "${STATE_DIR}"
+mkdir -p "${STATE_DIR}" "${LOGS_DIR}"
 
 for short in en zh; do
   input="${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_${short}_in_domain_hard.csv"
@@ -74,7 +75,10 @@ submit_job() {
         ;;
     esac
   fi
-  out="$(sbatch --parsable "$@")"
+  out="$(sbatch --parsable \
+    --output="${LOGS_DIR}/%x-%j.out" \
+    --error="${LOGS_DIR}/%x-%j.err" \
+    "$@")"
   printf '%s\n' "${out}" > "${record}"
   echo "${label}=${out}"
 }
@@ -184,6 +188,22 @@ submit_direction() {
 
   local train_id
   train_id="$(job_id "${train_label}")"
+  local train_state
+  train_state="$(sacct -j "${train_id}" --starttime 2020-01-01 --noheader --parsable2 --allocations --format=State 2>/dev/null | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+  local -a eval_dependency=()
+  case "${train_state}" in
+    COMPLETED*)
+      # Slurm can reject afterok dependencies once a completed parent leaves
+      # controller memory, even though sacct still retains its terminal state.
+      ;;
+    PENDING*|RUNNING*|CONFIGURING*|COMPLETING*)
+      eval_dependency+=(--dependency="afterok:${train_id}")
+      ;;
+    *)
+      echo "Cannot submit evaluations for trainer ${train_id}; state=${train_state:-unknown}." >&2
+      exit 1
+      ;;
+  esac
   for checkpoint in final best; do
     submit_job "eval_${direction}_${checkpoint}" \
       --job-name="v1_${CORPUS_LABEL}_${direction}_eval_${checkpoint}" \
@@ -193,7 +213,7 @@ submit_direction() {
       --constraint="${EVAL_CONSTRAINT:-vr40g|vr80g|vr144g}" \
       --cpus-per-task="${EVAL_CPUS:-8}" \
       --mem="${EVAL_MEM:-96G}" \
-      --dependency="afterok:${train_id}" \
+      "${eval_dependency[@]}" \
       --export="$(common_export "${target_lang}" "${direction}"),MODEL=${run_out}/${checkpoint},TOKENIZER=${run_out}/${checkpoint},OUT_DIR=${REPORTS_DIR}/v1_spm8192_${direction}_${checkpoint}_${RUN_STAMP},BATCH_SIZE=16,MAX_LENGTH=384,BEAM=4,MAX_NEW_TOKENS=256" \
       "${EVAL_SL}"
   done
@@ -206,6 +226,7 @@ echo "STATE_DIR=${STATE_DIR}"
 echo "DATA_DIR=${DATA_DIR}"
 echo "RUNS_DIR=${RUNS_DIR}"
 echo "REPORTS_DIR=${REPORTS_DIR}"
+echo "LOGS_DIR=${LOGS_DIR}"
 
 submit_validation english en
 submit_validation chinese zh
