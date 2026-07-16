@@ -155,6 +155,20 @@ Operational defaults match the current flight: `medium`/48h trainers on one
 40GB-or-larger GPU, `short` CPU setup/validation, and `medium`/24h evaluation.
 All resources remain overridable through the launcher's environment variables.
 
+## Hugging Face Publication
+
+`scripts/publish_huggingface_models.py` builds the four standalone Hub packages
+from validation-selected `private_no_bible` best checkpoints and their matching
+hard-test reports. It requires an explicit artifact root, metrics root, tracked
+flight manifest, and output root. `--publish` replaces each existing Hub repo in
+one commit, deletes stale files, and records every published commit and file
+SHA-256 in `release_manifest.json`.
+
+The production publication is recorded in
+[`manifests/huggingface_private_no_bible_20260716.json`](manifests/huggingface_private_no_bible_20260716.json).
+The cards disclose checkpoint selection, split constraints, full global and
+per-language metrics, BLEU tokenization, and synthetic-reference caveats.
+
 ## Script Ownership
 
 | Component | Responsibility |
@@ -167,6 +181,7 @@ All resources remain overridable through the launcher's environment variables.
 | `evaluate_directional.py` | Full test generation and global/per-language/source-bin metrics. |
 | `mt_metrics.py` | Shared BLEU/chrF2/TER and diagnostic metric implementation. |
 | `training_code_inventory.py` | Required production-code inventory and SHA-256 provenance. |
+| `publish_huggingface_models.py` | Builds audited Hub packages and atomically replaces the four production model repos. |
 | `slurm/submit_v1_spm8k_directional.sh` | Idempotent production DAG submission and manifest emission. |
 
 ## NLLB Invariants
