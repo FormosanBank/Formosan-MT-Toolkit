@@ -635,6 +635,102 @@ def write_repair_inventory(
     }
 
 
+def snapshot_translation_versions(
+    corpus_dir: Path,
+) -> dict[str, dict[str, str]]:
+    records: dict[str, dict[str, str]] = {}
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        root = ET.parse(xml_file).getroot()
+        relative = str(xml_file.relative_to(corpus_dir))
+        for parent in root.iter():
+            if parent.tag not in {"S", "W", "M"}:
+                continue
+            token = parent.get(PROVENANCE_ATTR, "")
+            if not token:
+                raise SystemExit(
+                    "Cannot audit TRANSL/@ver without transform "
+                    f"provenance at {relative}:{parent.tag}:"
+                    f"{parent.get('id', '')}"
+                )
+            occurrence = 0
+            for child in parent:
+                if child.tag != "TRANSL":
+                    continue
+                records[f"{token}:TRANSL:{occurrence}"] = {
+                    "xml_path": relative,
+                    "xml_id": parent.get("id", ""),
+                    "element_tag": parent.tag,
+                    "language": xml_lang(child),
+                    "ver": (child.get("ver") or "").strip(),
+                }
+                occurrence += 1
+    return records
+
+
+def classify_translation_version_repairs(
+    before: dict[str, dict[str, str]],
+    after: dict[str, dict[str, str]],
+) -> list[dict[str, object]]:
+    if set(before) != set(after):
+        raise SystemExit(
+            "Translation version completion changed the TRANSL element set"
+        )
+    repairs: list[dict[str, object]] = []
+    for key, before_row in before.items():
+        after_row = after[key]
+        if before_row["ver"] == after_row["ver"]:
+            continue
+        if before_row["ver"] or after_row["ver"] != "alt":
+            raise SystemExit(
+                "Translation version completion made an unexpected "
+                f"change at {before_row['xml_path']}:{before_row['xml_id']}"
+            )
+        repairs.append(
+            {
+                "repair": "mark_alternate_translation",
+                "xml_path": before_row["xml_path"],
+                "element_tag": before_row["element_tag"],
+                "xml_id": before_row["xml_id"],
+                "language": before_row["language"],
+                "before": "",
+                "after": "alt",
+            }
+        )
+    return repairs
+
+
+def run_translation_version_completion(
+    corpus_dir: Path,
+    qc_root: Path,
+    *,
+    log_path: Path,
+) -> tuple[dict[str, int], list[dict[str, object]], dict[str, object]]:
+    before = snapshot_translation_versions(corpus_dir)
+    utility = (
+        qc_root
+        / "QC"
+        / "utilities"
+        / "fix_multiple_translations.py"
+    )
+    log = run_captured_command(
+        [sys.executable, str(utility), "--path", str(corpus_dir)],
+        qc_root,
+        log_path=log_path,
+    )
+    repairs = classify_translation_version_repairs(
+        before,
+        snapshot_translation_versions(corpus_dir),
+    )
+    return (
+        {
+            "translations_scanned": len(before),
+            "alternates_marked": len(repairs),
+        },
+        repairs,
+        log,
+    )
+
+
 def copy_form(source: ET.Element, kind_of: str) -> ET.Element:
     copied = copy.deepcopy(source)
     copied.set("kindOf", kind_of)
@@ -753,11 +849,20 @@ def run_qc_scripts(
         corpus_dir / "html_entities.log",
     ):
         generated.unlink(missing_ok=True)
-    transform_sources = tag_transform_sources(corpus_dir)
-    tier_completion = ensure_standard_tiers(corpus_dir)
-    cleaner_fields_before = snapshot_cleaner_fields(corpus_dir)
     clean_script = qc_root / "QC" / "cleaning" / "clean_xml.py"
+    transform_sources = tag_transform_sources(corpus_dir)
     try:
+        tier_completion = ensure_standard_tiers(corpus_dir)
+        (
+            translation_version_completion,
+            translation_version_repairs,
+            translation_version_log,
+        ) = run_translation_version_completion(
+            corpus_dir,
+            qc_root,
+            log_path=logs_dir / "fix_multiple_translations.log",
+        )
+        cleaner_fields_before = snapshot_cleaner_fields(corpus_dir)
         cleaner = run_cleaner_command(
             [
                 sys.executable,
@@ -801,7 +906,11 @@ def run_qc_scripts(
     )
     repair_inventory = write_repair_inventory(
         corpus_dir,
-        [*dialect_repairs, *structure_repairs],
+        [
+            *translation_version_repairs,
+            *dialect_repairs,
+            *structure_repairs,
+        ],
     )
     standard_audit = audit_standard_tiers(corpus_dir)
 
@@ -849,6 +958,10 @@ def run_qc_scripts(
                 progress.update(1)
     return {
         "tier_completion": tier_completion,
+        "translation_version_completion": (
+            translation_version_completion
+        ),
+        "translation_version_log": translation_version_log,
         "cleaner": cleaner,
         "dialect_completion": dialect_completion,
         "dialect_log": dialect_log,

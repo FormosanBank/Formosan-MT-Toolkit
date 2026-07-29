@@ -25,6 +25,9 @@ RULE_LABELS = {
     "infer_hundred_paiwan_gloss_language_eng": (
         "tag Hundred Paiwan gloss as English"
     ),
+    "mark_alternate_translation": (
+        "mark repeated translation as alternate"
+    ),
     "normalize_dialect_alias": "normalize legacy dialect label",
     "normalize_translation_language_en_to_eng": (
         "normalize translation language en -> eng"

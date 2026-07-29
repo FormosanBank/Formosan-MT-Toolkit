@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts/local"))
 import fetch_xml  # noqa: E402
 from clean_xml import (  # noqa: E402
     audit_standard_tiers,
+    classify_translation_version_repairs,
     ensure_standard_tiers,
     finalize_transform_inventory,
     tag_transform_sources,
@@ -410,6 +411,38 @@ class PipelineReportingTests(unittest.TestCase):
             },
         )
         self.assertEqual(summary["unclassified_examples"], [])
+
+    def test_translation_version_repairs_are_audited(self) -> None:
+        before = {
+            "token:TRANSL:0": {
+                "xml_path": "dictionary.xml",
+                "xml_id": "S1",
+                "element_tag": "S",
+                "language": "eng",
+                "ver": "",
+            },
+        }
+        after = {
+            "token:TRANSL:0": {
+                **before["token:TRANSL:0"],
+                "ver": "alt",
+            },
+        }
+
+        self.assertEqual(
+            classify_translation_version_repairs(before, after),
+            [
+                {
+                    "repair": "mark_alternate_translation",
+                    "xml_path": "dictionary.xml",
+                    "element_tag": "S",
+                    "xml_id": "S1",
+                    "language": "eng",
+                    "before": "",
+                    "after": "alt",
+                },
+            ],
+        )
 
     def test_cleaner_transformations_are_parsed_without_file_noise(
         self,
