@@ -621,7 +621,12 @@ def audit_standard_tiers(corpus_dir: Path) -> dict[str, int | str]:
                 )
             text = "".join(standards[0].itertext()).strip()
             if not text:
-                raise SystemExit(f"Empty standard FORM at {relative}:{parent.tag}:{parent.get('id', '')}")
+                if parent.tag == "S":
+                    raise SystemExit(
+                        f"Empty sentence standard FORM at "
+                        f"{relative}:{parent.tag}:{parent.get('id', '')}"
+                    )
+                stats[f"empty_{parent.tag.lower()}_standard_tiers"] += 1
             stats[f"{parent.tag.lower()}_standard_tiers"] += 1
             signatures.append((relative, parent.tag, parent.get("id", ""), mixed_content_signature(standards[0])))
     stats["standard_tier_digest"] = stable_json_hash(signatures)

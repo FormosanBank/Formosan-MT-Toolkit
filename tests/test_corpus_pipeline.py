@@ -119,6 +119,21 @@ class StandardTierTests(unittest.TestCase):
                 (directory / "sample.xml").read_text(encoding="utf-8"),
             )
 
+    def test_empty_morpheme_standard_is_counted_not_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.write_xml(
+                directory,
+                '<S id="s1"><FORM kindOf="standard">malu</FORM>'
+                '<W id="w1"><FORM kindOf="standard">malu</FORM>'
+                '<M id="m1"><FORM kindOf="standard" />'
+                '<TRANSL xml:lang="zho">零形態</TRANSL></M>'
+                "</W></S>",
+            )
+            stats = audit_standard_tiers(directory)
+            self.assertEqual(stats["empty_m_standard_tiers"], 1)
+            self.assertEqual(stats["m_standard_tiers"], 1)
+
 
 class AcquisitionTests(unittest.TestCase):
     def test_malformed_xml_is_not_a_language_mismatch(self) -> None:
@@ -210,6 +225,34 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 {row.xml_element_index for row in rows},
                 {0, 1},
             )
+
+    def test_extraction_skips_empty_lexical_units_with_accounting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "sample.xml"
+            path.write_text(
+                '<?xml version="1.0"?>'
+                '<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+                'xml:lang="ami"><M id="m1">'
+                '<FORM kindOf="standard" />'
+                '<TRANSL xml:lang="zho">零形態</TRANSL>'
+                "</M></TEXT>",
+                encoding="utf-8",
+            )
+            rows, stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"zho"},
+                tags={"M"},
+            )
+            self.assertEqual(rows, [])
+            self.assertEqual(stats["empty_standard"], 1)
+            self.assertEqual(stats["empty_lexical_units_skipped"], 1)
 
     def test_cleaning_preserves_parentheses_and_structural_sentence_type(self) -> None:
         self.assertEqual(normalize_text("  It is good (today).  ").text, "It is good (today).")
