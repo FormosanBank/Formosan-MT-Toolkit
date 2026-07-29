@@ -1,6 +1,13 @@
 {
+  "schema_version": 2,
+  "recipe_id": "nllb200-spm8k-directional-v2",
+  "corpus_pipeline_version": "formosan-mt-corpus-v2",
   "project_root": ".",
   "corpus_variants": ["public_no_bible", "private_no_bible"],
+  "base_model": {
+    "name": "facebook/nllb-200-distilled-600M",
+    "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d"
+  },
   "primary_input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_{target}_in_domain_hard.csv",
   "targets": {
     "english": {
@@ -22,9 +29,11 @@
     "train_ratio": 0.9,
     "validate_ratio": 0.025,
     "test_ratio": 0.075,
-    "tiers": ["lexical", "in_domain_hard", "hard_global"],
-    "headline_tier": "in_domain_hard",
-    "stress_tier": "hard_global"
+    "min_test_rows": 500,
+    "min_validate_rows": 150,
+    "character_ngram_jaccard_threshold": 0.82,
+    "tiers": ["in_domain_hard"],
+    "headline_tier": "in_domain_hard"
   },
   "tokenizer": {
     "mode": "spm",
@@ -32,7 +41,10 @@
     "default_spm_vocab": 8192,
     "chinese_default_spm_vocab": 8192,
     "min_char_frequency": 3,
-    "max_dialect_tags": 200
+    "max_dialect_tags": 200,
+    "min_dialect_frequency": 3,
+    "training_columns": ["formosan_sentence"],
+    "setup_splits": ["train"]
   },
   "training_defaults": {
     "steps": 300000,
@@ -68,6 +80,9 @@
     "min_new_tokens": 1,
     "no_repeat_ngram_size": 0,
     "repetition_penalty": 1.0,
-    "length_penalty": 1.0
+    "length_penalty": 1.0,
+    "metadata_modes": ["default", "oracle"],
+    "bootstrap_samples": 200,
+    "bootstrap_seed": 42
   }
 }

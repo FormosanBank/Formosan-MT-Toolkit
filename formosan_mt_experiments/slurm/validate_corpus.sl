@@ -31,10 +31,10 @@ esac
 
 INPUT="${INPUT:-${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_${SHORT}_${TIER}.csv}"
 OUTPUT_JSON="${OUTPUT_JSON:-${PROJECT_DATA}/${CORPUS_NAME}/provenance/validate_${SHORT}_${TIER}_runtime.json}"
+PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
 
 srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/validate_experiment.py" \
   --input "${INPUT}" \
+  --profile "${PROFILE}" \
   --target-lang "${TARGET_LANG}" \
-  --min-test-ratio "${MIN_TEST_RATIO:-0.075}" \
-  --min-validate-ratio "${MIN_VALIDATE_RATIO:-0.025}" \
   --output-json "${OUTPUT_JSON}"

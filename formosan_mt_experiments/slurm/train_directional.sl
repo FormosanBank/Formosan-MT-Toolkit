@@ -62,36 +62,57 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 TOKENIZER="${TOKENIZER:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_tokenizer}"
 MODEL="${MODEL:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_model}"
+SETUP_MANIFEST="${SETUP_MANIFEST:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_setup_manifest.json}"
+CORPUS_MANIFEST="${CORPUS_MANIFEST:-${CORPUS_DIR}/provenance/mt_build_manifest.json}"
+VALIDATION_REPORT="${VALIDATION_REPORT:-${CORPUS_DIR}/provenance/validate_${FILE_SHORT}_${TIER}_runtime.json}"
+PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
 OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/v1_spm8192_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 mkdir -p "${OUT_DIR}"
 nvidia-smi || true
 
-srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/train_directional_nllb.py" \
+train_command=(
+  python -u "${EXP_DIR}/scripts/train_directional_nllb.py"
   --input "${INPUT}" \
   --tokenizer "${TOKENIZER}" \
   --model "${MODEL}" \
   --output-dir "${OUT_DIR}" \
+  --profile "${PROFILE}" \
+  --corpus-manifest "${CORPUS_MANIFEST}" \
+  --validation-report "${VALIDATION_REPORT}" \
+  --setup-manifest "${SETUP_MANIFEST}" \
   --target-lang "${TARGET_LANG}" \
   --target-col "${TARGET_COL}" \
   --direction "${DIRECTION}" \
-  --steps "${STEPS:-300000}" \
-  --batch-size "${BATCH_SIZE:-16}" \
-  --grad-accum-steps "${GRAD_ACCUM_STEPS:-4}" \
-  --max-length "${MAX_LENGTH:-384}" \
-  --learning-rate "${LEARNING_RATE:-2e-5}" \
-  --save-interval "${SAVE_INTERVAL:-25000}" \
-  --eval-interval "${EVAL_INTERVAL:-25000}" \
-  --log-interval "${LOG_INTERVAL:-1000}" \
-  --eval-samples "${EVAL_SAMPLES:-256}" \
-  --eval-batch-size "${EVAL_BATCH_SIZE:-16}" \
-  --generation-batch-size "${GENERATION_BATCH_SIZE:-16}" \
-  --validation-beam "${VALIDATION_BEAM:-2}" \
-  --validation-max-new-tokens "${VALIDATION_MAX_NEW_TOKENS:-256}" \
-  --best-metric "${BEST_METRIC:-chrF2}" \
-  --early-stopping-patience "${EARLY_STOPPING_PATIENCE:-5}" \
-  --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA:-0.05}" \
-  --early-stopping-start-step "${EARLY_STOPPING_START_STEP:-30000}" \
-  --resume-from "${RESUME_FROM:-auto}" \
-  --precision bf16 \
   --device cuda
+)
+
+add_override() {
+  local variable="$1"
+  local option="$2"
+  if [[ -n "${!variable:-}" ]]; then
+    train_command+=("${option}" "${!variable}")
+  fi
+}
+
+add_override STEPS --steps
+add_override BATCH_SIZE --batch-size
+add_override GRAD_ACCUM_STEPS --grad-accum-steps
+add_override MAX_LENGTH --max-length
+add_override LEARNING_RATE --learning-rate
+add_override SAVE_INTERVAL --save-interval
+add_override EVAL_INTERVAL --eval-interval
+add_override LOG_INTERVAL --log-interval
+add_override EVAL_SAMPLES --eval-samples
+add_override EVAL_BATCH_SIZE --eval-batch-size
+add_override GENERATION_BATCH_SIZE --generation-batch-size
+add_override VALIDATION_BEAM --validation-beam
+add_override VALIDATION_MAX_NEW_TOKENS --validation-max-new-tokens
+add_override BEST_METRIC --best-metric
+add_override EARLY_STOPPING_PATIENCE --early-stopping-patience
+add_override EARLY_STOPPING_MIN_DELTA --early-stopping-min-delta
+add_override EARLY_STOPPING_START_STEP --early-stopping-start-step
+add_override RESUME_FROM --resume-from
+add_override PRECISION --precision
+
+srun --cpu-bind=cores "${train_command[@]}"

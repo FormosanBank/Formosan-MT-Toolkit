@@ -56,22 +56,50 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 MODEL="${MODEL:?Set MODEL to a trained final/best model directory}"
 TOKENIZER="${TOKENIZER:-${MODEL}}"
+CORPUS_MANIFEST="${CORPUS_MANIFEST:-${CORPUS_DIR}/provenance/mt_build_manifest.json}"
+VALIDATION_REPORT="${VALIDATION_REPORT:-${CORPUS_DIR}/provenance/validate_${FILE_SHORT}_${TIER}_runtime.json}"
+RUN_CONTRACT="${RUN_CONTRACT:?Set RUN_CONTRACT to the trainer run_contract.json}"
+PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
 OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/reports/${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 mkdir -p "${OUT_DIR}"
 nvidia-smi || true
 
-srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/evaluate_directional.py" \
+evaluation_command=(
+  python -u "${EXP_DIR}/scripts/evaluate_directional.py"
   --input "${INPUT}" \
   --tokenizer "${TOKENIZER}" \
   --model "${MODEL}" \
+  --profile "${PROFILE}" \
+  --corpus-manifest "${CORPUS_MANIFEST}" \
+  --validation-report "${VALIDATION_REPORT}" \
+  --run-contract "${RUN_CONTRACT}" \
   --target-lang "${TARGET_LANG}" \
   --target-col "${TARGET_COL}" \
   --direction "${DIRECTION}" \
   --output-csv "${OUT_DIR}/predictions.csv" \
   --output-json "${OUT_DIR}/metrics.json" \
-  --batch-size "${BATCH_SIZE:-16}" \
-  --max-length "${MAX_LENGTH:-384}" \
-  --beam "${BEAM:-4}" \
-  --max-new-tokens "${MAX_NEW_TOKENS:-256}" \
   --device cuda
+)
+
+add_override() {
+  local variable="$1"
+  local option="$2"
+  if [[ -n "${!variable:-}" ]]; then
+    evaluation_command+=("${option}" "${!variable}")
+  fi
+}
+
+add_override BATCH_SIZE --batch-size
+add_override MAX_LENGTH --max-length
+add_override BEAM --beam
+add_override MAX_NEW_TOKENS --max-new-tokens
+add_override MIN_NEW_TOKENS --min-new-tokens
+add_override NO_REPEAT_NGRAM_SIZE --no-repeat-ngram-size
+add_override REPETITION_PENALTY --repetition-penalty
+add_override LENGTH_PENALTY --length-penalty
+add_override METADATA_MODES --metadata-modes
+add_override BOOTSTRAP_SAMPLES --bootstrap-samples
+add_override BOOTSTRAP_SEED --bootstrap-seed
+
+srun --cpu-bind=cores "${evaluation_command[@]}"

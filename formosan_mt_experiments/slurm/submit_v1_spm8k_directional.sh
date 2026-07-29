@@ -16,16 +16,7 @@ STATE_DIR="${STATE_DIR:-${JOBS_DIR}/submission_state_v1_spm8k_${CORPUS_LABEL}_${
 MANIFEST_DIR="${MANIFEST_DIR:-/projects/prudlab/formosan_mt_experiments}"
 PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
 SETUP_IMPLEMENTATION="${SETUP_IMPLEMENTATION:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
-SETUP_IMPLEMENTATION_SHA256="${SETUP_IMPLEMENTATION_SHA256:-89bcb72d8c6b641ddce3a082f22750447cbe0530981ca177c9c91eac0084fa07}"
-
-STEPS="${STEPS:-300000}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
-MAX_LENGTH="${MAX_LENGTH:-384}"
-LEARNING_RATE="${LEARNING_RATE:-2e-5}"
-EVAL_INTERVAL="${EVAL_INTERVAL:-10000}"
-EVAL_SAMPLES="${EVAL_SAMPLES:-128}"
-BEST_METRIC="${BEST_METRIC:-chrF2}"
+SETUP_IMPLEMENTATION_SHA256="${SETUP_IMPLEMENTATION_SHA256:-c0626e187bf33043effb2bdf6f0af9f55b99eb0a0e8763f1805fedb0a7a7f4a3}"
 
 SETUP_SL="${SETUP_SL:-${EXP_DIR}/slurm/setup_spm_sweep.sl}"
 TRAIN_SL="${TRAIN_SL:-${EXP_DIR}/slurm/train_directional.sl}"
@@ -96,6 +87,7 @@ common_export() {
     "SCRATCH=${SCRATCH}"
     "PROJECT_DATA=${PROJECT_DATA}"
     "TARGET_LANG=${target_lang}"
+    "PROFILE=${PROFILE}"
   )
   if [[ -n "${CORPUS_NAME:-}" ]]; then
     pieces+=("CORPUS_NAME=${CORPUS_NAME}")
@@ -114,12 +106,21 @@ submit_setup() {
   local token_dir="${DATA_DIR}/tokenizer_sweep_${short}_spm8192"
   local tokenizer="${token_dir}/formosan_multilingual_nllb_spm8192_tokenizer"
   local model="${token_dir}/formosan_multilingual_nllb_spm8192_model"
+  local setup_manifest="${token_dir}/formosan_multilingual_nllb_spm8192_setup_manifest.json"
   local label="setup_${short}_spm8192"
   if [[ -f "${tokenizer}/tokenizer_config.json" && -f "${tokenizer}/sentencepiece.bpe.model" \
-      && -f "${model}/config.json" ]] \
+      && -f "${model}/config.json" && -f "${setup_manifest}" ]] \
       && compgen -G "${model}/model*.safetensors" > /dev/null; then
-    echo "${label}=already_exists ${token_dir}"
-    return 0
+    if python - "${setup_manifest}" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if value.get("complete") is True else 1)
+PY
+    then
+      echo "${label}=already_exists ${token_dir}"
+      return 0
+    fi
   fi
   submit_job "${label}" \
     --job-name="v1_${CORPUS_LABEL}_${short}_spm8192_setup" \
@@ -128,7 +129,7 @@ submit_setup() {
     --cpus-per-task="${SETUP_CPUS:-16}" \
     --mem="${SETUP_MEM:-128G}" \
     --dependency="afterok:$(job_id "validate_${short}")" \
-    --export="$(common_export "${target_lang}"),OUT_DIR=${token_dir},SPM_VOCABS=8192,SETUP_SPLITS=train,validate,BASE_MODEL=facebook/nllb-200-distilled-600M,SETUP_SCRIPT=${SETUP_IMPLEMENTATION},SETUP_SCRIPT_SHA256=${SETUP_IMPLEMENTATION_SHA256}" \
+    --export="$(common_export "${target_lang}"),OUT_DIR=${token_dir},SPM_VOCABS=8192,SETUP_SCRIPT=${SETUP_IMPLEMENTATION},SETUP_SCRIPT_SHA256=${SETUP_IMPLEMENTATION_SHA256}" \
     "${SETUP_SL}"
 }
 
@@ -163,6 +164,9 @@ submit_direction() {
   local token_dir="${DATA_DIR}/tokenizer_sweep_${short}_spm8192"
   local tokenizer="${token_dir}/formosan_multilingual_nllb_spm8192_tokenizer"
   local model="${token_dir}/formosan_multilingual_nllb_spm8192_model"
+  local setup_manifest="${token_dir}/formosan_multilingual_nllb_spm8192_setup_manifest.json"
+  local corpus_manifest="${PROJECT_DATA}/${CORPUS_NAME}/provenance/mt_build_manifest.json"
+  local validation_report="${PROJECT_DATA}/${CORPUS_NAME}/provenance/validate_${short}_in_domain_hard_runtime.json"
   local run_out="${RUNS_DIR}/v1_spm8192_${direction}_${RUN_STAMP}"
   local train_label="train_${direction}"
   local setup_dep
@@ -181,7 +185,7 @@ submit_direction() {
     train_args+=("${setup_dep}")
   fi
   train_args+=(
-    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},OUT_DIR=${run_out},STEPS=${STEPS},BATCH_SIZE=${BATCH_SIZE},GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS},MAX_LENGTH=${MAX_LENGTH},LEARNING_RATE=${LEARNING_RATE},SAVE_INTERVAL=0,EVAL_INTERVAL=${EVAL_INTERVAL},EVAL_SAMPLES=${EVAL_SAMPLES},EVAL_BATCH_SIZE=16,GENERATION_BATCH_SIZE=16,VALIDATION_BEAM=2,VALIDATION_MAX_NEW_TOKENS=256,BEST_METRIC=${BEST_METRIC},EARLY_STOPPING_PATIENCE=5,EARLY_STOPPING_MIN_DELTA=0.05,EARLY_STOPPING_START_STEP=30000,RESUME_FROM=auto,LOG_INTERVAL=500"
+    --export="$(common_export "${target_lang}" "${direction}"),TOKENIZER=${tokenizer},MODEL=${model},SETUP_MANIFEST=${setup_manifest},CORPUS_MANIFEST=${corpus_manifest},VALIDATION_REPORT=${validation_report},OUT_DIR=${run_out}"
     "${TRAIN_SL}"
   )
   submit_job "${train_label}" "${train_args[@]}"
@@ -214,7 +218,7 @@ submit_direction() {
       --cpus-per-task="${EVAL_CPUS:-8}" \
       --mem="${EVAL_MEM:-96G}" \
       "${eval_dependency[@]}" \
-      --export="$(common_export "${target_lang}" "${direction}"),MODEL=${run_out}/${checkpoint},TOKENIZER=${run_out}/${checkpoint},OUT_DIR=${REPORTS_DIR}/v1_spm8192_${direction}_${checkpoint}_${RUN_STAMP},BATCH_SIZE=16,MAX_LENGTH=384,BEAM=4,MAX_NEW_TOKENS=256" \
+      --export="$(common_export "${target_lang}" "${direction}"),MODEL=${run_out}/${checkpoint},TOKENIZER=${run_out}/${checkpoint},CORPUS_MANIFEST=${corpus_manifest},VALIDATION_REPORT=${validation_report},RUN_CONTRACT=${run_out}/run_contract.json,OUT_DIR=${REPORTS_DIR}/v1_spm8192_${direction}_${checkpoint}_${RUN_STAMP}" \
       "${EVAL_SL}"
   done
 }

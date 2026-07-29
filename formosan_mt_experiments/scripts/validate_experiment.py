@@ -11,6 +11,12 @@ from itertools import chain
 from pathlib import Path
 
 import pandas as pd
+from experiment_config import (
+    DEFAULT_PROFILE,
+    load_profile,
+    profile_record,
+    sha256_file,
+)
 from mt_common import (
     build_prefix,
     direction_choices,
@@ -491,7 +497,17 @@ def validate_tags(
 
 
 def parse_args() -> argparse.Namespace:
+    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary.add_argument(
+        "--profile",
+        type=Path,
+        default=DEFAULT_PROFILE,
+    )
+    known, _ = preliminary.parse_known_args()
+    profile = load_profile(known.profile)
+    split_defaults = profile["splits"]
     parser = argparse.ArgumentParser(
+        parents=[preliminary],
         description="Independently validate a release Formosan MT corpus.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -504,11 +520,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-col")
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--direction", choices=direction_choices())
-    parser.add_argument("--min-test-ratio", type=float, default=0.075)
-    parser.add_argument("--min-validate-ratio", type=float, default=0.025)
-    parser.add_argument("--min-test-rows", type=int, default=500)
-    parser.add_argument("--min-validate-rows", type=int, default=150)
-    parser.add_argument("--ngram-jaccard-threshold", type=float, default=0.82)
+    parser.add_argument(
+        "--min-test-ratio",
+        type=float,
+        default=split_defaults["test_ratio"],
+    )
+    parser.add_argument(
+        "--min-validate-ratio",
+        type=float,
+        default=split_defaults["validate_ratio"],
+    )
+    parser.add_argument(
+        "--min-test-rows",
+        type=int,
+        default=split_defaults["min_test_rows"],
+    )
+    parser.add_argument(
+        "--min-validate-rows",
+        type=int,
+        default=split_defaults["min_validate_rows"],
+    )
+    parser.add_argument(
+        "--ngram-jaccard-threshold",
+        type=float,
+        default=split_defaults[
+            "character_ngram_jaccard_threshold"
+        ],
+    )
     parser.add_argument("--report", "--output-json", dest="report", type=Path)
     parser.add_argument(
         "--require-human-eval",
@@ -520,7 +558,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compatibility flag; document disjointness is always required.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.profile = known.profile
+    return args
 
 
 def main() -> None:
@@ -548,8 +588,10 @@ def main() -> None:
         "schema_version": 2,
         "complete": bool(provenance["ok"] and split_validation["ok"]),
         "input": str(args.input),
+        "input_sha256": sha256_file(args.input),
         "target_language": target_lang,
         "target_column": target_col,
+        "profile": profile_record(args.profile),
         "rows": len(frame),
         "provenance_validation": provenance,
         "split_validation": split_validation,

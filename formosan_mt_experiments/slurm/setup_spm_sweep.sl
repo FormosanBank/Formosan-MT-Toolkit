@@ -23,6 +23,7 @@ export HF_HOME="${HF_HOME:-/scratch/scheppat/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
 TARGET_LANG="${TARGET_LANG:-english}"
+PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
 case "${TARGET_LANG}" in
   english)
     TARGET_COL="${TARGET_COL:-english_sentence}"
@@ -50,7 +51,7 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 OUT_DIR="${OUT_DIR:-${DEFAULT_OUT}}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
-SETUP_SCRIPT_SHA256="${SETUP_SCRIPT_SHA256:-89bcb72d8c6b641ddce3a082f22750447cbe0530981ca177c9c91eac0084fa07}"
+SETUP_SCRIPT_SHA256="${SETUP_SCRIPT_SHA256:-c0626e187bf33043effb2bdf6f0af9f55b99eb0a0e8763f1805fedb0a7a7f4a3}"
 
 [[ -r "${SETUP_SCRIPT}" ]] || { echo "Missing NLLB setup implementation: ${SETUP_SCRIPT}" >&2; exit 1; }
 actual_setup_sha256="$(sha256sum "${SETUP_SCRIPT}" | awk '{print $1}')"
@@ -65,11 +66,8 @@ python -u "${EXP_DIR}/scripts/setup_tokenizer_sweep.py" \
   --input "${INPUT}" \
   --target-lang "${TARGET_LANG}" \
   --target-col "${TARGET_COL}" \
+  --profile "${PROFILE}" \
   --setup-script "${SETUP_SCRIPT}" \
-  --base-model "${BASE_MODEL:-facebook/nllb-200-distilled-600M}" \
   --output-dir "${OUT_DIR}" \
   --spm-vocabs "${SPM_VOCABS:-8192}" \
-  --setup-splits "${SETUP_SPLITS:-train,validate,valid,val}" \
-  --min-char-frequency 3 \
-  --run-smoke \
-  --samples-per-lang 1
+  --min-char-frequency "${MIN_CHAR_FREQUENCY:-3}"

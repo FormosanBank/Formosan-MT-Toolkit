@@ -16,6 +16,16 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from experiment_config import (
+    DEFAULT_PROFILE,
+    dependency_versions,
+    git_record,
+    load_profile,
+    manifest_contains_hash,
+    profile_record,
+    sha256_file,
+    stable_hash,
+)
 from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
@@ -73,7 +83,23 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
     df["split"] = df["split"].astype(str).str.lower()
-    df["source_bucket"] = df["source"].map(source_bucket)
+    if "source_bucket" not in df.columns:
+        df["source_bucket"] = df["source"].map(source_bucket)
+    else:
+        df["source_bucket"] = (
+            df["source_bucket"]
+            .astype(str)
+            .replace("", "unknown")
+        )
+    if "kindOf" not in df or not df["kindOf"].astype(str).str.lower().eq("standard").all():
+        raise SystemExit("Training CSV must contain only kindOf=standard rows")
+    if "row_id" not in df or df["row_id"].astype(str).duplicated().any():
+        raise SystemExit("Training CSV must contain unique stable row_id values")
+    unknown_splits = sorted(
+        set(df["split"]) - {"train", "validate", "test"}
+    )
+    if unknown_splits:
+        raise SystemExit(f"Training CSV has unknown splits: {unknown_splits}")
 
     if args.use_tags and args.validate_tags:
         ensure_control_tags(tokenizer, df, args.direction, target_lang=args.target_lang)
@@ -89,6 +115,16 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
     val = df[df["split"].isin(["validate", "valid", "val"])].copy()
     if train.empty:
         raise SystemExit("No train rows found.")
+    if val.empty:
+        raise SystemExit("No human validation rows found")
+    pivot_origin = val.get(
+        "pivot_origin",
+        pd.Series("original", index=val.index),
+    ).astype(str)
+    if pivot_origin.eq("synthetic").any():
+        raise SystemExit("Synthetic rows are forbidden in validation")
+    if not val["row_type"].astype(str).eq("sentence").all():
+        raise SystemExit("Validation must contain sentence rows only")
 
     train_by_lang = {}
     val_by_lang = {}
@@ -131,6 +167,17 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
         "target_lang": args.target_lang,
         "target_col": args.target_col,
         "use_tags": bool(args.use_tags),
+        "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
+        "synthetic_train_rows": int(
+            train.get(
+                "pivot_origin",
+                pd.Series("original", index=train.index),
+            )
+            .astype(str)
+            .eq("synthetic")
+            .sum()
+        ),
+        "synthetic_validate_rows": 0,
         "train_by_language": {k: int(len(v["df"])) for k, v in train_by_lang.items()},
         "validate_by_language": {k: int(len(v["df"])) for k, v in val_by_lang.items()},
     }
@@ -342,50 +389,201 @@ def restore_training_state(path: Path, optimizer, scheduler, scaler) -> dict:
     return state
 
 
+def read_complete_manifest(path: Path, label: str) -> dict:
+    if not path.is_file():
+        raise SystemExit(f"Missing {label}: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Malformed {label} {path}: {exc}") from exc
+    if value.get("complete") is not True:
+        raise SystemExit(f"Incomplete {label}: {path}")
+    return value
+
+
+def verify_setup_artifacts(
+    setup_manifest: dict,
+    tokenizer_dir: Path,
+    model_dir: Path,
+) -> None:
+    for section, directory in (
+        ("tokenizer", tokenizer_dir),
+        ("model", model_dir),
+    ):
+        records = setup_manifest.get(section, {}).get("files", [])
+        if not records:
+            raise SystemExit(f"Setup manifest has no {section} artifacts")
+        for record in records:
+            source_name = Path(str(record.get("path") or "")).name
+            path = directory / source_name
+            if not path.is_file():
+                raise SystemExit(f"Missing setup {section} artifact: {path}")
+            actual = sha256_file(path)
+            if actual != record.get("sha256"):
+                raise SystemExit(
+                    f"Setup {section} checksum mismatch for {path}"
+                )
+
+
+def build_run_contract(args, profile: dict) -> dict:
+    input_hash = sha256_file(args.input)
+    corpus_manifest = read_complete_manifest(
+        args.corpus_manifest,
+        "corpus build manifest",
+    )
+    if (
+        corpus_manifest.get("pipeline_version")
+        != profile["corpus_pipeline_version"]
+    ):
+        raise SystemExit("Corpus pipeline version does not match the recipe")
+    if not manifest_contains_hash(corpus_manifest, input_hash):
+        raise SystemExit(
+            "Training CSV checksum is absent from the corpus build manifest"
+        )
+    validation = read_complete_manifest(
+        args.validation_report,
+        "corpus validation report",
+    )
+    if validation.get("input_sha256") != input_hash:
+        raise SystemExit(
+            "Corpus validation report does not match the training CSV"
+        )
+    setup = read_complete_manifest(
+        args.setup_manifest,
+        "tokenizer setup manifest",
+    )
+    expected_profile = profile_record(args.profile)
+    if (
+        setup.get("recipe_id") != profile["recipe_id"]
+        or setup.get("profile", {}).get("sha256")
+        != expected_profile["sha256"]
+        or setup.get("input", {}).get("sha256") != input_hash
+    ):
+        raise SystemExit(
+            "Tokenizer setup manifest does not match corpus/profile"
+        )
+    verify_setup_artifacts(
+        setup,
+        args.tokenizer,
+        args.model,
+    )
+    hyperparameters = {
+        key: value
+        for key, value in vars(args).items()
+        if key
+        not in {
+            "output_dir",
+            "resume_from",
+            "corpus_manifest",
+            "validation_report",
+            "setup_manifest",
+            "profile",
+        }
+    }
+    return {
+        "schema_version": 2,
+        "complete": True,
+        "recipe_id": profile["recipe_id"],
+        "profile": expected_profile,
+        "input": {
+            "path": str(args.input.resolve()),
+            "sha256": input_hash,
+        },
+        "corpus_manifest": {
+            "path": str(args.corpus_manifest.resolve()),
+            "sha256": sha256_file(args.corpus_manifest),
+        },
+        "validation_report": {
+            "path": str(args.validation_report.resolve()),
+            "sha256": sha256_file(args.validation_report),
+        },
+        "setup_manifest": {
+            "path": str(args.setup_manifest.resolve()),
+            "sha256": sha256_file(args.setup_manifest),
+        },
+        "repository": git_record(),
+        "dependencies": dependency_versions(),
+        "hyperparameters": {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in hyperparameters.items()
+        },
+    }
+
+
+def write_or_verify_run_contract(
+    output_dir: Path,
+    contract: dict,
+) -> str:
+    path = output_dir / "run_contract.json"
+    digest = stable_hash(contract)
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if stable_hash(existing) != digest:
+            raise SystemExit(
+                f"Existing run contract does not match this invocation: {path}"
+            )
+    else:
+        write_json(path, contract)
+    return digest
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary.add_argument(
+        "--profile",
+        type=Path,
+        default=DEFAULT_PROFILE,
+    )
+    known, _ = preliminary.parse_known_args()
+    profile = load_profile(known.profile)
+    defaults = profile["training_defaults"]
+    parser = argparse.ArgumentParser(parents=[preliminary])
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--corpus-manifest", type=Path, required=True)
+    parser.add_argument("--validation-report", type=Path, required=True)
+    parser.add_argument("--setup-manifest", type=Path, required=True)
     parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
     parser.add_argument("--target-col", default=None)
     parser.add_argument("--direction", choices=direction_choices(), required=True)
     parser.add_argument("--use-tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--validate-tags", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--steps", type=int, default=300000, help="Optimizer update steps.")
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--grad-accum-steps", type=int, default=4)
-    parser.add_argument("--max-length", type=int, default=384)
-    parser.add_argument("--learning-rate", type=float, default=2e-5)
-    parser.add_argument("--warmup-steps", type=int, default=4000)
-    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--steps", type=int, default=defaults["steps"], help="Optimizer update steps.")
+    parser.add_argument("--batch-size", type=int, default=defaults["batch_size"])
+    parser.add_argument("--grad-accum-steps", type=int, default=defaults["grad_accum_steps"])
+    parser.add_argument("--max-length", type=int, default=defaults["max_length"])
+    parser.add_argument("--learning-rate", type=float, default=defaults["learning_rate"])
+    parser.add_argument("--warmup-steps", type=int, default=defaults["warmup_steps"])
+    parser.add_argument("--weight-decay", type=float, default=defaults["weight_decay"])
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--alpha", type=float, default=0.5, help="Language sampling exponent p(lang) ∝ n^alpha.")
+    parser.add_argument("--alpha", type=float, default=defaults["alpha"], help="Language sampling exponent p(lang) ∝ n^alpha.")
     parser.add_argument("--easy-source-weight", type=float, default=None)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
-    parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument("--label-smoothing", type=float, default=defaults["label_smoothing"])
+    parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default=defaults["precision"])
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--save-interval", type=int, default=10000, help="Checkpoint interval. Use 0 to keep only best/final.")
-    parser.add_argument("--eval-interval", type=int, default=5000)
-    parser.add_argument("--log-interval", type=int, default=1000)
-    parser.add_argument("--eval-samples", type=int, default=512)
-    parser.add_argument("--eval-batch-size", type=int, default=16)
-    parser.add_argument("--generation-batch-size", type=int, default=16)
-    parser.add_argument("--validation-beam", type=int, default=2)
+    parser.add_argument("--save-interval", type=int, default=defaults["save_interval"], help="Checkpoint interval. Use 0 to keep only best/final.")
+    parser.add_argument("--eval-interval", type=int, default=defaults["generation_eval_interval"])
+    parser.add_argument("--log-interval", type=int, default=defaults["log_interval"])
+    parser.add_argument("--eval-samples", type=int, default=defaults["generation_eval_samples_per_language"])
+    parser.add_argument("--eval-batch-size", type=int, default=defaults["generation_eval_batch_size"])
+    parser.add_argument("--generation-batch-size", type=int, default=defaults["generation_eval_batch_size"])
+    parser.add_argument("--validation-beam", type=int, default=defaults["validation_beam"])
     parser.add_argument("--validation-max-new-tokens", type=int, default=256)
     parser.add_argument(
         "--best-metric",
         choices=["chrF2", "BLEU", "TER", "mean_token_loss"],
-        default="chrF2",
+        default=defaults["best_metric"],
         help="Validation metric used for best checkpoint selection and early stopping.",
     )
-    parser.add_argument("--early-stopping-patience", type=int, default=4, help="Evaluations without improvement; 0 disables.")
-    parser.add_argument("--early-stopping-min-delta", type=float, default=0.05)
-    parser.add_argument("--early-stopping-start-step", type=int, default=25000)
+    parser.add_argument("--early-stopping-patience", type=int, default=defaults["early_stopping_patience"], help="Evaluations without improvement; 0 disables.")
+    parser.add_argument("--early-stopping-min-delta", type=float, default=defaults["early_stopping_min_delta"])
+    parser.add_argument("--early-stopping-start-step", type=int, default=defaults["early_stopping_start_step"])
     parser.add_argument("--resume-from", default="auto", help="Checkpoint directory, 'auto', or 'none'.")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    args.profile = known.profile
     args.target_lang = normalize_target_language(args.target_lang, args.target_col)
     args.target_col = args.target_col or target_col_for(args.target_lang)
     args.target_lid = target_lid_for(args.target_lang)
@@ -397,7 +595,9 @@ def main() -> None:
         )
 
     if args.easy_source_weight is None:
-        args.easy_source_weight = 0.05 if is_formosan_to_target(args.direction) else 0.15
+        args.easy_source_weight = float(
+            defaults[f"{args.direction}_easy_source_weight"]
+        )
     if args.eval_interval <= 0:
         raise SystemExit("--eval-interval must be positive because best-model selection requires validation.")
     if args.eval_samples <= 0:
@@ -415,6 +615,13 @@ def main() -> None:
     if device_name == "auto":
         device_name = "cpu"
     device = torch.device(device_name)
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    contract = build_run_contract(args, profile)
+    contract_sha256 = write_or_verify_run_contract(
+        args.output_dir,
+        contract,
+    )
 
     resume_arg = str(args.resume_from).lower()
     resume_path = args.output_dir / "resume" if resume_arg == "auto" else Path(args.resume_from)
@@ -438,11 +645,17 @@ def main() -> None:
         ensure_lang_token(tokenizer, lid)
 
     train_by_lang, val_by_lang, data_report = prepare_data(args, tokenizer)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(args.output_dir / "data_report.json", data_report)
     write_json(args.output_dir / "validation_sample_manifest.json", validation_sample_manifest(val_by_lang, args))
     serializable_args = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
-    write_json(args.output_dir / "run_config.json", serializable_args | {"started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    write_json(
+        args.output_dir / "run_config.json",
+        serializable_args
+        | {
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_contract_sha256": contract_sha256,
+        },
+    )
 
     model.to(device).train()
     optimizer = Adafactor(
@@ -472,6 +685,8 @@ def main() -> None:
     bad_evaluations = 0
     if resume_path is not None:
         restored = restore_training_state(resume_path, optimizer, scheduler, scaler)
+        if restored.pop("run_contract_sha256", None) != contract_sha256:
+            raise SystemExit("Resume checkpoint run contract does not match")
         start_step = int(restored["step"]) + 1
         best_value = restored.get("best_value")
         best_step = restored.get("best_step")
@@ -604,6 +819,7 @@ def main() -> None:
                         "best_metric": args.best_metric,
                         "best_value": best_value,
                         "direction": args.direction,
+                        "run_contract_sha256": contract_sha256,
                         "validation": metrics,
                     },
                 )
@@ -621,6 +837,7 @@ def main() -> None:
                     "best_value": best_value,
                     "best_step": best_step,
                     "bad_evaluations": bad_evaluations,
+                    "run_contract_sha256": contract_sha256,
                 },
             )
             if args.early_stopping_patience > 0 and bad_evaluations >= args.early_stopping_patience:
@@ -637,7 +854,11 @@ def main() -> None:
                 model,
                 tokenizer,
                 args.output_dir / "checkpoints" / f"step-{step:06d}",
-                {"step": step, "direction": args.direction},
+                {
+                    "step": step,
+                    "direction": args.direction,
+                    "run_contract_sha256": contract_sha256,
+                },
             )
 
     save_checkpoint(
@@ -652,6 +873,7 @@ def main() -> None:
             "best_metric": args.best_metric,
             "best_value": best_value,
             "direction": args.direction,
+            "run_contract_sha256": contract_sha256,
         },
     )
     shutil.rmtree(args.output_dir / "resume", ignore_errors=True)

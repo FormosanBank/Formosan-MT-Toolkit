@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Directional generation/evaluation with metadata-rich prediction outputs."""
+"""Evaluate one directional checkpoint with realistic metadata controls."""
 
 from __future__ import annotations
 
@@ -10,6 +10,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from experiment_config import (
+    DEFAULT_PROFILE,
+    load_profile,
+    manifest_contains_hash,
+    profile_record,
+    sha256_file,
+    stable_hash,
+)
 from mt_common import (
     FORMOSAN_CODES,
     cjk_token_count,
@@ -18,6 +26,7 @@ from mt_common import (
     is_formosan_to_target,
     normalize_target_language,
     read_parallel_csv,
+    safe_tag_value,
     source_bucket,
     target_col_for,
     target_language_from_direction,
@@ -26,14 +35,90 @@ from mt_common import (
     with_tagged_columns,
     write_json,
 )
-from mt_metrics import score_translations
+from mt_metrics import (
+    bootstrap_confidence_intervals,
+    score_translations,
+)
 from tqdm.auto import tqdm
 from train_directional_nllb import ensure_control_tags, ensure_lang_token
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
 
-def score(sys_out: list[str], refs: list[str], lowercase: bool = False, bleu_tokenize: str = "13a") -> dict:
-    return score_translations(sys_out, refs, lowercase=lowercase, bleu_tokenize=bleu_tokenize)
+def read_complete_manifest(path: Path, label: str) -> dict:
+    if not path.is_file():
+        raise SystemExit(f"Missing {label}: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Malformed {label} {path}: {exc}") from exc
+    if value.get("complete") is not True:
+        raise SystemExit(f"Incomplete {label}: {path}")
+    return value
+
+
+def validate_evaluation_contract(
+    args: argparse.Namespace,
+    profile: dict,
+) -> dict[str, object]:
+    input_hash = sha256_file(args.input)
+    corpus = read_complete_manifest(
+        args.corpus_manifest,
+        "corpus manifest",
+    )
+    validation = read_complete_manifest(
+        args.validation_report,
+        "corpus validation report",
+    )
+    run_contract = read_complete_manifest(
+        args.run_contract,
+        "training run contract",
+    )
+    if not manifest_contains_hash(corpus, input_hash):
+        raise SystemExit(
+            "Evaluation CSV checksum is absent from corpus manifest"
+        )
+    if validation.get("input_sha256") != input_hash:
+        raise SystemExit(
+            "Validation report does not match evaluation CSV"
+        )
+    if (
+        run_contract.get("input", {}).get("sha256") != input_hash
+        or run_contract.get("recipe_id") != profile["recipe_id"]
+        or run_contract.get("profile", {}).get("sha256")
+        != profile_record(args.profile)["sha256"]
+    ):
+        raise SystemExit(
+            "Training run contract does not match evaluation inputs"
+        )
+    checkpoint_metadata_path = (
+        args.model / "experiment_metadata.json"
+    )
+    if not checkpoint_metadata_path.is_file():
+        raise SystemExit(
+            f"Checkpoint has no experiment metadata: "
+            f"{checkpoint_metadata_path}"
+        )
+    checkpoint_metadata = json.loads(
+        checkpoint_metadata_path.read_text(encoding="utf-8")
+    )
+    if (
+        checkpoint_metadata.get("run_contract_sha256")
+        != stable_hash(run_contract)
+    ):
+        raise SystemExit(
+            "Checkpoint was not created under the supplied run contract"
+        )
+    return {
+        "input_sha256": input_hash,
+        "corpus_manifest_sha256": sha256_file(args.corpus_manifest),
+        "validation_report_sha256": sha256_file(
+            args.validation_report
+        ),
+        "run_contract_sha256": stable_hash(run_contract),
+        "checkpoint_metadata_sha256": sha256_file(
+            checkpoint_metadata_path
+        ),
+    }
 
 
 def length_bin(tokens: int) -> str:
@@ -48,53 +133,121 @@ def length_bin(tokens: int) -> str:
     return "033_plus"
 
 
-def _lexical_units(text: object, is_chinese: bool) -> list[str]:
+def lexical_units(text: object, is_chinese: bool) -> list[str]:
     if is_chinese:
-        return [ch for ch in str(text) if not ch.isspace()]
-    return str(text).lower().split()
+        return [
+            character
+            for character in str(text)
+            if not character.isspace()
+        ]
+    return str(text).casefold().split()
 
 
 def word_oov_rates(
-    full_df: pd.DataFrame,
-    eval_df: pd.DataFrame,
+    full: pd.DataFrame,
+    evaluation: pd.DataFrame,
+    *,
     direction: str,
     target_col: str,
     target_lang: str,
 ) -> pd.Series:
-    train = full_df[full_df["split"].astype(str).str.lower().eq("train")]
-    col = "formosan_sentence" if is_formosan_to_target(direction) else target_col
-    is_chinese = col == target_col and target_lang == "chinese"
-    vocab_by_lang = {}
-    for lang, sub in train.groupby("lang_code"):
-        vocab = set()
-        for text in sub[col].fillna("").astype(str):
-            vocab.update(_lexical_units(text, is_chinese=is_chinese))
-        vocab_by_lang[lang] = vocab
-
+    train = full[
+        full["split"].astype(str).str.lower().eq("train")
+    ]
+    column = (
+        "formosan_sentence"
+        if is_formosan_to_target(direction)
+        else target_col
+    )
+    is_chinese = (
+        column == target_col
+        and target_lang == "chinese"
+    )
+    vocabularies: dict[str, set[str]] = {}
+    for language, subset in train.groupby("lang_code"):
+        vocabulary: set[str] = set()
+        for text in subset[column].astype(str):
+            vocabulary.update(
+                lexical_units(text, is_chinese=is_chinese)
+            )
+        vocabularies[str(language)] = vocabulary
     rates = []
-    for _, row in eval_df.iterrows():
-        words = _lexical_units(row[col], is_chinese=is_chinese)
-        vocab = vocab_by_lang.get(row["lang_code"], set())
-        if not words:
-            rates.append(0.0)
-        else:
-            rates.append(sum(1 for w in words if w not in vocab) / len(words))
-    return pd.Series(rates, index=eval_df.index)
+    for _, row in evaluation.iterrows():
+        units = lexical_units(
+            row[column],
+            is_chinese=is_chinese,
+        )
+        vocabulary = vocabularies.get(
+            str(row["lang_code"]),
+            set(),
+        )
+        rates.append(
+            sum(unit not in vocabulary for unit in units)
+            / max(len(units), 1)
+        )
+    return pd.Series(rates, index=evaluation.index)
 
 
-def formosan_fragmentation(tokenizer: NllbTokenizer, eval_df: pd.DataFrame, direction: str) -> pd.Series:
-    col = "formosan_sentence"
+def formosan_fragmentation(
+    tokenizer: NllbTokenizer,
+    evaluation: pd.DataFrame,
+) -> pd.Series:
     values = []
-    for text in eval_df[col].fillna("").astype(str):
-        pieces = 0
-        words = 0
-        for word in text.split():
-            if not word:
-                continue
-            words += 1
-            pieces += len(tokenizer.tokenize(word))
-        values.append(float(pieces / max(words, 1)))
-    return pd.Series(values, index=eval_df.index)
+    for text in evaluation["formosan_sentence"].astype(str):
+        words = [word for word in text.split() if word]
+        pieces = sum(
+            len(tokenizer.tokenize(word))
+            for word in words
+        )
+        values.append(pieces / max(len(words), 1))
+    return pd.Series(values, index=evaluation.index)
+
+
+def token_exists(tokenizer: NllbTokenizer, token: str) -> bool:
+    token_id = tokenizer.convert_tokens_to_ids(token)
+    return (
+        token_id != tokenizer.unk_token_id
+        and tokenizer.convert_ids_to_tokens(token_id) == token
+    )
+
+
+def metadata_frame(
+    evaluation: pd.DataFrame,
+    tokenizer: NllbTokenizer,
+    *,
+    mode: str,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    output = evaluation.copy()
+    if mode == "default":
+        output["source_bucket"] = "unknown"
+        output["dialect"] = "default"
+        return output, {
+            "domain_fallback_rows": len(output),
+            "dialect_fallback_rows": len(output),
+        }
+    domain_fallback = 0
+    dialect_fallback = 0
+    buckets = []
+    dialects = []
+    for _, row in output.iterrows():
+        bucket = str(row.get("source_bucket") or "unknown")
+        dialect = str(row.get("dialect") or "default")
+        domain_token = f"<dom_{safe_tag_value(bucket)}>"
+        dialect_token = f"<dialect_{safe_tag_value(dialect)}>"
+        if not token_exists(tokenizer, domain_token):
+            bucket = "unknown"
+            domain_fallback += 1
+        if not token_exists(tokenizer, dialect_token):
+            dialect = "default"
+            dialect_fallback += 1
+        buckets.append(bucket)
+        dialects.append(dialect)
+    output["source_bucket"] = buckets
+    output["dialect"] = dialects
+    return output, {
+        "domain_fallback_rows": domain_fallback,
+        "dialect_fallback_rows": dialect_fallback,
+    }
 
 
 @torch.no_grad()
@@ -102,22 +255,28 @@ def generate(
     tokenizer: NllbTokenizer,
     model,
     texts: list[str],
+    *,
     src_lid: str,
     tgt_lid: str,
     device: torch.device,
-    args,
-    desc: str,
+    args: argparse.Namespace,
+    description: str,
 ) -> list[str]:
     forced_id = ensure_lang_token(tokenizer, tgt_lid)
-    order = np.argsort([-len(t) for t in texts])
+    order = np.argsort([-len(text) for text in texts])
     restore = np.argsort(order)
-    sorted_texts = [texts[i] for i in order]
-    outs = []
-    pbar = tqdm(total=len(texts), desc=desc, unit="ex", dynamic_ncols=True)
+    sorted_texts = [texts[index] for index in order]
+    outputs: list[str] = []
+    progress = tqdm(
+        total=len(texts),
+        desc=description,
+        unit="example",
+        dynamic_ncols=True,
+    )
     for start in range(0, len(sorted_texts), args.batch_size):
         batch = sorted_texts[start : start + args.batch_size]
         tokenizer.src_lang = src_lid
-        enc = tokenizer(
+        encoded = tokenizer(
             batch,
             return_tensors="pt",
             padding=True,
@@ -125,9 +284,12 @@ def generate(
             max_length=args.max_length,
             return_token_type_ids=False,
         )
-        enc = {k: v.to(device) for k, v in enc.items()}
-        gen = model.generate(
-            **enc,
+        encoded = {
+            key: value.to(device)
+            for key, value in encoded.items()
+        }
+        generated = model.generate(
+            **encoded,
             num_beams=args.beam,
             max_new_tokens=args.max_new_tokens,
             min_new_tokens=args.min_new_tokens,
@@ -139,145 +301,403 @@ def generate(
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
         )
-        outs.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
-        pbar.update(len(batch))
-    pbar.close()
-    return [outs[i] for i in restore]
-
-
-def group_scores(preds: pd.DataFrame, group_col: str, lowercase: bool, bleu_tokenize: str) -> dict:
-    if group_col not in preds.columns:
-        return {}
-    out = {}
-    for name, sub in preds.groupby(group_col, dropna=False):
-        if len(sub) == 0:
-            continue
-        out[str(name)] = {"samples": int(len(sub))} | score(
-            sub["hyp"].tolist(),
-            sub["ref"].tolist(),
-            lowercase=lowercase,
-            bleu_tokenize=bleu_tokenize,
+        outputs.extend(
+            tokenizer.batch_decode(
+                generated,
+                skip_special_tokens=True,
+            )
         )
-    return out
+        progress.update(len(batch))
+    progress.close()
+    return [outputs[index] for index in restore]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--tokenizer", type=Path, required=True)
-    parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--output-csv", type=Path, required=True)
-    parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
-    parser.add_argument("--target-col", default=None)
-    parser.add_argument("--direction", choices=direction_choices(), required=True)
-    parser.add_argument("--split", default="test", choices=["test", "validate"])
-    parser.add_argument("--use-tags", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--validate-tags", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--max-length", type=int, default=384)
-    parser.add_argument("--beam", type=int, default=4)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--min-new-tokens", type=int, default=1)
-    parser.add_argument("--no-repeat-ngram-size", type=int, default=0)
-    parser.add_argument("--repetition-penalty", type=float, default=1.0)
-    parser.add_argument("--length-penalty", type=float, default=1.0)
-    parser.add_argument("--limit-per-lang", type=int, default=0)
-    parser.add_argument("--lowercase-bleu", action="store_true")
-    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    args = parser.parse_args()
-    args.target_lang = normalize_target_language(args.target_lang, args.target_col)
-    args.target_col = args.target_col or target_col_for(args.target_lang)
-    args.target_lid = target_lid_for(args.target_lang)
-    direction_target = target_language_from_direction(args.direction, args.target_lang)
-    if direction_target != args.target_lang:
-        raise SystemExit(
-            f"--direction {args.direction!r} targets {direction_target}, "
-            f"but --target-lang is {args.target_lang!r}."
-        )
-
-    raw = read_parallel_csv(args.input, target_col=args.target_col)
-    if "split" not in raw.columns:
-        raise SystemExit("Input CSV must have split column.")
-    raw["split"] = raw["split"].astype(str).str.lower()
-    raw["source_bucket"] = raw["source"].map(source_bucket)
-    eval_raw = raw[raw["split"].eq(args.split)].copy()
-    if eval_raw.empty:
-        raise SystemExit(f"No rows with split={args.split}.")
-    if args.limit_per_lang > 0:
-        sampled_groups = []
-        for _, group in eval_raw.groupby("lang_code", sort=False):
-            sampled_groups.append(group.sample(min(len(group), args.limit_per_lang), random_state=17))
-        eval_raw = pd.concat(sampled_groups, ignore_index=True)
-    tokenizer = NllbTokenizer.from_pretrained(args.tokenizer)
-    eval_raw["_src_oov_rate"] = word_oov_rates(
-        raw,
-        eval_raw,
-        args.direction,
-        target_col=args.target_col,
-        target_lang=args.target_lang,
+def generate_mode(
+    evaluation: pd.DataFrame,
+    tokenizer: NllbTokenizer,
+    model,
+    *,
+    mode: str,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> tuple[pd.Series, dict[str, int]]:
+    metadata, fallback = metadata_frame(
+        evaluation,
+        tokenizer,
+        mode=mode,
     )
-    eval_raw["_formosan_pieces_per_word"] = formosan_fragmentation(tokenizer, eval_raw, args.direction)
     if args.use_tags and args.validate_tags:
-        ensure_control_tags(tokenizer, eval_raw, args.direction, target_lang=args.target_lang)
-    eval_tagged = with_tagged_columns(
-        eval_raw,
+        ensure_control_tags(
+            tokenizer,
+            metadata,
+            args.direction,
+            target_lang=args.target_lang,
+        )
+    tagged = with_tagged_columns(
+        metadata,
         args.direction,
         target_col=args.target_col,
         target_lang=args.target_lang,
         use_tags=args.use_tags,
     )
+    hypotheses = pd.Series("", index=evaluation.index, dtype="object")
+    for language, subset in tagged.groupby(
+        "lang_code",
+        sort=True,
+    ):
+        if language not in FORMOSAN_CODES:
+            continue
+        if is_formosan_to_target(args.direction):
+            src_lid, tgt_lid = get_lid(language), args.target_lid
+            source = subset["formosan_sentence"].astype(str).tolist()
+        else:
+            src_lid, tgt_lid = args.target_lid, get_lid(language)
+            source = subset[args.target_col].astype(str).tolist()
+        hypotheses.loc[subset.index] = generate(
+            tokenizer,
+            model,
+            source,
+            src_lid=src_lid,
+            tgt_lid=tgt_lid,
+            device=device,
+            args=args,
+            description=f"{language} {args.direction} {mode}",
+        )
+    return hypotheses, fallback
 
+
+def group_scores(
+    predictions: pd.DataFrame,
+    group_column: str,
+    *,
+    hypothesis_column: str,
+    lowercase: bool,
+    bleu_tokenize: str,
+) -> dict[str, dict[str, object]]:
+    if group_column not in predictions:
+        return {}
+    return {
+        str(name): {
+            "samples": len(subset),
+            **score_translations(
+                subset[hypothesis_column].tolist(),
+                subset["ref"].tolist(),
+                lowercase=lowercase,
+                bleu_tokenize=bleu_tokenize,
+            ),
+        }
+        for name, subset in predictions.groupby(
+            group_column,
+            dropna=False,
+        )
+        if not subset.empty
+    }
+
+
+def parse_args() -> tuple[argparse.Namespace, dict]:
+    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary.add_argument(
+        "--profile",
+        type=Path,
+        default=DEFAULT_PROFILE,
+    )
+    known, _ = preliminary.parse_known_args()
+    profile = load_profile(known.profile)
+    defaults = profile["generation_defaults"]
+    parser = argparse.ArgumentParser(parents=[preliminary])
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--tokenizer", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--corpus-manifest", type=Path, required=True)
+    parser.add_argument("--validation-report", type=Path, required=True)
+    parser.add_argument("--run-contract", type=Path, required=True)
+    parser.add_argument("--output-csv", type=Path, required=True)
+    parser.add_argument("--output-json", type=Path, required=True)
+    parser.add_argument(
+        "--target-lang",
+        choices=["english", "chinese"],
+        required=True,
+    )
+    parser.add_argument("--target-col")
+    parser.add_argument(
+        "--direction",
+        choices=direction_choices(),
+        required=True,
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        choices=["test", "validate"],
+    )
+    parser.add_argument(
+        "--use-tags",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--validate-tags",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=defaults["max_length"],
+    )
+    parser.add_argument("--beam", type=int, default=defaults["beam"])
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=defaults["max_new_tokens"],
+    )
+    parser.add_argument(
+        "--min-new-tokens",
+        type=int,
+        default=defaults["min_new_tokens"],
+    )
+    parser.add_argument(
+        "--no-repeat-ngram-size",
+        type=int,
+        default=defaults["no_repeat_ngram_size"],
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=defaults["repetition_penalty"],
+    )
+    parser.add_argument(
+        "--length-penalty",
+        type=float,
+        default=defaults["length_penalty"],
+    )
+    parser.add_argument(
+        "--metadata-modes",
+        default=",".join(defaults["metadata_modes"]),
+    )
+    parser.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=defaults["bootstrap_samples"],
+    )
+    parser.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=defaults["bootstrap_seed"],
+    )
+    parser.add_argument("--limit-per-lang", type=int, default=0)
+    parser.add_argument("--lowercase-bleu", action="store_true")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+    )
+    args = parser.parse_args()
+    args.profile = known.profile
+    return args, profile
+
+
+def main() -> None:
+    args, profile = parse_args()
+    args.target_lang = normalize_target_language(
+        args.target_lang,
+        args.target_col,
+    )
+    args.target_col = args.target_col or target_col_for(
+        args.target_lang
+    )
+    args.target_lid = target_lid_for(args.target_lang)
+    if (
+        target_language_from_direction(
+            args.direction,
+            args.target_lang,
+        )
+        != args.target_lang
+    ):
+        raise SystemExit(
+            f"Direction {args.direction} does not target "
+            f"{args.target_lang}"
+        )
+    modes = [
+        value.strip().lower()
+        for value in args.metadata_modes.split(",")
+        if value.strip()
+    ]
+    if not args.use_tags:
+        modes = ["default"]
+    if not modes or set(modes) - {"default", "oracle"}:
+        raise SystemExit(
+            "--metadata-modes must contain default and/or oracle"
+        )
+    if "default" not in modes:
+        raise SystemExit(
+            "Headline evaluation requires default metadata mode"
+        )
+    contract = validate_evaluation_contract(args, profile)
+
+    full = read_parallel_csv(args.input, target_col=args.target_col)
+    if "source_bucket" not in full:
+        full["source_bucket"] = full["source"].map(source_bucket)
+    if (
+        "kindOf" not in full
+        or not full["kindOf"].astype(str).str.lower().eq("standard").all()
+    ):
+        raise SystemExit("Evaluation input contains non-standard rows")
+    evaluation = full[
+        full["split"].astype(str).str.lower().eq(args.split)
+    ].copy()
+    if evaluation.empty:
+        raise SystemExit(f"No rows with split={args.split}")
+    if (
+        evaluation.get(
+            "pivot_origin",
+            pd.Series("original", index=evaluation.index),
+        )
+        .astype(str)
+        .eq("synthetic")
+        .any()
+        or not evaluation["row_type"].astype(str).eq("sentence").all()
+    ):
+        raise SystemExit(
+            "Evaluation rows must be human sentence pairs"
+        )
+    if args.limit_per_lang > 0:
+        evaluation = pd.concat(
+            [
+                group.sample(
+                    min(len(group), args.limit_per_lang),
+                    random_state=17,
+                )
+                for _, group in evaluation.groupby(
+                    "lang_code",
+                    sort=False,
+                )
+            ]
+        ).sort_index()
+
+    tokenizer = NllbTokenizer.from_pretrained(args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model)
     model.config.decoder_start_token_id = tokenizer.eos_token_id
     if getattr(model, "generation_config", None) is not None:
-        model.generation_config.decoder_start_token_id = tokenizer.eos_token_id
-    device_name = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+        model.generation_config.decoder_start_token_id = (
+            tokenizer.eos_token_id
+        )
+    device_name = (
+        "cuda"
+        if args.device == "auto" and torch.cuda.is_available()
+        else args.device
+    )
     if device_name == "auto":
         device_name = "cpu"
     device = torch.device(device_name)
     model.to(device).eval()
 
-    rows = []
-    for lang, sub in eval_tagged.groupby("lang_code", sort=True):
-        if lang not in FORMOSAN_CODES:
-            continue
-        if is_formosan_to_target(args.direction):
-            src_lid, tgt_lid = get_lid(lang), args.target_lid
-            src = sub["formosan_sentence"].astype(str).tolist()
-            ref = sub[args.target_col].astype(str).tolist()
-        else:
-            src_lid, tgt_lid = args.target_lid, get_lid(lang)
-            src = sub[args.target_col].astype(str).tolist()
-            ref = sub["formosan_sentence"].astype(str).tolist()
-        hyp = generate(tokenizer, model, src, src_lid, tgt_lid, device, args, desc=f"{lang} {args.direction}")
-        for idx, (_, original_row) in enumerate(eval_raw.loc[sub.index].iterrows()):
-            rows.append(
-                {
-                    "row_id": original_row.get("row_id", ""),
-                    "lang_code": lang,
-                    "direction": args.direction,
-                    "eval_tier": original_row.get("eval_tier", ""),
-                    "source_bucket": original_row.get("source_bucket", ""),
-                    "source": original_row.get("source", ""),
-                    "dialect": original_row.get("dialect", ""),
-                    "src": src[idx],
-                    "ref": ref[idx],
-                    "hyp": hyp[idx],
-                    "src_tokens": cjk_token_count(src[idx]) if args.target_lang == "chinese" and not is_formosan_to_target(args.direction) else token_count(src[idx]),
-                    "ref_tokens": cjk_token_count(ref[idx]) if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else token_count(ref[idx]),
-                    "src_oov_rate": float(original_row.get("_src_oov_rate", 0.0)),
-                    "formosan_pieces_per_word": float(original_row.get("_formosan_pieces_per_word", 0.0)),
-                }
-            )
+    evaluation["_src_oov_rate"] = word_oov_rates(
+        full,
+        evaluation,
+        direction=args.direction,
+        target_col=args.target_col,
+        target_lang=args.target_lang,
+    )
+    evaluation["_formosan_pieces_per_word"] = (
+        formosan_fragmentation(tokenizer, evaluation)
+    )
+    mode_hypotheses: dict[str, pd.Series] = {}
+    metadata_fallbacks: dict[str, dict[str, int]] = {}
+    for mode in modes:
+        hypotheses, fallback = generate_mode(
+            evaluation,
+            tokenizer,
+            model,
+            mode=mode,
+            device=device,
+            args=args,
+        )
+        mode_hypotheses[mode] = hypotheses
+        metadata_fallbacks[mode] = fallback
 
-    preds = pd.DataFrame(rows)
-    if preds.empty:
-        raise SystemExit("No predictions generated.")
-    preds["length_bin"] = preds["src_tokens"].map(length_bin)
-    bleu_tokenize = "zh" if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else "13a"
-
+    if is_formosan_to_target(args.direction):
+        source = evaluation["formosan_sentence"].astype(str)
+        reference = evaluation[args.target_col].astype(str)
+    else:
+        source = evaluation[args.target_col].astype(str)
+        reference = evaluation["formosan_sentence"].astype(str)
+    predictions = pd.DataFrame(
+        {
+            "row_id": evaluation["row_id"].astype(str),
+            "lang_code": evaluation["lang_code"].astype(str),
+            "direction": args.direction,
+            "eval_tier": evaluation.get("eval_tier", ""),
+            "source_bucket": evaluation["source_bucket"].astype(str),
+            "source": evaluation["source"].astype(str),
+            "dialect": evaluation["dialect"].astype(str),
+            "pivot_origin": evaluation.get("pivot_origin", "original"),
+            "src": source,
+            "ref": reference,
+            "hyp": mode_hypotheses["default"],
+            "src_oov_rate": evaluation["_src_oov_rate"],
+            "formosan_pieces_per_word": evaluation[
+                "_formosan_pieces_per_word"
+            ],
+        },
+        index=evaluation.index,
+    )
+    for mode, hypotheses in mode_hypotheses.items():
+        predictions[f"hyp_{mode}"] = hypotheses
+    predictions["src_tokens"] = [
+        (
+            cjk_token_count(text)
+            if args.target_lang == "chinese"
+            and not is_formosan_to_target(args.direction)
+            else token_count(text)
+        )
+        for text in predictions["src"]
+    ]
+    predictions["ref_tokens"] = [
+        (
+            cjk_token_count(text)
+            if args.target_lang == "chinese"
+            and is_formosan_to_target(args.direction)
+            else token_count(text)
+        )
+        for text in predictions["ref"]
+    ]
+    predictions["length_bin"] = predictions["src_tokens"].map(
+        length_bin
+    )
+    bleu_tokenize = (
+        "zh"
+        if args.target_lang == "chinese"
+        and is_formosan_to_target(args.direction)
+        else "13a"
+    )
+    mode_metrics = {
+        mode: {
+            "samples": len(predictions),
+            **score_translations(
+                predictions[f"hyp_{mode}"].tolist(),
+                predictions["ref"].tolist(),
+                lowercase=args.lowercase_bleu,
+                bleu_tokenize=bleu_tokenize,
+            ),
+        }
+        for mode in modes
+    }
+    primary = mode_metrics["default"]
+    confidence = bootstrap_confidence_intervals(
+        predictions["hyp_default"].tolist(),
+        predictions["ref"].tolist(),
+        strata=predictions["lang_code"].tolist(),
+        samples=args.bootstrap_samples,
+        seed=args.bootstrap_seed,
+        lowercase=args.lowercase_bleu,
+        bleu_tokenize=bleu_tokenize,
+    )
     metrics = {
+        "schema_version": 2,
+        "complete": True,
+        "profile": profile_record(args.profile),
+        "contract": contract,
         "input": str(args.input),
         "model": str(args.model),
         "tokenizer": str(args.tokenizer),
@@ -285,25 +705,45 @@ def main() -> None:
         "target_lang": args.target_lang,
         "bleu_tokenize": bleu_tokenize,
         "split": args.split,
-        "samples": int(len(preds)),
-        "global": {"samples": int(len(preds))}
-        | score(
-            preds["hyp"].tolist(),
-            preds["ref"].tolist(),
+        "samples": len(predictions),
+        "headline_metadata_mode": "default",
+        "global": primary,
+        "metadata_modes": mode_metrics,
+        "metadata_fallbacks": metadata_fallbacks,
+        "bootstrap_95_ci": confidence,
+        "by_language": group_scores(
+            predictions,
+            "lang_code",
+            hypothesis_column="hyp_default",
             lowercase=args.lowercase_bleu,
             bleu_tokenize=bleu_tokenize,
         ),
-        "by_language": group_scores(preds, "lang_code", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize),
         "by_source_bucket": group_scores(
-            preds, "source_bucket", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize
+            predictions,
+            "source_bucket",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
         ),
-        "by_length_bin": group_scores(preds, "length_bin", lowercase=args.lowercase_bleu, bleu_tokenize=bleu_tokenize),
+        "by_dialect": group_scores(
+            predictions,
+            "dialect",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_length_bin": group_scores(
+            predictions,
+            "length_bin",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
     }
-
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    preds.to_csv(args.output_csv, index=False)
+    predictions.to_csv(args.output_csv, index=False)
     write_json(args.output_json, metrics)
-    print(json.dumps(metrics["global"], indent=2))
+    print(json.dumps(primary, indent=2))
     print(f"predictions: {args.output_csv}")
     print(f"metrics: {args.output_json}")
 

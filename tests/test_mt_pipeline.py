@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
@@ -19,9 +20,11 @@ from build_experiment_splits import (  # noqa: E402
     one_edit_conflicts,
     split_targets,
 )
+from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
 from mt_common import add_normalized_columns  # noqa: E402
-from mt_metrics import score_translations  # noqa: E402
+from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
+from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
 from train_directional_nllb import metric_improved  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
 from validate_experiment import validate_provenance, validate_splits  # noqa: E402
@@ -212,6 +215,105 @@ class TrainingMetricTests(unittest.TestCase):
         self.assertTrue(metric_improved(1.8, 2.0, "mean_token_loss", 0.05))
         self.assertFalse(metric_improved(1.98, 2.0, "mean_token_loss", 0.05))
         self.assertTrue(metric_improved(49.0, 50.0, "TER", 0.05))
+
+    def test_bootstrap_intervals_are_deterministic_and_ordered(self) -> None:
+        kwargs = {
+            "hypotheses": ["one", "two", "bad", "four"],
+            "references": ["one", "two", "three", "four"],
+            "strata": ["ami", "ami", "bnn", "bnn"],
+            "samples": 20,
+            "seed": 7,
+        }
+        first = bootstrap_confidence_intervals(**kwargs)
+        second = bootstrap_confidence_intervals(**kwargs)
+        self.assertEqual(first, second)
+        for interval in first["metrics"].values():
+            self.assertLessEqual(interval["lower"], interval["median"])
+            self.assertLessEqual(interval["median"], interval["upper"])
+
+
+class TokenizerSetupTests(unittest.TestCase):
+    def test_recipe_is_pinned_to_train_only_standard_formosan_spm8k(self) -> None:
+        profile = load_profile(DEFAULT_PROFILE)
+        self.assertEqual(profile["tokenizer"]["default_spm_vocab"], 8192)
+        self.assertEqual(profile["tokenizer"]["setup_splits"], ["train"])
+        self.assertEqual(
+            profile["tokenizer"]["training_columns"],
+            ["formosan_sentence"],
+        )
+        self.assertEqual(profile["splits"]["tiers"], ["in_domain_hard"])
+        self.assertEqual(len(profile["base_model"]["revision"]), 40)
+
+    def test_embedding_realignment_uses_token_identity(self) -> None:
+        class Tokenizer:
+            unk_token_id = 0
+
+            def __init__(self, vocab, pieces=None):
+                self.vocab = vocab
+                self.pieces = pieces or {}
+
+            def get_vocab(self):
+                return self.vocab
+
+            def __len__(self):
+                return len(self.vocab)
+
+            def __call__(self, text, **_kwargs):
+                return {"input_ids": self.pieces.get(text, [0])}
+
+        class Model:
+            def __init__(self):
+                self.embedding = torch.nn.Embedding(5, 2)
+                with torch.no_grad():
+                    self.embedding.weight.copy_(
+                        torch.tensor(
+                            [
+                                [0.0, 0.0],
+                                [1.0, 1.0],
+                                [2.0, 2.0],
+                                [3.0, 3.0],
+                                [4.0, 4.0],
+                            ]
+                        )
+                    )
+
+            def get_input_embeddings(self):
+                return self.embedding
+
+            def resize_token_embeddings(self, size):
+                previous = self.embedding.weight.detach().clone()
+                self.embedding = torch.nn.Embedding(size, 2)
+                with torch.no_grad():
+                    self.embedding.weight[: len(previous)].copy_(previous)
+                return self.embedding
+
+            def tie_weights(self):
+                return None
+
+        old = Tokenizer(
+            {"<unk>": 0, "eng_Latn": 1, "shared": 2, "part_a": 3, "part_b": 4},
+            {"newpiece": [3, 4]},
+        )
+        new = Tokenizer(
+            {
+                "shared": 0,
+                "<unk>": 1,
+                "eng_Latn": 2,
+                "newpiece": 3,
+                "ami_Latn": 4,
+                "part_a": 5,
+                "part_b": 6,
+            }
+        )
+        model = Model()
+        report = realign_embeddings(model, old, new, {"ami_Latn"})
+        rows = model.get_input_embeddings().weight.detach()
+        self.assertTrue(torch.equal(rows[0], torch.tensor([2.0, 2.0])))
+        self.assertTrue(torch.equal(rows[3], torch.tensor([3.5, 3.5])))
+        self.assertTrue(torch.equal(rows[4], torch.tensor([1.0, 1.0])))
+        self.assertEqual(report["shared_tokens_realigned"], 5)
+        self.assertEqual(report["new_piece_rows_initialized"], 1)
+        self.assertEqual(report["formosan_language_rows_seeded_from_english"], 1)
 
 
 class ExperimentManifestTests(unittest.TestCase):
