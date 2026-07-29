@@ -274,6 +274,43 @@ class StandardTierTests(unittest.TestCase):
             ):
                 repair_mt_xml_structure(directory)
 
+    def test_invalid_audio_span_is_removed_without_losing_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = self.write_xml(
+                directory,
+                '<S id="s1"><FORM kindOf="standard">qibaq.</FORM>'
+                '<TRANSL xml:lang="eng">Good.</TRANSL>'
+                '<AUDIO file="bad.mp3" start="10.02" end="10.01"/>'
+                '<AUDIO file="good.mp3" start="10.02" end="11.01"/>'
+                "</S>",
+            )
+            tag_transform_sources(directory)
+            stats, repairs, _ = repair_mt_xml_structure(directory)
+            sentence = ET.parse(path).getroot().find("./S")
+            self.assertEqual(
+                [audio.get("file") for audio in sentence.findall("AUDIO")],
+                ["good.mp3"],
+            )
+            self.assertEqual(
+                sentence.find("FORM[@kindOf='standard']").text,
+                "qibaq.",
+            )
+            self.assertEqual(
+                sentence.find("TRANSL").text,
+                "Good.",
+            )
+            self.assertEqual(
+                stats,
+                {"invalid_audio_spans_removed": 1},
+            )
+            self.assertEqual(repairs[0]["repair"], "remove_invalid_audio_span")
+            self.assertEqual(repairs[0]["validator_rule"], "V054")
+            self.assertEqual(repairs[0]["start"], "10.02")
+            self.assertEqual(repairs[0]["end"], "10.01")
+
 
 class PipelineReportingTests(unittest.TestCase):
     def test_cleaner_filename_chatter_is_logged_not_printed(

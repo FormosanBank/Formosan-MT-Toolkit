@@ -40,9 +40,11 @@ metalinguistic slash or parenthetical variants are excluded under `V121`, and
 sentence standards containing the null/elision symbol are excluded under
 `V120`. Forbidden zero-width characters are removed under `V131`. Empty
 sentence units are quarantined wholesale, without falling back to their
-`original` tier. Any empty sentence that survives this repair, substantive
-untyped content, and referenced duplicate IDs remain hard failures. All repairs
-are written to
+`original` tier. Invalid `AUDIO` spans with `end <= start` are removed under
+`V054` without dropping or changing their sentence text; the original audio
+attributes remain in the repair inventory. Any empty sentence that survives
+repair, substantive untyped content, and referenced duplicate IDs remain hard
+failures. All repairs are written to
 `_qc_repair_inventory.jsonl`, and validator findings are stored beside the
 cleaned XML rather than in the shared QC checkout.
 

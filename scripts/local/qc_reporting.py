@@ -26,6 +26,7 @@ RULE_LABELS = {
     "remove_empty_source_lexical_unit": "remove empty source lexical unit",
     "remove_empty_source_sentence": "remove empty source sentence",
     "remove_hard_text_annotation": "remove hard source annotation",
+    "remove_invalid_audio_span": "remove invalid audio timestamp span",
     "remove_lexical_annotation": (
         "remove lexical slash/parenthetical annotation"
     ),

@@ -158,6 +158,44 @@ def _standard_form(element: ET.Element) -> ET.Element | None:
     )
 
 
+def _remove_invalid_audio_spans(
+    *,
+    element: ET.Element,
+    relative: str,
+    repairs: list[dict[str, object]],
+) -> int:
+    removed = 0
+    for audio_index, audio in enumerate(
+        list(element.findall("AUDIO"))
+    ):
+        start_raw = (audio.get("start") or "").strip()
+        end_raw = (audio.get("end") or "").strip()
+        try:
+            start = float(start_raw)
+            end = float(end_raw)
+        except ValueError:
+            continue
+        if end > start:
+            continue
+        element.remove(audio)
+        repairs.append(
+            {
+                "repair": "remove_invalid_audio_span",
+                "validator_rule": "V054",
+                "xml_path": relative,
+                "element_tag": element.tag,
+                "xml_id": element.get("id", ""),
+                "audio_index": audio_index,
+                "audio_file": audio.get("file", ""),
+                "audio_url": audio.get("url", ""),
+                "start": start_raw,
+                "end": end_raw,
+            }
+        )
+        removed += 1
+    return removed
+
+
 def repair_mt_xml_structure(
     corpus_dir: Path,
 ) -> tuple[dict[str, int], list[dict[str, object]], dict[str, str]]:
@@ -191,6 +229,16 @@ def repair_mt_xml_structure(
             if element.get(PROVENANCE_ATTR, "") in removal_dispositions:
                 continue
             parent = parent_by_child.get(element)
+
+            if element.tag == "S":
+                invalid_audio = _remove_invalid_audio_spans(
+                    element=element,
+                    relative=relative,
+                    repairs=repairs,
+                )
+                if invalid_audio:
+                    stats["invalid_audio_spans_removed"] += invalid_audio
+                    changed = True
 
             if element.tag == "S" and any(
                 "∅" in "".join(form.itertext())
