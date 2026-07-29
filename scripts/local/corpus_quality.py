@@ -339,6 +339,7 @@ def compact_provenance(row: pd.Series) -> str:
             "repository_commit",
             "xml_path",
             "xml_id",
+            "qc_final_xml_id",
             "target_lang",
             "translation_index",
         )

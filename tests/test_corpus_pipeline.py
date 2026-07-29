@@ -36,6 +36,7 @@ from pivot import (  # noqa: E402
     make_cache_key,
     synthetic_row,
 )
+from xml_repairs import repair_mt_xml_structure  # noqa: E402
 
 
 class StandardTierTests(unittest.TestCase):
@@ -133,6 +134,119 @@ class StandardTierTests(unittest.TestCase):
             stats = audit_standard_tiers(directory)
             self.assertEqual(stats["empty_m_standard_tiers"], 1)
             self.assertEqual(stats["m_standard_tiers"], 1)
+
+    def test_mt_xml_repairs_are_narrow_and_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = self.write_xml(
+                directory,
+                '<S id="duplicate"><FORM kindOf="standard">malu</FORM>'
+                '<TRANSL xml:lang="zho">好</TRANSL>、'
+                '<TRANSL xml:lang="zho" ver="alt">很好</TRANSL></S>'
+                '<S id="duplicate"><FORM kindOf="standard"> masalu </FORM>'
+                '<TRANSL xml:lang="eng">\ufeffhappy</TRANSL></S>'
+                '<M id="empty"><FORM kindOf="standard" />'
+                '<TRANSL xml:lang="zho">零形態</TRANSL></M>'
+                '<S id="annotated"><FORM kindOf="original">*malu</FORM>'
+                '<FORM kindOf="standard">*malu</FORM></S>'
+                '<W id="variant"><FORM kindOf="standard">a/b</FORM></W>'
+                '<S id="null"><FORM kindOf="standard">∅</FORM></S>',
+            )
+            records = tag_transform_sources(directory)
+            stats, repairs, dispositions = repair_mt_xml_structure(
+                directory
+            )
+            inventory = finalize_transform_inventory(
+                directory,
+                records,
+                dispositions,
+            )
+            root = ET.parse(path).getroot()
+            self.assertIsNone(root.find("./M"))
+            self.assertEqual(
+                [sentence.get("id") for sentence in root.findall("./S")],
+                ["duplicate", "duplicate__mtdup2"],
+            )
+            self.assertEqual(
+                stats,
+                {
+                    "untyped_punctuation_removed": 1,
+                    "duplicate_ids_disambiguated": 1,
+                    "empty_source_lexical_units_removed": 1,
+                    "empty_source_lexical_descendants_removed": 1,
+                    "hard_text_annotation_units_removed": 1,
+                    "hard_text_annotation_descendants_removed": 1,
+                    "form_boundary_whitespace_trimmed": 1,
+                    "zero_width_fields_repaired": 1,
+                    "lexical_annotation_units_removed": 1,
+                    "lexical_annotation_descendants_removed": 1,
+                    "null_source_sentences_removed": 1,
+                    "null_source_sentence_descendants_removed": 1,
+                },
+            )
+            self.assertEqual(len(repairs), 8)
+            removed = [
+                row
+                for row in inventory
+                if row["disposition"]
+                == "removed_empty_source_lexical_unit"
+            ]
+            self.assertEqual(len(removed), 1)
+            self.assertEqual(
+                sum(
+                    row["disposition"]
+                    == "removed_hard_text_annotation"
+                    for row in inventory
+                ),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    row["disposition"] == "removed_lexical_annotation"
+                    for row in inventory
+                ),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    row["disposition"] == "removed_null_source_sentence"
+                    for row in inventory
+                ),
+                1,
+            )
+            duplicate = next(
+                row
+                for row in inventory
+                if row.get("final_xml_id") == "duplicate__mtdup2"
+            )
+            self.assertEqual(duplicate["xml_id"], "duplicate")
+            self.assertEqual(
+                root.find(
+                    "./S[@id='duplicate__mtdup2']/FORM"
+                ).text,
+                "masalu",
+            )
+            self.assertEqual(
+                root.find(
+                    "./S[@id='duplicate__mtdup2']/TRANSL"
+                ).text,
+                "happy",
+            )
+
+    def test_mt_xml_repair_rejects_substantive_untyped_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.write_xml(
+                directory,
+                '<S id="s1">untyped words'
+                '<FORM kindOf="standard">malu</FORM></S>',
+            )
+            tag_transform_sources(directory)
+            with self.assertRaisesRegex(
+                SystemExit,
+                "Substantive untyped content",
+            ):
+                repair_mt_xml_structure(directory)
 
 
 class AcquisitionTests(unittest.TestCase):

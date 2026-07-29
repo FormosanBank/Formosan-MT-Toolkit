@@ -30,6 +30,7 @@ CANONICAL_SUFFIX = [
     "xml_path",
     "corpus_id",
     "xml_id",
+    "qc_final_xml_id",
     "xml_element_index",
     "kindOf",
     "standard_origin",

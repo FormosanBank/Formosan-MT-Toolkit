@@ -21,6 +21,7 @@ from pipeline_common import atomic_write_json, load_pipeline_config, sha256_file
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+from xml_repairs import PROVENANCE_ATTR, repair_mt_xml_structure
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG = load_pipeline_config()
@@ -36,8 +37,8 @@ DEFAULT_QC_REVISION = str(FORMOSANBANK_CONFIG["qc_revision"])
 SYNC_PREFIXES = ("QC/", "Orthographies/", "dialects.csv")
 DEFAULT_QC_CACHE = PROJECT_ROOT / "scripts" / ".formosan_qc_repo"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
-PROVENANCE_ATTR = "_mt_toolkit_transform_id"
 TRANSFORM_INVENTORY = "_qc_transform_inventory.jsonl"
+REPAIR_INVENTORY = "_qc_repair_inventory.jsonl"
 
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     "zh": {"zh", "zho", "chi", "cmn"},
@@ -434,7 +435,9 @@ def tag_transform_sources(
 def finalize_transform_inventory(
     corpus_dir: Path,
     records: dict[str, dict[str, object]],
+    removal_dispositions: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
+    removal_dispositions = removal_dispositions or {}
     retained: set[str] = set()
     for xml_file in sorted(corpus_dir.rglob("*.xml")):
         tree = ET.parse(xml_file)
@@ -464,6 +467,7 @@ def finalize_transform_inventory(
             record.update(
                 {
                     "final_element_index": unit_index,
+                    "final_xml_id": element.get("id", ""),
                     "standard_after_qc_sha256": form_sha256(standards[0]),
                     "disposition": "retained",
                 }
@@ -477,8 +481,12 @@ def finalize_transform_inventory(
             record.update(
                 {
                     "final_element_index": None,
+                    "final_xml_id": None,
                     "standard_after_qc_sha256": None,
-                    "disposition": "removed_by_cleaner",
+                    "disposition": removal_dispositions.get(
+                        token,
+                        "removed_by_cleaner",
+                    ),
                 }
             )
     return sorted(
@@ -518,13 +526,98 @@ def write_transform_inventory(
                 )
                 + "\n"
             )
-    retained = sum(row["disposition"] == "retained" for row in rows)
+    dispositions = Counter(str(row["disposition"]) for row in rows)
     return {
         "path": path.name,
         "sha256": sha256_file(path),
         "records": len(rows),
-        "retained": retained,
-        "removed_by_cleaner": len(rows) - retained,
+        "retained": dispositions["retained"],
+        "removed_by_cleaner": dispositions["removed_by_cleaner"],
+        "dispositions": dict(sorted(dispositions.items())),
+    }
+
+
+def run_dialect_completion(
+    corpus_dir: Path,
+    qc_root: Path,
+) -> tuple[dict[str, int], list[dict[str, object]]]:
+    before: dict[str, str] = {}
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        root = ET.parse(xml_file).getroot()
+        before[str(xml_file.relative_to(corpus_dir))] = (
+            root.get("dialect") or ""
+        ).strip()
+
+    utility = qc_root / "QC" / "utilities" / "fix_dialects.py"
+    cmd = [sys.executable, str(utility), "--path", str(corpus_dir)]
+    print("+ " + " ".join(cmd))
+    result = subprocess.run(
+        cmd,
+        cwd=qc_root,
+        env=qc_env(qc_root),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode:
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+
+    repairs: list[dict[str, object]] = []
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        relative = str(xml_file.relative_to(corpus_dir))
+        root = ET.parse(xml_file).getroot()
+        after = (root.get("dialect") or "").strip()
+        if not after:
+            raise SystemExit(
+                f"Pinned dialect completion left TEXT/@dialect empty: {relative}"
+            )
+        if before[relative] != after:
+            repairs.append(
+                {
+                    "repair": "complete_missing_dialect",
+                    "xml_path": relative,
+                    "before": before[relative],
+                    "after": after,
+                }
+            )
+    stats = {
+        "files_scanned": len(before),
+        "dialects_completed": len(repairs),
+        "dialects_preserved": len(before) - len(repairs),
+    }
+    print(
+        "Dialect completion: "
+        f"{stats['dialects_completed']:,} added, "
+        f"{stats['dialects_preserved']:,} preserved"
+    )
+    return stats, repairs
+
+
+def write_repair_inventory(
+    corpus_dir: Path,
+    repairs: list[dict[str, object]],
+) -> dict[str, object]:
+    path = corpus_dir / REPAIR_INVENTORY
+    with path.open("w", encoding="utf-8") as handle:
+        for row in repairs:
+            handle.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    counts = Counter(str(row["repair"]) for row in repairs)
+    return {
+        "path": path.name,
+        "sha256": sha256_file(path),
+        "records": len(repairs),
+        "counts": dict(sorted(counts.items())),
     }
 
 
@@ -662,16 +755,34 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
     except BaseException:
         remove_transform_tags(corpus_dir)
         raise
+    dialect_completion, dialect_repairs = run_dialect_completion(
+        corpus_dir,
+        qc_root,
+    )
+    (
+        mt_structure_repair,
+        structure_repairs,
+        removal_dispositions,
+    ) = repair_mt_xml_structure(corpus_dir)
     transform_inventory = write_transform_inventory(
         corpus_dir,
-        finalize_transform_inventory(corpus_dir, transform_sources),
+        finalize_transform_inventory(
+            corpus_dir,
+            transform_sources,
+            removal_dispositions,
+        ),
+    )
+    repair_inventory = write_repair_inventory(
+        corpus_dir,
+        [*dialect_repairs, *structure_repairs],
     )
     standard_audit = audit_standard_tiers(corpus_dir)
 
-    validators: list[str] = []
+    validators: list[dict[str, object]] = []
     if validate:
         for script_name in ("validate_xml.py", "validate_text.py"):
             validator = qc_root / "QC" / "validation" / script_name
+            findings = corpus_dir / f"_qc_{Path(script_name).stem}_findings.csv"
             run_command(
                 [
                     sys.executable,
@@ -679,13 +790,24 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
                     "by_path",
                     "--path",
                     str(corpus_dir),
+                    "--csv",
+                    str(findings),
                 ],
                 qc_root,
             )
-            validators.append(script_name)
+            validators.append(
+                {
+                    "script": script_name,
+                    "findings": findings.name,
+                    "findings_sha256": sha256_file(findings),
+                }
+            )
     return {
         "tier_completion": tier_completion,
+        "dialect_completion": dialect_completion,
+        "mt_structure_repair": mt_structure_repair,
         "transform_inventory": transform_inventory,
+        "repair_inventory": repair_inventory,
         "standard_audit": standard_audit,
         "validators": validators,
     }

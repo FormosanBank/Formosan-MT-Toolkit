@@ -45,6 +45,7 @@ OUTPUT_COLUMNS = [
     "xml_path",
     "corpus_id",
     "xml_id",
+    "qc_final_xml_id",
     "xml_element_index",
     "kindOf",
     "standard_origin",
@@ -79,6 +80,7 @@ class ExtractedPair:
     xml_path: str
     corpus_id: str
     xml_id: str
+    qc_final_xml_id: str
     xml_element_index: int
     kind_of: str
     standard_origin: str
@@ -219,7 +221,7 @@ def load_qc_inventory(
                 str(row.get("xml_path") or ""),
                 str(row.get("element_tag") or ""),
                 int(row.get("final_element_index")),
-                str(row.get("xml_id") or ""),
+                str(row.get("final_xml_id") or row.get("xml_id") or ""),
             )
             if key in records:
                 raise SystemExit(
@@ -230,6 +232,7 @@ def load_qc_inventory(
                 name: str(row.get(name) or "")
                 for name in (
                     "transform_id",
+                    "xml_id",
                     "standard_origin",
                     "original_before_qc_sha256",
                     "standard_before_qc_sha256",
@@ -290,15 +293,17 @@ def extract_file(
         original = direct_form(element, "original")
         original_text = mixed_text(original) if original is not None else ""
         contains_unclear = any(child.tag == "UNCLEAR" for child in standard.iter())
-        xml_id = (element.get("id") or "").strip()
+        final_xml_id = (element.get("id") or "").strip()
         qc_record = (
-            qc_records.get((relative, element.tag, element_index, xml_id))
+            qc_records.get(
+                (relative, element.tag, element_index, final_xml_id)
+            )
             if qc_records is not None
             else None
         )
         if qc_records is not None and qc_record is None:
             raise ValueError(
-                f"{relative}:{element.tag}:{xml_id} has no QC transform record"
+                f"{relative}:{element.tag}:{final_xml_id} has no QC transform record"
             )
         qc_record = qc_record or {
             "transform_id": "",
@@ -307,6 +312,7 @@ def extract_file(
             "standard_before_qc_sha256": "",
             "standard_after_qc_sha256": "",
         }
+        source_xml_id = qc_record.get("xml_id") or final_xml_id
 
         target_index = 0
         for translation in element.findall("TRANSL"):
@@ -322,7 +328,7 @@ def extract_file(
                 provenance["source_path"],
                 element.tag,
                 element_index,
-                xml_id,
+                source_xml_id,
                 target_language,
                 target_index,
             )
@@ -331,7 +337,7 @@ def extract_file(
                 provenance["source_path"],
                 element.tag,
                 element_index,
-                xml_id,
+                source_xml_id,
             )
             content_hash = sha256_bytes(
                 "\u241f".join(
@@ -357,7 +363,8 @@ def extract_file(
                     repository_commit=provenance["repository_commit"],
                     xml_path=provenance["source_path"],
                     corpus_id=corpus_id,
-                    xml_id=xml_id,
+                    xml_id=source_xml_id,
+                    qc_final_xml_id=final_xml_id,
                     xml_element_index=element_index,
                     kind_of="standard",
                     standard_origin=qc_record["standard_origin"],
