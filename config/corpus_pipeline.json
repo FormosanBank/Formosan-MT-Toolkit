@@ -4,7 +4,7 @@
   "formosanbank": {
     "org": "FormosanBank",
     "repo": "FormosanBank",
-    "qc_revision": "98df3773bf26ae2ef5373cd97e0841762126e61d"
+    "qc_revision": "5b4a42c23fe62f420f766ad9cc4b5236fa61096e"
   },
   "cleaning": {
     "profile": "formosan-mt-v2",
