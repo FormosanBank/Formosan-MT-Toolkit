@@ -32,46 +32,6 @@ def _punctuation_only(text: str) -> bool:
     )
 
 
-def _descendant_tokens(element: ET.Element) -> list[str]:
-    return [
-        child.get(PROVENANCE_ATTR, "")
-        for child in element.iter()
-        if child.tag in {"S", "W", "M"} and child.get(PROVENANCE_ATTR)
-    ]
-
-
-def _remove_unit(
-    *,
-    element: ET.Element,
-    parent: ET.Element | None,
-    relative: str,
-    disposition: str,
-    repair: str,
-    removal_dispositions: dict[str, str],
-    repairs: list[dict[str, object]],
-    validator_rule: str | None = None,
-) -> int:
-    if parent is None:
-        raise SystemExit(
-            f"Cannot remove root {element.tag} unit at {relative}"
-        )
-    tokens = _descendant_tokens(element)
-    parent.remove(element)
-    for token in tokens:
-        removal_dispositions[token] = disposition
-    record: dict[str, object] = {
-        "repair": repair,
-        "xml_path": relative,
-        "element_tag": element.tag,
-        "xml_id": element.get("id", ""),
-        "transform_ids": tokens,
-    }
-    if validator_rule:
-        record["validator_rule"] = validator_rule
-    repairs.append(record)
-    return len(tokens)
-
-
 def _remove_zero_width_characters(
     *,
     element: ET.Element,
@@ -158,48 +118,10 @@ def _standard_form(element: ET.Element) -> ET.Element | None:
     )
 
 
-def _remove_invalid_audio_spans(
-    *,
-    element: ET.Element,
-    relative: str,
-    repairs: list[dict[str, object]],
-) -> int:
-    removed = 0
-    for audio_index, audio in enumerate(
-        list(element.findall("AUDIO"))
-    ):
-        start_raw = (audio.get("start") or "").strip()
-        end_raw = (audio.get("end") or "").strip()
-        try:
-            start = float(start_raw)
-            end = float(end_raw)
-        except ValueError:
-            continue
-        if end > start:
-            continue
-        element.remove(audio)
-        repairs.append(
-            {
-                "repair": "remove_invalid_audio_span",
-                "validator_rule": "V054",
-                "xml_path": relative,
-                "element_tag": element.tag,
-                "xml_id": element.get("id", ""),
-                "audio_index": audio_index,
-                "audio_file": audio.get("file", ""),
-                "audio_url": audio.get("url", ""),
-                "start": start_raw,
-                "end": end_raw,
-            }
-        )
-        removed += 1
-    return removed
-
-
 def repair_mt_xml_structure(
     corpus_dir: Path,
 ) -> tuple[dict[str, int], list[dict[str, object]], dict[str, str]]:
-    """Repair deterministic defects while quarantining unusable MT units."""
+    """Repair deterministic field defects without deleting XML units."""
     stats: Counter[str] = Counter()
     repairs: list[dict[str, object]] = []
     removal_dispositions: dict[str, str] = {}
@@ -208,11 +130,6 @@ def repair_mt_xml_structure(
         tree = ET.parse(xml_file)
         root = tree.getroot()
         relative = str(xml_file.relative_to(corpus_dir))
-        parent_by_child = {
-            child: parent
-            for parent in root.iter()
-            for child in parent
-        }
         changed = False
         seen_ids: set[str] = set()
         duplicate_counts: Counter[str] = Counter()
@@ -228,38 +145,13 @@ def repair_mt_xml_structure(
                 continue
             if element.get(PROVENANCE_ATTR, "") in removal_dispositions:
                 continue
-            parent = parent_by_child.get(element)
-
-            if element.tag == "S":
-                invalid_audio = _remove_invalid_audio_spans(
-                    element=element,
-                    relative=relative,
-                    repairs=repairs,
-                )
-                if invalid_audio:
-                    stats["invalid_audio_spans_removed"] += invalid_audio
-                    changed = True
-
             if element.tag == "S" and any(
                 "∅" in "".join(form.itertext())
                 for form in element.findall("FORM")
                 if (form.get("kindOf") or "").strip().lower()
                 == "standard"
             ):
-                removed = _remove_unit(
-                    element=element,
-                    parent=parent,
-                    relative=relative,
-                    disposition="removed_null_source_sentence",
-                    repair="remove_null_source_sentence",
-                    validator_rule="V120",
-                    removal_dispositions=removal_dispositions,
-                    repairs=repairs,
-                )
-                stats["null_source_sentences_removed"] += 1
-                stats["null_source_sentence_descendants_removed"] += removed
-                changed = True
-                continue
+                stats["null_source_sentences_preserved"] += 1
 
             if any(
                 "*" in "".join(form.itertext())
@@ -267,22 +159,7 @@ def repair_mt_xml_structure(
                 if (form.get("kindOf") or "").strip().lower()
                 in {"original", "standard"}
             ):
-                removed = _remove_unit(
-                    element=element,
-                    parent=parent,
-                    relative=relative,
-                    disposition="removed_hard_text_annotation",
-                    repair="remove_hard_text_annotation",
-                    validator_rule="V129",
-                    removal_dispositions=removal_dispositions,
-                    repairs=repairs,
-                )
-                stats["hard_text_annotation_units_removed"] += 1
-                stats[
-                    "hard_text_annotation_descendants_removed"
-                ] += removed
-                changed = True
-                continue
+                stats["source_annotation_units_preserved"] += 1
 
             zero_width = _remove_zero_width_characters(
                 element=element,
@@ -292,26 +169,6 @@ def repair_mt_xml_structure(
             if zero_width:
                 stats["zero_width_fields_repaired"] += zero_width
                 changed = True
-
-            if element.tag in {"W", "M"} and any(
-                character in "".join(form.itertext())
-                for form in element.findall("FORM")
-                for character in "()/"
-            ):
-                removed = _remove_unit(
-                    element=element,
-                    parent=parent,
-                    relative=relative,
-                    disposition="removed_lexical_annotation",
-                    repair="remove_lexical_annotation",
-                    validator_rule="V121",
-                    removal_dispositions=removal_dispositions,
-                    repairs=repairs,
-                )
-                stats["lexical_annotation_units_removed"] += 1
-                stats["lexical_annotation_descendants_removed"] += removed
-                changed = True
-                continue
 
             boundary_repairs = _trim_form_boundaries(
                 element=element,
@@ -332,47 +189,24 @@ def repair_mt_xml_structure(
             )
             if standard is not None and not standard_text:
                 if element.tag == "S":
-                    removed = _remove_unit(
-                        element=element,
-                        parent=parent,
-                        relative=relative,
-                        disposition="removed_empty_source_sentence",
-                        repair="remove_empty_source_sentence",
-                        removal_dispositions=removal_dispositions,
-                        repairs=repairs,
-                    )
-                    stats["empty_source_sentences_removed"] += 1
-                    stats[
-                        "empty_source_sentence_descendants_removed"
-                    ] += removed
-                    changed = True
-                    continue
-                if element.tag == "W" and any(
-                    "".join(form.itertext()).strip()
-                    for descendant in element.iter("M")
-                    for form in descendant.findall("FORM")
-                    if (form.get("kindOf") or "").strip().lower()
-                    == "standard"
-                ):
-                    raise SystemExit(
-                        "Cannot remove an empty W containing usable morphemes "
-                        f"at {relative}:{element.get('id', '')}"
-                    )
-                removed = _remove_unit(
-                    element=element,
-                    parent=parent,
-                    relative=relative,
-                    disposition="removed_empty_source_lexical_unit",
-                    repair="remove_empty_source_lexical_unit",
-                    removal_dispositions=removal_dispositions,
-                    repairs=repairs,
-                )
-                stats["empty_source_lexical_units_removed"] += 1
-                stats[
-                    "empty_source_lexical_descendants_removed"
-                ] += removed
-                changed = True
-                continue
+                    if standard.find("UNCLEAR") is not None:
+                        stats["unclear_source_sentences_preserved"] += 1
+                    elif element.findall("AUDIO"):
+                        stats[
+                            "untranscribed_audio_sentences_preserved"
+                        ] += 1
+                    else:
+                        stats[
+                            "empty_source_sentences_preserved"
+                        ] += 1
+                else:
+                    stats["empty_source_lexical_units_preserved"] += 1
+            elif (
+                standard is None
+                and element.tag == "S"
+                and element.findall("AUDIO")
+            ):
+                stats["untranscribed_audio_sentences_preserved"] += 1
 
             for owner, text in _direct_content(element):
                 if not _punctuation_only(text):

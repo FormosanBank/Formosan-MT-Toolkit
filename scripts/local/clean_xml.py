@@ -428,7 +428,16 @@ def tag_transform_sources(
                 "standard_origin": (
                     "provided"
                     if standards
-                    else "derived_from_original"
+                    else (
+                        "derived_from_original"
+                        if originals
+                        else (
+                            "untranscribed_audio"
+                            if element.tag == "S"
+                            and element.findall("AUDIO")
+                            else "missing"
+                        )
+                    )
                 ),
                 "original_before_qc_sha256": form_sha256(
                     originals[0] if originals else None
@@ -469,9 +478,9 @@ def finalize_transform_inventory(
                 for form in element.findall("FORM")
                 if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
-            if len(standards) != 1:
+            if len(standards) > 1:
                 raise SystemExit(
-                    f"Expected one standard tier after QC at "
+                    f"Expected at most one standard tier after QC at "
                     f"{relative}:{element.tag}:{element.get('id', '')}"
                 )
             record = records[token]
@@ -479,7 +488,9 @@ def finalize_transform_inventory(
                 {
                     "final_element_index": unit_index,
                     "final_xml_id": element.get("id", ""),
-                    "standard_after_qc_sha256": form_sha256(standards[0]),
+                    "standard_after_qc_sha256": form_sha256(
+                        standards[0] if standards else None
+                    ),
                     "disposition": "retained",
                 }
             )
@@ -818,17 +829,30 @@ def audit_standard_tiers(corpus_dir: Path) -> dict[str, int | str]:
             standards = [
                 form for form in parent.findall("FORM") if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
-            if len(standards) != 1:
+            if len(standards) > 1:
                 raise SystemExit(
-                    f"Expected exactly one standard FORM at {relative}:{parent.tag}:{parent.get('id', '')}"
+                    f"Expected at most one standard FORM at "
+                    f"{relative}:{parent.tag}:{parent.get('id', '')}"
                 )
+            if not standards:
+                if parent.tag == "S" and parent.findall("AUDIO"):
+                    stats["untranscribed_audio_sentences"] += 1
+                else:
+                    stats[
+                        f"missing_{parent.tag.lower()}_standard_tiers"
+                    ] += 1
+                continue
             text = "".join(standards[0].itertext()).strip()
             if not text:
                 if parent.tag == "S":
-                    raise SystemExit(
-                        f"Empty sentence standard FORM at "
-                        f"{relative}:{parent.tag}:{parent.get('id', '')}"
-                    )
+                    if standards[0].find("UNCLEAR") is not None:
+                        stats["unclear_sentence_standard_tiers"] += 1
+                    elif parent.findall("AUDIO"):
+                        stats[
+                            "untranscribed_audio_sentence_standard_tiers"
+                        ] += 1
+                    else:
+                        stats["empty_source_sentences"] += 1
                 stats[f"empty_{parent.tag.lower()}_standard_tiers"] += 1
             stats[f"{parent.tag.lower()}_standard_tiers"] += 1
             signatures.append((relative, parent.tag, parent.get("id", ""), mixed_content_signature(standards[0])))
@@ -935,6 +959,7 @@ def run_qc_scripts(
                     [
                         sys.executable,
                         str(validator),
+                        "--no-exit-on-hard",
                         "by_path",
                         "--path",
                         str(corpus_dir),

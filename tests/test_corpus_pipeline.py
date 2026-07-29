@@ -160,6 +160,117 @@ class StandardTierTests(unittest.TestCase):
             self.assertEqual(stats["empty_m_standard_tiers"], 1)
             self.assertEqual(stats["m_standard_tiers"], 1)
 
+    def test_untranscribed_audio_sentence_is_retained_and_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = self.write_xml(
+                directory,
+                '<S id="audio-only"><FORM kindOf="original"/>'
+                '<PHON kindOf="original"/><FORM kindOf="standard"/>'
+                '<PHON kindOf="standard"/>'
+                '<TRANSL xml:lang="zho">尚未轉寫的錄音</TRANSL>'
+                '<AUDIO file="audio.wav" start="0" end="1.5"/></S>',
+            )
+            records = tag_transform_sources(directory)
+            stats, repairs, dispositions = repair_mt_xml_structure(
+                directory
+            )
+            inventory = finalize_transform_inventory(
+                directory,
+                records,
+                dispositions,
+            )
+            sentence = ET.parse(path).getroot().find("./S")
+
+            self.assertIsNotNone(sentence)
+            self.assertEqual(len(sentence.findall("FORM")), 2)
+            self.assertEqual(len(sentence.findall("PHON")), 2)
+            self.assertIsNotNone(sentence.find("AUDIO"))
+            self.assertEqual(
+                sentence.findtext("TRANSL"),
+                "尚未轉寫的錄音",
+            )
+            self.assertEqual(
+                stats["untranscribed_audio_sentences_preserved"], 1
+            )
+            self.assertEqual(repairs, [])
+            self.assertEqual(dispositions, {})
+            self.assertEqual(inventory[0]["disposition"], "retained")
+            audit = audit_standard_tiers(directory)
+            self.assertEqual(
+                audit[
+                    "untranscribed_audio_sentence_standard_tiers"
+                ],
+                1,
+            )
+
+            rows, extraction = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"zho"},
+                tags={"S"},
+            )
+            self.assertEqual(rows, [])
+            self.assertEqual(
+                extraction[
+                    "untranscribed_or_unclear_sentences_skipped"
+                ],
+                1,
+            )
+
+    def test_unclear_audio_sentence_is_retained_and_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = self.write_xml(
+                directory,
+                '<S id="unclear"><FORM kindOf="original"><UNCLEAR/>'
+                '</FORM><PHON kindOf="original"/>'
+                '<FORM kindOf="standard"><UNCLEAR/></FORM>'
+                '<PHON kindOf="standard"/>'
+                '<AUDIO file="audio.wav" start="0" end="1.5"/></S>',
+            )
+            stats, repairs, dispositions = repair_mt_xml_structure(
+                directory
+            )
+            sentence = ET.parse(path).getroot().find("./S")
+
+            self.assertIsNotNone(sentence)
+            self.assertEqual(len(sentence.findall("FORM")), 2)
+            self.assertEqual(len(sentence.findall("PHON")), 2)
+            self.assertEqual(
+                stats["unclear_source_sentences_preserved"], 1
+            )
+            self.assertEqual(repairs, [])
+            self.assertEqual(dispositions, {})
+            audit = audit_standard_tiers(directory)
+            self.assertEqual(
+                audit["unclear_sentence_standard_tiers"], 1
+            )
+
+            rows, extraction = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"zho"},
+                tags={"S"},
+            )
+            self.assertEqual(rows, [])
+            self.assertEqual(
+                extraction[
+                    "untranscribed_or_unclear_sentences_skipped"
+                ],
+                1,
+            )
+
     def test_mt_xml_repairs_are_narrow_and_auditable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -174,7 +285,13 @@ class StandardTierTests(unittest.TestCase):
                 '<TRANSL xml:lang="zho">零形態</TRANSL></M>'
                 '<S id="annotated"><FORM kindOf="original">*malu</FORM>'
                 '<FORM kindOf="standard">*malu</FORM></S>'
-                '<W id="variant"><FORM kindOf="standard">a/b</FORM></W>'
+                '<W id="variant"><FORM kindOf="original">'
+                "'arup(a)-ara</FORM><FORM kindOf=\"standard\">"
+                "'arup(a)-ara</FORM><TRANSL xml:lang=\"zho\">互相-拿"
+                "</TRANSL><M id=\"variant-m\"><FORM kindOf=\"original\">"
+                "usa/bi(n</FORM><FORM kindOf=\"standard\">usa/bi(n"
+                '</FORM><TRANSL xml:lang="zho">那裡-改變狀態</TRANSL>'
+                "</M></W>"
                 '<S id="null"><FORM kindOf="standard">∅</FORM></S>'
                 '<S id="empty-sentence"><FORM kindOf="original">'
                 '<UNCLEAR/></FORM><FORM kindOf="standard">'
@@ -190,67 +307,71 @@ class StandardTierTests(unittest.TestCase):
                 dispositions,
             )
             root = ET.parse(path).getroot()
-            self.assertIsNone(root.find("./M"))
+            self.assertIsNotNone(root.find("./M[@id='empty']"))
             self.assertEqual(
                 [sentence.get("id") for sentence in root.findall("./S")],
-                ["duplicate", "duplicate__mtdup2"],
+                [
+                    "duplicate",
+                    "duplicate__mtdup2",
+                    "annotated",
+                    "null",
+                    "empty-sentence",
+                ],
             )
             self.assertEqual(
                 stats,
                 {
                     "untyped_punctuation_removed": 1,
                     "duplicate_ids_disambiguated": 1,
-                    "empty_source_lexical_units_removed": 1,
-                    "empty_source_lexical_descendants_removed": 1,
-                    "hard_text_annotation_units_removed": 1,
-                    "hard_text_annotation_descendants_removed": 1,
+                    "empty_source_lexical_units_preserved": 1,
+                    "source_annotation_units_preserved": 1,
                     "form_boundary_whitespace_trimmed": 1,
                     "zero_width_fields_repaired": 1,
-                    "lexical_annotation_units_removed": 1,
-                    "lexical_annotation_descendants_removed": 1,
-                    "null_source_sentences_removed": 1,
-                    "null_source_sentence_descendants_removed": 1,
-                    "empty_source_sentences_removed": 1,
-                    "empty_source_sentence_descendants_removed": 1,
+                    "null_source_sentences_preserved": 1,
+                    "unclear_source_sentences_preserved": 1,
                 },
             )
-            self.assertEqual(len(repairs), 9)
-            removed = [
+            self.assertEqual(len(repairs), 4)
+            self.assertTrue(
+                all(row["disposition"] == "retained" for row in inventory)
+            )
+            variant = root.find("./W[@id='variant']")
+            self.assertIsNotNone(variant)
+            self.assertEqual(
+                variant.find("FORM[@kindOf='standard']").text,
+                "'arup(a)-ara",
+            )
+            self.assertEqual(
+                variant.find(
+                    "./M[@id='variant-m']/FORM[@kindOf='standard']"
+                ).text,
+                "usa/bi(n",
+            )
+            pairs, extraction = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"zho"},
+                tags={"W", "M"},
+            )
+            extracted = {
+                pair.xml_id: pair.formosan_standard for pair in pairs
+            }
+            self.assertEqual(extracted["variant"], "'arup(a)-ara")
+            self.assertEqual(extracted["variant-m"], "usa/bi(n")
+            self.assertEqual(extraction["w_units_seen"], 1)
+            self.assertEqual(extraction["m_units_seen"], 2)
+            self.assertEqual(extraction["empty_lexical_units_skipped"], 1)
+            unclear = next(
                 row
                 for row in inventory
-                if row["disposition"]
-                == "removed_empty_source_lexical_unit"
-            ]
-            self.assertEqual(len(removed), 1)
-            self.assertEqual(
-                sum(
-                    row["disposition"]
-                    == "removed_hard_text_annotation"
-                    for row in inventory
-                ),
-                1,
+                if row.get("final_xml_id") == "empty-sentence"
             )
-            self.assertEqual(
-                sum(
-                    row["disposition"] == "removed_lexical_annotation"
-                    for row in inventory
-                ),
-                1,
-            )
-            self.assertEqual(
-                sum(
-                    row["disposition"] == "removed_null_source_sentence"
-                    for row in inventory
-                ),
-                1,
-            )
-            self.assertEqual(
-                sum(
-                    row["disposition"] == "removed_empty_source_sentence"
-                    for row in inventory
-                ),
-                1,
-            )
+            self.assertEqual(unclear["disposition"], "retained")
             duplicate = next(
                 row
                 for row in inventory
@@ -285,7 +406,7 @@ class StandardTierTests(unittest.TestCase):
             ):
                 repair_mt_xml_structure(directory)
 
-    def test_invalid_audio_span_is_removed_without_losing_text(
+    def test_invalid_audio_span_is_preserved_for_source_review(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -303,7 +424,7 @@ class StandardTierTests(unittest.TestCase):
             sentence = ET.parse(path).getroot().find("./S")
             self.assertEqual(
                 [audio.get("file") for audio in sentence.findall("AUDIO")],
-                ["good.mp3"],
+                ["bad.mp3", "good.mp3"],
             )
             self.assertEqual(
                 sentence.find("FORM[@kindOf='standard']").text,
@@ -313,14 +434,8 @@ class StandardTierTests(unittest.TestCase):
                 sentence.find("TRANSL").text,
                 "Good.",
             )
-            self.assertEqual(
-                stats,
-                {"invalid_audio_spans_removed": 1},
-            )
-            self.assertEqual(repairs[0]["repair"], "remove_invalid_audio_span")
-            self.assertEqual(repairs[0]["validator_rule"], "V054")
-            self.assertEqual(repairs[0]["start"], "10.02")
-            self.assertEqual(repairs[0]["end"], "10.01")
+            self.assertEqual(stats, {})
+            self.assertEqual(repairs, [])
 
 
 class PipelineReportingTests(unittest.TestCase):
@@ -813,6 +928,44 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             path.write_text("ami,english\nmana,None\n", encoding="utf-8")
             frame = read_csv(path)
             self.assertEqual(frame.loc[0, "english"], "None")
+
+    def test_source_annotations_are_rejected_at_row_level(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "row_id": "asterisk",
+                    "ami": "*malu",
+                    "english": "bad",
+                    "kindOf": "standard",
+                    "row_type": "sentence",
+                    "source": "Stories/a.xml",
+                },
+                {
+                    "row_id": "artifact",
+                    "ami": "456otca",
+                    "english": "artifact",
+                    "kindOf": "standard",
+                    "row_type": "sentence",
+                    "source": "Stories/b.xml",
+                },
+            ]
+        )
+        normalized, _ = normalize_dataframe(
+            frame,
+            "ami",
+            "english",
+        )
+        accepted, rejected, counts = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+        self.assertEqual(len(accepted), 0)
+        self.assertEqual(len(rejected), 2)
+        self.assertEqual(counts["rejected:source_annotation_marker"], 1)
+        self.assertEqual(counts["rejected:source_artifact_marker"], 1)
 
     def test_quality_and_dedupe_conserve_every_input_row(self) -> None:
         frame = pd.DataFrame(

@@ -278,17 +278,26 @@ def extract_file(
         stats[f"{element.tag.lower()}_units_seen"] += 1
         standard = direct_form(element, "standard")
         if standard is None:
-            stats["missing_standard"] += 1
-            raise ValueError(f"{relative}:{element.tag}:{element.get('id', '')} has no standard FORM")
+            if element.tag == "S" and element.findall("AUDIO"):
+                stats["untranscribed_audio_sentences_skipped"] += 1
+            else:
+                stats["missing_standard_units_skipped"] += 1
+            continue
         standard_text = mixed_text(standard)
         if not standard_text:
             stats["empty_standard"] += 1
             if element.tag == "S":
-                raise ValueError(
-                    f"{relative}:{element.tag}:{element.get('id', '')} "
-                    "has an empty sentence standard FORM"
-                )
-            stats["empty_lexical_units_skipped"] += 1
+                if (
+                    standard.find("UNCLEAR") is not None
+                    or element.findall("AUDIO")
+                ):
+                    stats[
+                        "untranscribed_or_unclear_sentences_skipped"
+                    ] += 1
+                else:
+                    stats["empty_source_sentences_skipped"] += 1
+            else:
+                stats["empty_lexical_units_skipped"] += 1
             continue
         original = direct_form(element, "original")
         original_text = mixed_text(original) if original is not None else ""

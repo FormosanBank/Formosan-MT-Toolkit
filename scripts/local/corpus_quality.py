@@ -170,6 +170,10 @@ def quality_decision(
 
     if str(row.get("kindOf", "standard")).strip().lower() != "standard":
         return QualityDecision("rejected", "non_standard_form")
+    if "456otca" in source.casefold():
+        return QualityDecision("rejected", "source_artifact_marker")
+    if "*" in source:
+        return QualityDecision("rejected", "source_annotation_marker")
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):

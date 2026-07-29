@@ -30,21 +30,20 @@ cleaner. Hard XML and text validators always run in production.
 
 Before validation, the toolkit invokes the pinned FormosanBank dialect utility
 to complete missing `TEXT/@dialect` values. It also applies a narrow MT repair
-policy: source-empty lexical units are removed, punctuation-only text outside
-typed XML fields is removed, and unreferenced duplicate IDs are deterministically
-disambiguated. Units carrying FormosanBank hard annotation markers such as
-`V129` asterisks are excluded wholesale rather than rewriting their standard
-text. Boundary whitespace left by the pinned cleaner in direct-text `FORM`
-elements is stripped without altering internal spacing. W/M units with
-metalinguistic slash or parenthetical variants are excluded under `V121`, and
-sentence standards containing the null/elision symbol are excluded under
-`V120`. Forbidden zero-width characters are removed under `V131`. Empty
-sentence units are quarantined wholesale, without falling back to their
-`original` tier. Invalid `AUDIO` spans with `end <= start` are removed under
-`V054` without dropping or changing their sentence text; the original audio
-attributes remain in the repair inventory. Any empty sentence that survives
-repair, substantive untyped content, and referenced duplicate IDs remain hard
-failures. All repairs are written to
+policy: punctuation-only text outside typed XML fields is removed, and
+unreferenced duplicate IDs are deterministically disambiguated. XML units,
+transcription tiers, and audio metadata are never deleted to satisfy MT
+validation. Boundary whitespace left by the pinned cleaner in direct-text
+`FORM` elements is stripped without altering internal spacing. Parentheses and slashes
+in W/M forms are preserved because they may encode valid morphological or
+lexical notation; the QC layer reports them only as review diagnostics.
+Empty or missing standard source tiers are recorded and skipped during
+extraction without falling back to `original`. Null/elision and asterisk
+annotations remain in XML and are handled by row-level MT quality rules.
+Forbidden zero-width characters are removed under `V131`. Validator findings,
+including invalid audio spans, are logged without rewriting the source record
+or aborting corpus construction. Substantive untyped content and referenced
+duplicate IDs remain hard structural failures. All repairs are written to
 `_qc_repair_inventory.jsonl`, and validator findings are stored beside the
 cleaned XML rather than in the shared QC checkout.
 
