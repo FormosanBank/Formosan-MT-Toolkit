@@ -23,7 +23,9 @@
     "test_ratio": 0.075,
     "min_test_rows": 500,
     "min_validate_rows": 150,
+    "character_ngram_jaccard_threshold": 0.82,
     "lexical_eval": false,
-    "synthetic_eval": false
+    "synthetic_eval": false,
+    "headline_tier": "in_domain_hard"
   }
 }

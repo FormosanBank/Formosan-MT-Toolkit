@@ -1,444 +1,323 @@
 #!/usr/bin/env python3
-"""
-Create multilingual aggregate corpora without deduplication.
-
-Supported input layouts:
-
-1. Pairwise processed corpora in a named build's `processed_corpora/`, for example:
-   - `ami_en_processed.csv`
-   - `ami_zh_processed.csv`
-
-   Expected pairwise headers:
-   - `<lang_code>,english,source,kindOf,dialect,row_type,split,...`
-   - `<lang_code>,chinese,source,kindOf,dialect,row_type,split,...`
-
-2. Already-aggregated multilingual corpora, for example:
-   - `big_corpus_en.csv`
-   - `big_corpus_zh.csv`
-   - `big_corpus_en_pivot.csv`
-   - `big_corpus_zh_pivot.csv`
-
-   Expected aggregate headers:
-   - `lang_code,formosan_sentence,english_sentence,source,dialect,row_type,split,...`
-   - `lang_code,formosan_sentence,chinese_sentence,source,dialect,row_type,split,...`
-
-Outputs:
-
-1. `big_corpus_en.csv`
-   `lang_code | formosan_sentence | english_sentence | source | dialect | row_type | split`
-
-2. `big_corpus_zh.csv`
-   `lang_code | formosan_sentence | chinese_sentence | source | dialect | row_type | split`
-
-3. `big_corpus_combined.csv`
-   `lang_code | formosan_sentence | chinese_sentence | english_sentence | source | dialect | row_type | split`
-
-The combined corpus is Chinese-anchored because the tokenizer/model setup
-script requires `chinese_sentence` and optionally uses `english_sentence` when
-it is present.
-"""
+"""Aggregate cleaned pairwise or pivot corpora without losing provenance."""
 
 from __future__ import annotations
 
 import argparse
-import csv
-from collections import Counter
+import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
 
-Pair = Tuple[str, str, str, str, str, str, str, str]
+import pandas as pd
+from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
-ENGLISH_COLUMNS = ("english_sentence", "english")
-CHINESE_COLUMNS = ("chinese_sentence", "chinese")
-AGGREGATE_REQUIRED = ("lang_code", "formosan_sentence")
-
-
-def normalize_column(name: str) -> str:
-    return str(name or "").strip().lower()
-
-
-def clean_cell(value: object) -> str:
-    return str(value or "").strip()
-
-
-def clean_row_type(value: object) -> str:
-    text = clean_cell(value).lower()
-    if text in {"lexeme", "morpheme"}:
-        return "lexeme"
-    if text == "sentence":
-        return "sentence"
-    return "unknown"
-
-
-def first_present(columns: Dict[str, str], candidates: Iterable[str]) -> Optional[str]:
-    for candidate in candidates:
-        actual = columns.get(candidate)
-        if actual:
-            return actual
-    return None
-
-
-def detect_pairwise_target(csv_file: Path) -> Optional[str]:
-    parts = csv_file.stem.split("_")
-    if len(parts) < 2:
-        return None
-    target = parts[1].lower()
-    if target not in {"en", "zh"}:
-        return None
-    return target
-
-
-def detect_pairwise_lang(csv_file: Path) -> Optional[str]:
-    parts = csv_file.stem.split("_")
-    if not parts:
-        return None
-    lang_code = parts[0].strip().lower()
-    return lang_code or None
-
-
-def add_pair(data: Dict[str, List[Pair]], lang_code: str, pair: Pair) -> None:
-    data.setdefault(lang_code, []).append(pair)
+PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
+OUTPUT_NAMES = {
+    "big_corpus_en.csv",
+    "big_corpus_zh.csv",
+    "big_corpus_combined.csv",
+}
+CANONICAL_PREFIX = [
+    "row_id",
+    "source_record_id",
+    "content_sha256",
+    "lang_code",
+    "formosan_sentence",
+]
+CANONICAL_SUFFIX = [
+    "source",
+    "repository",
+    "repository_commit",
+    "xml_path",
+    "corpus_id",
+    "xml_id",
+    "kindOf",
+    "dialect",
+    "row_type",
+    "formosan_original",
+    "formosan_standard",
+    "target_lang",
+    "translation_index",
+    "translation_kind",
+    "translation_version",
+    "contains_unclear",
+    "formosan_raw",
+    "target_raw",
+    "formosan_transformations",
+    "target_transformations",
+    "quality_flags",
+    "duplicate_group_size",
+    "pair_fingerprint",
+    "split",
+    "pivot_origin",
+    "pivot_provider",
+    "pivot_direction",
+    "pivot_source_lang",
+    "pivot_target_lang",
+    "pivot_source_text",
+    "pivot_cache_key",
+    "pivot_detected_source_lang",
+]
 
 
-def ingest_aggregate_rows(
-    csv_file: Path,
-    reader: csv.DictReader,
-    columns: Dict[str, str],
-    data_en: Dict[str, List[Pair]],
-    data_zh: Dict[str, List[Pair]],
-) -> tuple[int, int]:
-    lang_col = columns["lang_code"]
-    formosan_col = columns["formosan_sentence"]
-    english_col = first_present(columns, ENGLISH_COLUMNS)
-    chinese_col = first_present(columns, CHINESE_COLUMNS)
-    source_col = columns.get("source")
-    dialect_col = columns.get("dialect")
-    row_type_col = columns.get("row_type")
-    split_col = columns.get("split")
-    pivot_origin_col = columns.get("pivot_origin")
-    pivot_direction_col = columns.get("pivot_direction")
-
-    en_rows = 0
-    zh_rows = 0
-    skipped_missing = 0
-
-    for row in reader:
-        lang_code = clean_cell(row.get(lang_col))
-        formosan = clean_cell(row.get(formosan_col))
-        if not lang_code or not formosan:
-            skipped_missing += 1
-            continue
-
-        source = clean_cell(row.get(source_col)) if source_col else ""
-        dialect = clean_cell(row.get(dialect_col)) if dialect_col else ""
-        row_type = clean_row_type(row.get(row_type_col)) if row_type_col else "unknown"
-        split = clean_cell(row.get(split_col)) if split_col else ""
-        pivot_origin = clean_cell(row.get(pivot_origin_col)) if pivot_origin_col else "original"
-        pivot_direction = clean_cell(row.get(pivot_direction_col)) if pivot_direction_col else ""
-
-        if english_col:
-            english = clean_cell(row.get(english_col))
-            if english:
-                add_pair(data_en, lang_code, (formosan, english, source, dialect, row_type, split, pivot_origin, pivot_direction))
-                en_rows += 1
-            elif chinese_col is None:
-                skipped_missing += 1
-
-        if chinese_col:
-            chinese = clean_cell(row.get(chinese_col))
-            if chinese:
-                add_pair(data_zh, lang_code, (formosan, chinese, source, dialect, row_type, split, pivot_origin, pivot_direction))
-                zh_rows += 1
-            elif english_col is None:
-                skipped_missing += 1
-
-    print(
-        f"📖 Reading {csv_file.name} as aggregate corpus..."
-        f"  EN rows: {en_rows:,} | ZH rows: {zh_rows:,} | skipped empty: {skipped_missing:,}"
-    )
-    return en_rows, zh_rows
+def read_csv(path: Path) -> pd.DataFrame:
+    try:
+        frame = pd.read_csv(
+            path,
+            dtype=str,
+            keep_default_na=False,
+            na_filter=False,
+            encoding="utf-8-sig",
+        )
+    except Exception as exc:
+        raise SystemExit(f"Cannot read corpus CSV {path}: {exc}") from exc
+    if frame.empty:
+        raise SystemExit(f"Corpus CSV is empty: {path}")
+    return frame
 
 
-def ingest_pairwise_rows(
-    csv_file: Path,
-    reader: csv.DictReader,
-    columns: Dict[str, str],
-    data_en: Dict[str, List[Pair]],
-    data_zh: Dict[str, List[Pair]],
-) -> tuple[int, int]:
-    lang_code = detect_pairwise_lang(csv_file)
-    target_lang = detect_pairwise_target(csv_file)
-    if not lang_code or not target_lang:
-        print(f"⚠️  Skipping {csv_file.name}: could not infer pairwise language codes.")
-        return 0, 0
-
-    formosan_col = columns.get(lang_code)
-    if target_lang == "en":
-        target_col = first_present(columns, ENGLISH_COLUMNS)
-    else:
-        target_col = first_present(columns, CHINESE_COLUMNS)
-
-    if not formosan_col or not target_col:
-        print(f"⚠️  Skipping {csv_file.name}: pairwise columns do not match expected schema.")
-        return 0, 0
-
-    source_col = columns.get("source")
-    dialect_col = columns.get("dialect")
-    row_type_col = columns.get("row_type")
-    split_col = columns.get("split")
-
-    count = 0
-    skipped_missing = 0
-    for row in reader:
-        formosan = clean_cell(row.get(formosan_col))
-        target = clean_cell(row.get(target_col))
-        if not formosan or not target:
-            skipped_missing += 1
-            continue
-
-        source = clean_cell(row.get(source_col)) if source_col else ""
-        dialect = clean_cell(row.get(dialect_col)) if dialect_col else ""
-        row_type = clean_row_type(row.get(row_type_col)) if row_type_col else "unknown"
-        split = clean_cell(row.get(split_col)) if split_col else ""
-        pair = (formosan, target, source, dialect, row_type, split, "original", "")
-
-        if target_lang == "en":
-            add_pair(data_en, lang_code, pair)
-        else:
-            add_pair(data_zh, lang_code, pair)
-        count += 1
-
-    direction = "EN" if target_lang == "en" else "ZH"
-    print(
-        f"📖 Reading {csv_file.name} as pairwise corpus..."
-        f"  {direction} rows: {count:,} | skipped empty: {skipped_missing:,}"
-    )
-    return (count, 0) if target_lang == "en" else (0, count)
+def canonical_order(frame: pd.DataFrame, target_column: str) -> list[str]:
+    preferred = [*CANONICAL_PREFIX, target_column, *CANONICAL_SUFFIX]
+    present = [column for column in preferred if column in frame.columns]
+    extras = [column for column in frame.columns if column not in present]
+    return [*present, *extras]
 
 
-def read_csv_files(
-    directory: Path,
-    skip_names: set[str],
-) -> Tuple[Dict[str, List[Pair]], Dict[str, List[Pair]]]:
-    """
-    Read all supported CSV files in a directory and return two dicts:
-      - data_en[lang_code] -> list of (formosan, english, source, dialect, row_type, split)
-      - data_zh[lang_code] -> list of (formosan, chinese, source, dialect, row_type, split)
-    """
-    data_en: Dict[str, List[Pair]] = {}
-    data_zh: Dict[str, List[Pair]] = {}
-
-    for csv_file in sorted(directory.glob("*.csv")):
-        if csv_file.name in skip_names:
-            continue
-
-        try:
-            with open(csv_file, "r", encoding="utf-8-sig", newline="") as handle:
-                reader = csv.DictReader(handle)
-                if not reader.fieldnames:
-                    print(f"⚠️  Skipping {csv_file.name}: empty or headerless CSV.")
-                    continue
-
-                columns = {
-                    normalize_column(fieldname): fieldname
-                    for fieldname in reader.fieldnames
-                    if fieldname is not None
-                }
-
-                if all(required in columns for required in AGGREGATE_REQUIRED):
-                    ingest_aggregate_rows(csv_file, reader, columns, data_en, data_zh)
-                    continue
-
-                ingest_pairwise_rows(csv_file, reader, columns, data_en, data_zh)
-
-        except Exception as exc:
-            print(f"⚠️  Error reading {csv_file.name}: {exc}")
-            continue
-
-    return data_en, data_zh
-
-
-def write_pair_corpus(
-    data: Dict[str, List[Pair]],
-    output_file: Path,
-    target_colname: str,
-) -> None:
-    """
-    Write a lang-specific pair corpus:
-      columns: lang_code | formosan_sentence | {target_colname} | source | dialect | row_type | split
-    (No deduping: writes every input row.)
-    """
-    total = 0
-    with open(output_file, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["lang_code", "formosan_sentence", target_colname, "source", "dialect", "row_type", "split", "pivot_origin", "pivot_direction"])
-
-        for lang_code in sorted(data.keys()):
-            rows = data[lang_code]
-            print(f"🔄 Processing {lang_code} ({target_colname})...")
-            for formosan, target, source, dialect, row_type, split, pivot_origin, pivot_direction in rows:
-                writer.writerow([lang_code, formosan, target, source, dialect, row_type, split, pivot_origin, pivot_direction])
-                total += 1
-            print(f"✅ {lang_code}: {len(rows):,} pairs")
-
-    print(f"\n🎉 Wrote {output_file}  |  📊 Total pairs: {total:,}\n")
-
-
-def match_keys(
-    lang_code: str,
-    formosan: str,
-    source: str,
-    dialect: str,
-    split: str,
-) -> list[tuple[str, tuple[str, ...]]]:
-    return [
-        ("exact", (lang_code, formosan, source, dialect, split)),
-        ("source", (lang_code, formosan, source)),
-        ("dialect", (lang_code, formosan, dialect)),
-        ("split", (lang_code, formosan, split)),
-        ("formosan", (lang_code, formosan)),
-    ]
-
-
-def build_english_lookups(data_en: Dict[str, List[Pair]]) -> dict[str, dict[tuple[str, ...], str]]:
-    lookups: dict[str, dict[tuple[str, ...], str]] = {
-        "exact": {},
-        "source": {},
-        "dialect": {},
-        "split": {},
-        "formosan": {},
+def ensure_metadata(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    defaults = {
+        "split": "",
+        "pivot_origin": "original",
+        "pivot_provider": "",
+        "pivot_direction": "",
+        "pivot_source_lang": "",
+        "pivot_target_lang": "",
+        "pivot_source_text": "",
+        "pivot_cache_key": "",
+        "pivot_detected_source_lang": "",
     }
-
-    for lang_code in sorted(data_en.keys()):
-        for formosan, english, source, dialect, _row_type, split, _pivot_origin, _pivot_direction in data_en[lang_code]:
-            if not english:
-                continue
-            for level, key in match_keys(lang_code, formosan, source, dialect, split):
-                lookups[level].setdefault(key, english)
-
-    return lookups
+    for column, default in defaults.items():
+        if column not in output.columns:
+            output[column] = default
+    return output
 
 
-def write_combined_corpus(
-    data_zh: Dict[str, List[Pair]],
-    data_en: Dict[str, List[Pair]],
-    output_file: Path,
-) -> None:
-    """
-    Write a Chinese-anchored combined corpus compatible with setup_formosan_nllb200.py:
-      lang_code | formosan_sentence | chinese_sentence | english_sentence | source | dialect | row_type | split
-    """
-    lookups = build_english_lookups(data_en)
-    matched_by = Counter()
-    unmatched = 0
-    total = 0
-
-    with open(output_file, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "lang_code",
-                "formosan_sentence",
-                "chinese_sentence",
-                "english_sentence",
-                "source",
-                "dialect",
-                "row_type",
-                "split",
-                "pivot_origin",
-                "pivot_direction",
-            ]
+def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]:
+    language = match.group("lang")
+    target = match.group("target")
+    frame = read_csv(path)
+    raw_target = "english" if target == "en" else "chinese"
+    target_column = "english_sentence" if target == "en" else "chinese_sentence"
+    required = {
+        "lang_code",
+        "formosan_sentence",
+        raw_target,
+        "row_id",
+        "source_record_id",
+        "kindOf",
+        "source",
+        "row_type",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise SystemExit(f"{path} is missing required cleaned columns: {missing}")
+    if not frame["kindOf"].astype(str).str.lower().eq("standard").all():
+        raise SystemExit(f"{path} contains non-standard Formosan rows")
+    languages = set(frame["lang_code"].astype(str).str.lower())
+    if languages != {language}:
+        raise SystemExit(
+            f"{path} language mismatch: filename={language}, rows={sorted(languages)}"
         )
+    frame = frame.rename(columns={raw_target: target_column})
+    return target, ensure_metadata(frame)
 
-        for lang_code in sorted(data_zh.keys()):
-            rows = data_zh[lang_code]
-            print(f"🔄 Processing {lang_code} (combined tokenizer corpus)...")
-            for formosan, chinese, source, dialect, row_type, split, pivot_origin, pivot_direction in rows:
-                english = ""
-                for level, key in match_keys(lang_code, formosan, source, dialect, split):
-                    english = lookups[level].get(key, "")
-                    if english:
-                        matched_by[level] += 1
-                        break
-                if not english:
-                    unmatched += 1
 
-                writer.writerow([lang_code, formosan, chinese, english, source, dialect, row_type, split, pivot_origin, pivot_direction])
-                total += 1
-
-            print(f"✅ {lang_code}: {len(rows):,} rows")
-
-    print(f"\n🎉 Wrote {output_file}  |  📊 Total rows: {total:,}")
-    print(
-        "   English matches: "
-        + ", ".join(
-            f"{level}={matched_by[level]:,}"
-            for level in ["exact", "source", "dialect", "split", "formosan"]
+def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
+    frame = read_csv(path)
+    required = {"lang_code", "formosan_sentence"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise SystemExit(f"{path} is not a supported aggregate corpus: missing {missing}")
+    has_english = "english_sentence" in frame.columns
+    has_chinese = "chinese_sentence" in frame.columns
+    if has_english == has_chinese:
+        raise SystemExit(
+            f"{path} must contain exactly one target column, not English={has_english}, Chinese={has_chinese}"
         )
-        + f", unmatched={unmatched:,}\n"
+    return ("en" if has_english else "zh"), ensure_metadata(frame)
+
+
+def discover_inputs(directory: Path, output_names: set[str]) -> list[Path]:
+    files = [
+        path
+        for path in sorted(directory.glob("*.csv"))
+        if path.name not in output_names and path.name != "summary_stats.csv"
+    ]
+    if not files:
+        raise SystemExit(f"No input corpus CSVs found in {directory}")
+    return files
+
+
+def load_inputs(directory: Path, output_names: set[str]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], list[dict]]:
+    english: list[pd.DataFrame] = []
+    chinese: list[pd.DataFrame] = []
+    inventory: list[dict] = []
+    for path in discover_inputs(directory, output_names):
+        pair_match = PAIRWISE_RE.match(path.stem)
+        if pair_match:
+            target, frame = pairwise_frame(path, pair_match)
+            input_type = "pairwise"
+        elif path.stem in {"big_corpus_en_pivot", "big_corpus_zh_pivot"}:
+            target, frame = aggregate_frame(path)
+            input_type = "pivot"
+        else:
+            raise SystemExit(f"Unsupported CSV in aggregate input directory: {path.name}")
+        (english if target == "en" else chinese).append(frame)
+        inventory.append(
+            {
+                "path": str(path),
+                "sha256": sha256_file(path),
+                "rows": len(frame),
+                "target": target,
+                "type": input_type,
+            }
+        )
+    return english, chinese, inventory
+
+
+def write_target(frames: list[pd.DataFrame], path: Path, target_column: str) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame()
+    output = pd.concat(frames, ignore_index=True, sort=False).fillna("")
+    required = {
+        "row_id",
+        "lang_code",
+        "formosan_sentence",
+        target_column,
+        "source",
+        "row_type",
+        "pivot_origin",
+    }
+    missing = sorted(required - set(output.columns))
+    if missing:
+        raise SystemExit(f"Aggregate output {path} would be missing required columns: {missing}")
+    empty = (
+        output["lang_code"].astype(str).str.strip().eq("")
+        | output["formosan_sentence"].astype(str).str.strip().eq("")
+        | output[target_column].astype(str).str.strip().eq("")
+    )
+    if empty.any():
+        raise SystemExit(f"Aggregate input contains {int(empty.sum())} empty required rows for {path.name}")
+    output = output[canonical_order(output, target_column)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output.to_csv(path, index=False)
+    return output
+
+
+def source_join_key(frame: pd.DataFrame) -> pd.Series:
+    if "source_record_id" in frame.columns:
+        value = frame["source_record_id"].astype(str)
+        if value.str.strip().ne("").all():
+            return value
+    return (
+        frame["lang_code"].astype(str)
+        + "\u241f"
+        + frame["source"].astype(str)
+        + "\u241f"
+        + frame.get("xml_id", pd.Series([""] * len(frame))).astype(str)
+        + "\u241f"
+        + frame["formosan_sentence"].astype(str)
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    script_dir = Path(__file__).resolve().parent
-    default_root = script_dir.parent
+def write_combined(chinese: pd.DataFrame, english: pd.DataFrame, path: Path) -> int:
+    if chinese.empty:
+        return 0
+    output = chinese.copy()
+    output["_source_join_key"] = source_join_key(output)
+    english_lookup: dict[str, str] = {}
+    if not english.empty:
+        english_work = english.copy()
+        english_work["_source_join_key"] = source_join_key(english_work)
+        for key, target in zip(
+            english_work["_source_join_key"],
+            english_work["english_sentence"],
+        ):
+            if str(target).strip():
+                english_lookup.setdefault(str(key), str(target))
+    output["english_sentence"] = [english_lookup.get(str(key), "") for key in output["_source_join_key"]]
+    output = output.drop(columns=["_source_join_key"])
+    order = canonical_order(output, "chinese_sentence")
+    insert_at = order.index("chinese_sentence") + 1
+    if "english_sentence" in order:
+        order.remove("english_sentence")
+    order.insert(insert_at, "english_sentence")
+    output[order].to_csv(path, index=False)
+    return len(output)
 
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build multilingual aggregate corpora from processed pairwise or aggregate CSVs.",
+        description="Aggregate cleaned pairwise or pivot corpora.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input-dir", type=Path, default=default_root)
-    parser.add_argument("--output-dir", type=Path, default=default_root)
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-en-name", default="big_corpus_en.csv")
     parser.add_argument("--output-zh-name", default="big_corpus_zh.csv")
     parser.add_argument("--output-combined-name", default="big_corpus_combined.csv")
-    return parser
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-
+    args = parse_args()
     input_dir = args.input_dir.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
-    out_en = output_dir / args.output_en_name
-    out_zh = output_dir / args.output_zh_name
-    out_combined = output_dir / args.output_combined_name
-
     if not input_dir.is_dir():
         raise SystemExit(f"Input directory does not exist: {input_dir}")
-
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    skip_names = {
-        "summary_stats.csv",
-        out_en.name,
-        out_zh.name,
-        out_combined.name,
+    output_names = {
+        args.output_en_name,
+        args.output_zh_name,
+        args.output_combined_name,
     }
+    english_inputs, chinese_inputs, inventory = load_inputs(input_dir, output_names)
+    if not english_inputs and not chinese_inputs:
+        raise SystemExit("No supported corpus inputs were found")
 
-    print("🚀 Building separate corpora for English and Chinese (no dedupe)...\n")
-    print(f"📂 Input dir:  {input_dir}")
-    print(f"📝 Output dir: {output_dir}\n")
-
-    data_en, data_zh = read_csv_files(input_dir, skip_names)
-
-    if not data_en and not data_zh:
-        print("❌ No supported corpus CSV files found!")
-        return
-
-    if data_en:
-        print(f"📋 EN languages: {', '.join(sorted(data_en.keys()))}")
-        write_pair_corpus(data_en, out_en, "english_sentence")
-    else:
-        print("ℹ️  No English rows found.")
-
-    if data_zh:
-        print(f"📋 ZH languages: {', '.join(sorted(data_zh.keys()))}")
-        write_pair_corpus(data_zh, out_zh, "chinese_sentence")
-        write_combined_corpus(data_zh, data_en, out_combined)
-    else:
-        print("ℹ️  No Chinese rows found.")
+    english_path = output_dir / args.output_en_name
+    chinese_path = output_dir / args.output_zh_name
+    combined_path = output_dir / args.output_combined_name
+    english = write_target(english_inputs, english_path, "english_sentence")
+    chinese = write_target(chinese_inputs, chinese_path, "chinese_sentence")
+    combined_rows = write_combined(chinese, english, combined_path)
+    report = {
+        "schema_version": 2,
+        "created_at": utc_now(),
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "inputs": inventory,
+        "input_inventory_sha256": stable_json_hash(inventory),
+        "outputs": {
+            "english": {
+                "path": str(english_path),
+                "rows": len(english),
+                "sha256": sha256_file(english_path) if not english.empty else None,
+            },
+            "chinese": {
+                "path": str(chinese_path),
+                "rows": len(chinese),
+                "sha256": sha256_file(chinese_path) if not chinese.empty else None,
+            },
+            "combined": {
+                "path": str(combined_path),
+                "rows": combined_rows,
+                "sha256": sha256_file(combined_path) if combined_rows else None,
+            },
+        },
+        "complete": True,
+    }
+    atomic_write_json(output_dir / "aggregate_manifest.json", report)
+    print(f"Aggregated EN={len(english):,}, ZH={len(chinese):,}, combined={combined_rows:,} rows")
 
 
 if __name__ == "__main__":

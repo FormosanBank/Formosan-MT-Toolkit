@@ -11,22 +11,29 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-import hashlib
+import importlib.metadata
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline_common import (
+    PIPELINE_CONFIG_PATH,
+    atomic_write_json,
+    git_state,
+    load_pipeline_config,
+    sha256_file,
+    utc_now,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
-EXACT_BIBLE_REPOS = (
-    "Formosan-Taiwan-Bible-Society-Bibles",
-)
+PIPELINE_CONFIG = load_pipeline_config()
+EXACT_BIBLE_REPOS = ("Formosan-Taiwan-Bible-Society-Bibles",)
 
 
 @dataclass(frozen=True)
@@ -116,10 +123,7 @@ def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
     elif args.build_root:
         root = args.build_root
     else:
-        raise SystemExit(
-            "Choose an isolated output with --corpus-name or --build-root, "
-            "or use --build-public-private."
-        )
+        raise SystemExit("Choose an isolated output with --corpus-name or --build-root, or use --build-public-private.")
 
     root = root.expanduser().resolve()
     raw_dir = root / "raw_corpora"
@@ -173,12 +177,20 @@ def clean_generated_outputs(paths: BuildPaths) -> None:
     remove_path(paths.final_dir)
     remove_path(paths.split_root)
     remove_path(paths.processed_dir / "filter_reports")
+    remove_path(paths.processed_dir / "aggregate_manifest.json")
     for pattern in ("*_processed.csv", "big_corpus*.csv"):
         for path in paths.processed_dir.glob(pattern):
             remove_path(path)
     pivot_dir = paths.processed_dir / "pivot"
     if pivot_dir.exists():
-        for pattern in ("big_corpus*.csv", "pivot_manifest.json", "*.tmp"):
+        for pattern in (
+            "big_corpus*.csv",
+            "big_corpus*.incomplete",
+            "pivot_manifest.json",
+            "pivot_rejections_*.csv",
+            "aggregate_manifest.json",
+            "*.tmp",
+        ):
             for path in pivot_dir.glob(pattern):
                 remove_path(path)
 
@@ -193,16 +205,8 @@ def should_clean_generated_outputs(args: argparse.Namespace, paths: BuildPaths) 
 def count_csv_rows(path: Path) -> int:
     if not path.exists():
         return 0
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        return max(0, sum(1 for _ in handle) - 1)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return max(0, sum(1 for _ in csv.reader(handle)) - 1)
 
 
 def artifact_record(path: Path, *, compute_hash: bool) -> dict:
@@ -220,6 +224,36 @@ def artifact_record(path: Path, *, compute_hash: bool) -> dict:
     return record
 
 
+def require_json_manifest(
+    path: Path,
+    *,
+    stage: str,
+    expected: dict[str, object] | None = None,
+) -> dict:
+    if not path.is_file():
+        raise SystemExit(f"{stage} did not produce its required manifest: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{stage} manifest is malformed at {path}: {exc}") from exc
+    if payload.get("complete") is not True:
+        raise SystemExit(f"{stage} manifest is incomplete: {path}")
+    for key, value in (expected or {}).items():
+        if payload.get(key) != value:
+            raise SystemExit(f"{stage} manifest mismatch for {key}: expected {value!r}, found {payload.get(key)!r}")
+    return payload
+
+
+def stage_manifest_record(path: Path) -> dict:
+    payload = require_json_manifest(path, stage=path.stem)
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "schema_version": payload.get("schema_version"),
+        "complete": True,
+    }
+
+
 def count_bible_source_rows(path: Path) -> int:
     if not path.exists() or path.suffix.lower() != ".csv":
         return 0
@@ -231,9 +265,7 @@ def count_bible_source_rows(path: Path) -> int:
             return 0
         for row in reader:
             source_parts = [
-                part.strip().lower()
-                for part in (row.get("source") or "").replace("\\", "/").split("/")
-                if part.strip()
+                part.strip().lower() for part in (row.get("source") or "").replace("\\", "/").split("/") if part.strip()
             ]
             if any(part in exact_repo_components for part in source_parts):
                 count += 1
@@ -244,11 +276,7 @@ def validate_no_bible_sources(paths: BuildPaths, final_corpus_dir: Path) -> None
     files: list[Path] = []
     files.extend(sorted(paths.processed_dir.glob("*_processed.csv")))
     files.extend(final_corpus_dir.glob("big_corpus*.csv"))
-    failures = {
-        str(path): rows
-        for path in files
-        if (rows := count_bible_source_rows(path)) > 0
-    }
+    failures = {str(path): rows for path in files if (rows := count_bible_source_rows(path)) > 0}
     if failures:
         details = ", ".join(f"{path}: {rows}" for path, rows in sorted(failures.items()))
         raise SystemExit(f"--exclude-bible validation failed; Bible source rows remain: {details}")
@@ -285,6 +313,8 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
     raw_en = paths.raw_dir / f"{lang.code}_en.csv"
     proc_zh = paths.processed_dir / f"{lang.code}_zh_processed.csv"
     proc_en = paths.processed_dir / f"{lang.code}_en_processed.csv"
+    fetch_manifest = xml_dir / "_fetch_manifest.json"
+    qc_manifest = xml_dir / "_qc_manifest.json"
 
     if not args.skip_fetch:
         cmd = [PYTHON, str(script("scripts/local/fetch_xml.py")), "--src-lang", lang.code]
@@ -310,17 +340,33 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         for pattern in args.exclude_path_pattern:
             cmd.extend(["--exclude-path-pattern", pattern])
         run(cmd, dry_run=args.dry_run)
+    if not args.dry_run:
+        require_json_manifest(
+            fetch_manifest,
+            stage=f"{lang.code} fetch",
+            expected={"source_language": lang.code},
+        )
 
     if not args.skip_clean:
         cmd = [PYTHON, str(script("scripts/local/clean_xml.py")), "--src-lang", lang.code]
         cmd.extend(["--in-dir", str(xml_dir)])
         if args.formosanbank_path:
             cmd.extend(["--formosanbank-path", str(args.formosanbank_path)])
+        cmd.extend(["--qc-revision", args.qc_revision])
         if args.force_qc_update:
             cmd.append("--force-update")
-        if args.validate_qc:
-            cmd.append("--validate")
+        if args.skip_qc_validation:
+            cmd.append("--skip-validation")
         run(cmd, dry_run=args.dry_run)
+    if not args.dry_run:
+        qc_payload = require_json_manifest(
+            qc_manifest,
+            stage=f"{lang.code} QC",
+            expected={"source_language": lang.code},
+        )
+        qc_revision = qc_payload.get("formosanbank_qc", {}).get("revision")
+        if qc_revision != args.qc_revision:
+            raise SystemExit(f"{lang.code} QC revision mismatch: expected {args.qc_revision}, found {qc_revision}")
 
     if not args.skip_raw:
         run(
@@ -353,6 +399,17 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             ],
             dry_run=args.dry_run,
         )
+    if not args.dry_run:
+        require_json_manifest(
+            raw_zh.with_suffix(".extraction.json"),
+            stage=f"{lang.code} Chinese extraction",
+            expected={"source_language": lang.code, "target": "chinese"},
+        )
+        require_json_manifest(
+            raw_en.with_suffix(".extraction.json"),
+            stage=f"{lang.code} English extraction",
+            expected={"source_language": lang.code, "target": "english"},
+        )
 
     if not args.skip_filter:
         filter_base = [
@@ -360,15 +417,17 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             str(script("scripts/local/filter_split_corpus.py")),
             "--workers",
             str(args.workers),
-            "--val-ratio",
-            str(args.pairwise_val_ratio),
-            "--test-ratio",
-            str(args.pairwise_test_ratio),
+            "--no-split",
         ]
         if args.keep_redactions:
             filter_base.append("--keep-redactions")
         run(filter_base + ["--input", str(raw_zh), "--output", str(proc_zh)], dry_run=args.dry_run)
         run(filter_base + ["--input", str(raw_en), "--output", str(proc_en)], dry_run=args.dry_run)
+    if not args.dry_run:
+        zh_filter_manifest = paths.processed_dir / "filter_reports" / proc_zh.stem / "summary.json"
+        en_filter_manifest = paths.processed_dir / "filter_reports" / proc_en.stem / "summary.json"
+        require_json_manifest(zh_filter_manifest, stage=f"{lang.code} Chinese cleaning")
+        require_json_manifest(en_filter_manifest, stage=f"{lang.code} English cleaning")
 
     return {
         "language": lang.name,
@@ -377,6 +436,14 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         "raw_en_rows": count_csv_rows(raw_en),
         "processed_zh_rows": count_csv_rows(proc_zh),
         "processed_en_rows": count_csv_rows(proc_en),
+        "manifests": {
+            "fetch": stage_manifest_record(fetch_manifest) if not args.dry_run else {},
+            "qc": stage_manifest_record(qc_manifest) if not args.dry_run else {},
+            "extract_zh": (stage_manifest_record(raw_zh.with_suffix(".extraction.json")) if not args.dry_run else {}),
+            "extract_en": (stage_manifest_record(raw_en.with_suffix(".extraction.json")) if not args.dry_run else {}),
+            "clean_zh": (stage_manifest_record(zh_filter_manifest) if not args.dry_run else {}),
+            "clean_en": (stage_manifest_record(en_filter_manifest) if not args.dry_run else {}),
+        },
     }
 
 
@@ -392,6 +459,11 @@ def build_aggregates(args: argparse.Namespace, input_dir: Path, output_dir: Path
         ],
         dry_run=args.dry_run,
     )
+    if not args.dry_run:
+        require_json_manifest(
+            output_dir / "aggregate_manifest.json",
+            stage=f"aggregate {input_dir.name}",
+        )
 
 
 def run_pivot(args: argparse.Namespace, paths: BuildPaths) -> None:
@@ -422,6 +494,14 @@ def run_pivot(args: argparse.Namespace, paths: BuildPaths) -> None:
     if args.respect_usage_limit:
         cmd.append("--respect-usage-limit")
     run(cmd, dry_run=args.dry_run)
+    if not args.dry_run:
+        pivot_manifest = require_json_manifest(
+            paths.processed_dir / "pivot" / "pivot_manifest.json",
+            stage="DeepL pivot",
+        )
+        for stats in pivot_manifest.get("stats", []):
+            if stats.get("synthetic_rows_missing") or stats.get("errors") or stats.get("stopped_reason"):
+                raise SystemExit(f"DeepL pivot direction {stats.get('direction')} is incomplete: {stats}")
 
 
 def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: Path) -> None:
@@ -431,8 +511,7 @@ def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: P
     ]
     for target_lang, target_col, short, input_csv in split_jobs:
         if not input_csv.exists() and not args.dry_run:
-            print(f"Skipping {target_lang} hard splits; missing {input_csv}")
-            continue
+            raise SystemExit(f"Cannot build {target_lang} hard splits; missing {input_csv}")
         out_dir = output_root / f"splits_{short}_v1"
         run(
             [
@@ -462,6 +541,8 @@ def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: P
                 str(args.min_test_rows),
                 "--min-validate-rows",
                 str(args.min_validate_rows),
+                "--ngram-jaccard-threshold",
+                str(args.ngram_jaccard_threshold),
                 "--tiers",
                 args.tiers,
             ],
@@ -472,6 +553,39 @@ def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: P
         if hard_file.exists() and not args.dry_run:
             shutil.copy2(hard_file, dest)
             print(f"Copied headline hard split -> {dest}")
+            run(
+                [
+                    PYTHON,
+                    str(script("formosan_mt_experiments/scripts/validate_experiment.py")),
+                    "--input",
+                    str(hard_file),
+                    "--target-col",
+                    target_col,
+                    "--target-lang",
+                    target_lang,
+                    "--min-test-ratio",
+                    str(args.test_ratio),
+                    "--min-validate-ratio",
+                    str(args.val_ratio),
+                    "--min-test-rows",
+                    str(args.min_test_rows),
+                    "--min-validate-rows",
+                    str(args.min_validate_rows),
+                    "--ngram-jaccard-threshold",
+                    str(args.ngram_jaccard_threshold),
+                    "--report",
+                    str(out_dir / "validation_in_domain_hard.json"),
+                    "--require-human-eval",
+                    "--require-document-holdout-report",
+                ],
+                dry_run=False,
+            )
+            require_json_manifest(
+                out_dir / "validation_in_domain_hard.json",
+                stage=f"{target_lang} hard-split validation",
+            )
+        elif not args.dry_run:
+            raise SystemExit(f"Hard split builder did not produce {hard_file}")
 
 
 def write_manifest(
@@ -480,12 +594,73 @@ def write_manifest(
     final_corpus_dir: Path,
     paths: BuildPaths,
 ) -> None:
+    artifacts = build_artifact_manifest(args, final_corpus_dir, paths)
+    required_artifacts = {
+        "big_corpus_en",
+        "big_corpus_zh",
+        "big_corpus_combined",
+        "big_corpus_en_in_domain_hard",
+        "big_corpus_zh_in_domain_hard",
+    }
+    missing_artifacts = sorted(name for name in required_artifacts if not artifacts.get(name, {}).get("exists"))
+    stage_paths = {
+        "processed_aggregate": paths.processed_dir / "aggregate_manifest.json",
+        "final_aggregate": final_corpus_dir / "aggregate_manifest.json",
+        "split_en": paths.split_root / "splits_en_v1" / "report_in_domain_hard.json",
+        "split_zh": paths.split_root / "splits_zh_v1" / "report_in_domain_hard.json",
+        "validate_en": paths.split_root / "splits_en_v1" / "validation_in_domain_hard.json",
+        "validate_zh": paths.split_root / "splits_zh_v1" / "validation_in_domain_hard.json",
+    }
+    if args.with_pivot:
+        stage_paths["pivot"] = paths.processed_dir / "pivot" / "pivot_manifest.json"
+    stage_manifests: dict[str, dict] = {}
+    missing_stages: list[str] = []
+    if not args.dry_run:
+        for name, path in stage_paths.items():
+            if path.is_file():
+                try:
+                    stage_manifests[name] = stage_manifest_record(path)
+                except SystemExit:
+                    missing_stages.append(name)
+            else:
+                missing_stages.append(name)
+
+    dependency_versions: dict[str, str] = {}
+    for package in (
+        "numpy",
+        "pandas",
+        "python-dotenv",
+        "requests",
+        "sacrebleu",
+        "sentencepiece",
+        "torch",
+        "transformers",
+    ):
+        try:
+            dependency_versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependency_versions[package] = "not-installed"
+    complete = not missing_artifacts and not missing_stages
     manifest = {
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": 2,
+        "pipeline_version": PIPELINE_CONFIG["pipeline_version"],
+        "created_at": utc_now(),
         "corpus_name": args.corpus_name,
+        "command": [sys.executable, *sys.argv],
+        "repository": git_state(PROJECT_ROOT),
+        "pipeline_config": {
+            "path": str(PIPELINE_CONFIG_PATH.relative_to(PROJECT_ROOT)),
+            "sha256": sha256_file(PIPELINE_CONFIG_PATH),
+        },
+        "runtime": {
+            "python": sys.version,
+            "executable": sys.executable,
+            "dependencies": dependency_versions,
+        },
         "languages": language_reports,
         "settings": {
             "public": args.public,
+            "qc_revision": args.qc_revision,
             "units": args.units,
             "workers": args.workers,
             "hard_split_ratios": {
@@ -497,11 +672,9 @@ def write_manifest(
                 "test": args.min_test_rows,
                 "validate": args.min_validate_rows,
             },
+            "hard_split_character_ngram_jaccard_threshold": args.ngram_jaccard_threshold,
             "with_pivot": args.with_pivot,
-            "pivot_read_cache_dirs": [
-                str(path)
-                for path in pivot_read_cache_dirs(args, paths)
-            ],
+            "pivot_read_cache_dirs": [str(path) for path in pivot_read_cache_dirs(args, paths)],
             "keep_redactions": args.keep_redactions,
             "fresh_downloads": not args.keep_downloaded,
             "keep_build_output": args.keep_build_output,
@@ -523,17 +696,22 @@ def write_manifest(
             "final_corpus_dir": str(final_corpus_dir),
             "experiment_splits": str(paths.split_root),
         },
-        "artifacts": build_artifact_manifest(args, final_corpus_dir, paths),
+        "stage_manifests": stage_manifests,
+        "artifacts": artifacts,
+        "release_gate": {
+            "required_artifacts": sorted(required_artifacts),
+            "missing_artifacts": missing_artifacts,
+            "missing_or_incomplete_stages": missing_stages,
+        },
+        "complete": complete,
     }
     if args.dry_run:
         print(json.dumps(manifest, indent=2, ensure_ascii=False))
         return
-    paths.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    paths.manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(paths.manifest_path, manifest)
     print(f"Manifest: {paths.manifest_path}")
+    if not complete:
+        raise SystemExit(f"Corpus build did not pass release gates; inspect {paths.manifest_path}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -545,9 +723,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--corpus-name",
         default=None,
-        help=(
-            "Write all generated artifacts under corpus_builds/<name>/."
-        ),
+        help=("Write all generated artifacts under corpus_builds/<name>/."),
     )
     parser.add_argument(
         "--build-root",
@@ -562,18 +738,14 @@ def parse_args() -> argparse.Namespace:
         "--build-public-private",
         action="store_true",
         help=(
-            "Build public and private/all-data variants sequentially into separate "
-            "named corpus_builds/ directories."
+            "Build public and private/all-data variants sequentially into separate named corpus_builds/ directories."
         ),
     )
     parser.add_argument("--public", action="store_true", help="Fetch from public FormosanBank/Corpora XML only")
     parser.add_argument(
         "--no-public-language-path-prefilter",
         action="store_true",
-        help=(
-            "Disable the conservative public-mode path-language prefilter before "
-            "raw XML downloads."
-        ),
+        help=("Disable the conservative public-mode path-language prefilter before raw XML downloads."),
     )
     parser.add_argument("--force-branch", default=None, help="Force GitHub branch for fetch_xml.py")
     parser.add_argument(
@@ -636,12 +808,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--formosanbank-path", type=Path, default=None)
+    parser.add_argument(
+        "--qc-revision",
+        default=PIPELINE_CONFIG["formosanbank"]["qc_revision"],
+        help="Pinned FormosanBank commit used for QC.",
+    )
     parser.add_argument("--force-qc-update", action="store_true")
-    parser.add_argument("--validate-qc", action="store_true")
+    parser.add_argument(
+        "--skip-qc-validation",
+        action="store_true",
+        help="Diagnostic only; production builds run hard FormosanBank validators.",
+    )
+    parser.add_argument(
+        "--validate-qc",
+        action="store_true",
+        help="Deprecated compatibility flag; QC validation is now enabled by default.",
+    )
     parser.add_argument("--units", default="sentences,words")
     parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 1))
-    parser.add_argument("--pairwise-val-ratio", type=float, default=0.10)
-    parser.add_argument("--pairwise-test-ratio", type=float, default=0.10)
     parser.add_argument("--keep-redactions", action="store_true")
 
     parser.add_argument("--skip-fetch", action="store_true")
@@ -690,14 +874,42 @@ def parse_args() -> argparse.Namespace:
             "Can be repeated. Writes still go only to the build-local cache."
         ),
     )
-    parser.add_argument("--train-ratio", type=float, default=0.90)
-    parser.add_argument("--val-ratio", type=float, default=0.025)
-    parser.add_argument("--test-ratio", type=float, default=0.075)
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=PIPELINE_CONFIG["splits"]["train_ratio"],
+    )
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=PIPELINE_CONFIG["splits"]["validate_ratio"],
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=PIPELINE_CONFIG["splits"]["test_ratio"],
+    )
     parser.add_argument("--min-formosan-tokens", type=int, default=4)
     parser.add_argument("--min-target-tokens", type=int, default=4)
-    parser.add_argument("--min-test-rows", type=int, default=500)
-    parser.add_argument("--min-validate-rows", type=int, default=150)
-    parser.add_argument("--tiers", default="lexical,in_domain_hard,hard_global")
+    parser.add_argument(
+        "--min-test-rows",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_test_rows"],
+    )
+    parser.add_argument(
+        "--min-validate-rows",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_validate_rows"],
+    )
+    parser.add_argument(
+        "--ngram-jaccard-threshold",
+        type=float,
+        default=PIPELINE_CONFIG["splits"]["character_ngram_jaccard_threshold"],
+    )
+    parser.add_argument(
+        "--tiers",
+        default=PIPELINE_CONFIG["splits"]["headline_tier"],
+    )
     args = parser.parse_args()
     if args.fetch_workers < 1:
         raise SystemExit("--fetch-workers must be >= 1")
@@ -711,6 +923,24 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--min-test-rows must be >= 0")
     if args.min_validate_rows < 0:
         raise SystemExit("--min-validate-rows must be >= 0")
+    if not 0.5 <= args.ngram_jaccard_threshold <= 1.0:
+        raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
+    if args.tiers != PIPELINE_CONFIG["splits"]["headline_tier"]:
+        raise SystemExit(
+            "Corpus pipeline v2 supports only "
+            f"--tiers {PIPELINE_CONFIG['splits']['headline_tier']}"
+        )
+    if len(args.qc_revision) != 40 or any(
+        character not in "0123456789abcdef" for character in args.qc_revision.lower()
+    ):
+        raise SystemExit("--qc-revision must be a full 40-character commit SHA")
+    split_total = args.train_ratio + args.val_ratio + args.test_ratio
+    if abs(split_total - 1.0) > 1e-9:
+        raise SystemExit(f"Hard split ratios must sum to 1.0, found {split_total:.12f}")
+    if args.with_pivot and args.pivot_splits.strip().lower() not in {"all", "*"}:
+        raise SystemExit("Pivoting now occurs before the single hard split and must use --pivot-splits all")
+    if args.skip_artifact_checksums and not args.dry_run:
+        raise SystemExit("Production corpus builds require artifact checksums")
     if args.resplit_only and (not args.corpus_name or not args.with_pivot):
         raise SystemExit("--resplit-only requires --corpus-name and --with-pivot")
     return args
@@ -723,9 +953,7 @@ def run_build(args: argparse.Namespace) -> Path:
             raise SystemExit(f"Missing finalized pivot corpus for resplit: {paths.final_dir}")
         previous_languages = []
         if paths.manifest_path.is_file():
-            previous_languages = json.loads(
-                paths.manifest_path.read_text(encoding="utf-8")
-            ).get("languages", [])
+            previous_languages = json.loads(paths.manifest_path.read_text(encoding="utf-8")).get("languages", [])
         build_hard_splits(args, paths.final_dir, paths.split_root)
         if args.exclude_bible and not args.dry_run:
             validate_no_bible_sources(paths, paths.final_dir)

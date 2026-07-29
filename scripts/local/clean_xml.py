@@ -473,7 +473,7 @@ def main() -> None:
         },
         "input": input_counts,
         **qc_result,
-        "complete": True,
+        "complete": not args.skip_validation,
     }
     manifest_path = corpus_dir / "_qc_manifest.json"
     atomic_write_json(manifest_path, manifest)

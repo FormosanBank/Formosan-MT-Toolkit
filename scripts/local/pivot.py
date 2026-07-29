@@ -29,13 +29,21 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 import requests
+from corpus_quality import exact_key, normalize_text, quality_decision
 from dotenv import load_dotenv
+from pipeline_common import (
+    atomic_write_json,
+    content_row_id,
+    load_pipeline_config,
+    sha256_bytes,
+    sha256_file,
+    utc_now,
+)
 from tqdm import tqdm
 
 DEEPL_MAX_TEXTS_PER_REQUEST = 50
@@ -43,7 +51,15 @@ DEEPL_MAX_REQUEST_BYTES = 128 * 1024
 DEFAULT_SAFE_REQUEST_BYTES = 120 * 1024
 PROVIDER = "deepl"
 
-BASE_COLUMNS = ["lang_code", "formosan_sentence", "source", "dialect", "split"]
+BASE_COLUMNS = [
+    "row_id",
+    "source_record_id",
+    "lang_code",
+    "formosan_sentence",
+    "source",
+    "dialect",
+    "row_type",
+]
 PROVENANCE_COLUMNS = [
     "pivot_origin",
     "pivot_provider",
@@ -52,6 +68,7 @@ PROVENANCE_COLUMNS = [
     "pivot_target_lang",
     "pivot_source_text",
     "pivot_cache_key",
+    "pivot_detected_source_lang",
 ]
 
 
@@ -138,6 +155,8 @@ class OutputBuildResult:
     duplicate_rows_skipped: int = 0
     split_overrides: int = 0
     output_rows: int = 0
+    rejected_rows: int = 0
+    incomplete_path: Optional[str] = None
 
 
 @dataclass
@@ -248,8 +267,7 @@ class DeepLClient:
                 if resp.status_code in {401, 403, 404}:
                     bad_name = self.current_key.env_name
                     print(
-                        f"DeepL key {bad_name} is invalid or forbidden (HTTP {resp.status_code}); "
-                        "skipping it.",
+                        f"DeepL key {bad_name} is invalid or forbidden (HTTP {resp.status_code}); skipping it.",
                         file=sys.stderr,
                     )
                     if self._advance_key():
@@ -270,9 +288,7 @@ class DeepLClient:
                     last_error = f"HTTP {resp.status_code}: {body}"
                     continue
 
-                raise DeepLRuntimeError(
-                    f"DeepL HTTP {resp.status_code} using {self.current_key.env_name}: {body}"
-                )
+                raise DeepLRuntimeError(f"DeepL HTTP {resp.status_code} using {self.current_key.env_name}: {body}")
             else:
                 raise DeepLRuntimeError(f"DeepL request failed after retries: {last_error}")
 
@@ -282,8 +298,7 @@ class DeepLClient:
             resp = self.session.get(url, timeout=self.timeout)
             if resp.status_code != 200:
                 print(
-                    f"Warning: could not read DeepL usage for {self.current_key.env_name}: "
-                    f"HTTP {resp.status_code}",
+                    f"Warning: could not read DeepL usage for {self.current_key.env_name}: HTTP {resp.status_code}",
                     file=sys.stderr,
                 )
                 return None
@@ -305,13 +320,13 @@ def find_project_root(start: Path) -> Path:
     if cur.is_file():
         cur = cur.parent
     for parent in [cur, *cur.parents]:
-        if (parent / "README.MD").exists() and (parent / "processed_corpora").exists():
+        if (parent / "README.md").exists() and (parent / "config" / "corpus_pipeline.json").exists():
             return parent
-    return Path.cwd()
+    raise RuntimeError(f"Could not locate Formosan-MT-Toolkit project root from {start}")
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return utc_now()
 
 
 def read_corpus(path: Path, label: str) -> pd.DataFrame:
@@ -326,33 +341,8 @@ def validate_columns(df: pd.DataFrame, path: Path, columns: Iterable[str]) -> No
         raise SystemExit(f"{path} is missing required column(s): {missing}")
 
 
-def normalize_split(value: Any) -> str:
-    split = str(value or "train").strip().lower()
-    if split in {"val", "valid", "validation"}:
-        return "validate"
-    if split in {"train", "validate", "test"}:
-        return split
-    return "train"
-
-
-def parse_split_filter(raw: str) -> Optional[set[str]]:
-    raw = (raw or "all").strip().lower()
-    if raw in {"all", "*"}:
-        return None
-    out = {normalize_split(part) for part in raw.split(",") if part.strip()}
-    valid = {"train", "validate", "test"}
-    bad = out - valid
-    if bad:
-        raise SystemExit(f"Unsupported split(s): {sorted(bad)}. Use all, train, validate, test.")
-    return out
-
-
-def split_selected(value: Any, selected: Optional[set[str]]) -> bool:
-    return selected is None or normalize_split(value) in selected
-
-
 def normalize_key_text(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = unicodedata.normalize("NFC", str(value or ""))
     return " ".join(text.split()).strip()
 
 
@@ -464,21 +454,39 @@ def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
                 continue
             try:
                 record = json.loads(line)
-            except json.JSONDecodeError:
-                print(f"Warning: ignoring malformed cache line {cache_path}:{line_no}", file=sys.stderr)
-                continue
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Malformed DeepL cache record {cache_path}:{line_no}: {exc}") from exc
             key = record.get("key")
             translation = record.get("translation")
-            if isinstance(key, str) and isinstance(translation, str):
-                cache[key] = record
+            if not isinstance(key, str) or not isinstance(translation, str):
+                raise RuntimeError(f"Invalid DeepL cache record {cache_path}:{line_no}: missing string key/translation")
+            expected_key = make_cache_key(
+                provider=str(record.get("provider") or PROVIDER),
+                source_lang=str(record.get("source_lang") or ""),
+                target_lang=str(record.get("target_lang") or ""),
+                text=str(record.get("text") or ""),
+                split_sentences=str(record.get("split_sentences") or "0"),
+                preserve_formatting=bool(record.get("preserve_formatting", True)),
+                model_type=(str(record.get("model_type_requested")) if record.get("model_type_requested") else None),
+            )
+            if key != expected_key:
+                raise RuntimeError(f"DeepL cache key mismatch at {cache_path}:{line_no}; cache may be corrupt")
+            existing = cache.get(key)
+            if existing is not None and existing.get("translation") != translation:
+                raise RuntimeError(f"Conflicting DeepL translations for cache key {key} in {cache_path}")
+            cache[key] = record
     return cache
 
 
 def load_cache_chain(cache_paths: Iterable[Path]) -> dict[str, dict[str, Any]]:
-    """Load cache files in order; later files override earlier records."""
+    """Load cache files in order and reject conflicting records."""
     merged: dict[str, dict[str, Any]] = {}
     for cache_path in cache_paths:
-        merged.update(load_cache(cache_path))
+        for key, record in load_cache(cache_path).items():
+            existing = merged.get(key)
+            if existing is not None and existing.get("translation") != record.get("translation"):
+                raise RuntimeError(f"Conflicting DeepL translations for cache key {key} across cache chain")
+            merged[key] = record
     return merged
 
 
@@ -564,7 +572,6 @@ def candidate_jobs(
     *,
     text_col: str,
     direction: Direction,
-    selected_splits: Optional[set[str]],
     cache: dict[str, dict[str, Any]],
     force: bool,
     target_keys: set[tuple[str, str]],
@@ -580,8 +587,6 @@ def candidate_jobs(
     seen_overlap: set[tuple[str, str]] = set()
 
     for _, row in df.iterrows():
-        if not split_selected(row.get("split", "train"), selected_splits):
-            continue
         stats.candidate_rows += 1
         f_key = formosan_key(row)
         if skip_target_overlaps and f_key[0] and f_key[1] and f_key in target_keys:
@@ -630,7 +635,6 @@ def translate_direction(
     *,
     args: argparse.Namespace,
     client: Optional[DeepLClient],
-    selected_splits: Optional[set[str]],
     budget: CharBudget,
 ) -> tuple[dict[str, dict[str, Any]], DirectionStats]:
     stats = DirectionStats(direction=direction.name)
@@ -640,12 +644,9 @@ def translate_direction(
     validate_columns(target_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
     stats.source_rows = len(source_df)
     stats.original_rows = len(target_df)
-    target_keys = set(target_split_lookup(target_df).keys())
+    target_keys = target_formosan_keys(target_df)
 
-    read_cache_paths = [
-        cache_dir / direction.cache_filename
-        for cache_dir in getattr(args, "read_cache_dir", [])
-    ]
+    read_cache_paths = [cache_dir / direction.cache_filename for cache_dir in getattr(args, "read_cache_dir", [])]
     cache_path = args.cache_dir / direction.cache_filename
     error_path = args.cache_dir / direction.cache_filename.replace(".jsonl", ".errors.jsonl")
     cache = load_cache_chain([*read_cache_paths, cache_path])
@@ -657,7 +658,6 @@ def translate_direction(
         source_df,
         text_col=direction.source_text_col,
         direction=direction,
-        selected_splits=selected_splits,
         cache=cache,
         force=args.force,
         target_keys=target_keys,
@@ -672,8 +672,7 @@ def translate_direction(
 
     planned_chars = sum(job.chars for job in jobs)
     deferred = (
-        f", {stats.deferred_by_budget_unique:,} deferred by budget "
-        f"({stats.deferred_by_budget_chars:,} chars)"
+        f", {stats.deferred_by_budget_unique:,} deferred by budget ({stats.deferred_by_budget_chars:,} chars)"
         if stats.deferred_by_budget_unique
         else ""
     )
@@ -764,6 +763,9 @@ def translate_direction(
                 )
                 break
 
+            if len(translations) != len(batch):
+                raise DeepLFatalError(f"DeepL returned {len(translations)} translations for a batch of {len(batch)}")
+
             records: list[dict[str, Any]] = []
             for job, translated in zip(batch, translations):
                 translation_text = str(translated.get("text", ""))
@@ -798,74 +800,118 @@ def translate_direction(
     return cache, stats
 
 
-def target_split_lookup(df: pd.DataFrame) -> dict[tuple[str, str], set[str]]:
-    lookup: dict[tuple[str, str], set[str]] = {}
+def target_formosan_keys(df: pd.DataFrame) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
     for _, row in df.iterrows():
         key = formosan_key(row)
-        if not key[0] or not key[1]:
-            continue
-        lookup.setdefault(key, set()).add(normalize_split(row.get("split", "train")))
-    return lookup
+        if key[0] and key[1]:
+            keys.add(key)
+    return keys
 
 
-def pick_holdout_first(splits: set[str]) -> str:
-    for split in ("test", "validate", "train"):
-        if split in splits:
-            return split
-    return "train"
+def output_columns(
+    original_df: pd.DataFrame,
+    source_df: pd.DataFrame,
+    direction: Direction,
+) -> list[str]:
+    columns = list(original_df.columns)
+    for column in source_df.columns:
+        if column != direction.source_text_col and column not in columns:
+            columns.append(column)
+    if direction.target_text_col not in columns:
+        insert_at = columns.index("formosan_sentence") + 1
+        columns.insert(insert_at, direction.target_text_col)
+    for column in PROVENANCE_COLUMNS:
+        if column not in columns:
+            columns.append(column)
+    for column in (
+        "target_raw",
+        "target_transformations",
+        "quality_flags",
+        "pair_fingerprint",
+        "duplicate_group_size",
+    ):
+        if column not in columns:
+            columns.append(column)
+    return columns
 
 
-def choose_synthetic_split(
-    *,
-    row: pd.Series,
-    target_lookup: dict[tuple[str, str], set[str]],
-    split_policy: str,
-) -> tuple[str, bool]:
-    source_split = normalize_split(row.get("split", "train"))
-    if split_policy == "source":
-        return source_split, False
-
-    key = formosan_key(row)
-    target_splits = target_lookup.get(key, set())
-    if not target_splits:
-        return source_split, False
-
-    if source_split in target_splits:
-        return source_split, False
-
-    if split_policy == "drop-conflicts":
-        return "", True
-
-    chosen = pick_holdout_first(target_splits)
-    return chosen, chosen != source_split
+def target_profile(direction: Direction) -> tuple[str, str]:
+    return ("english", "eng") if direction.target_text_col == "english_sentence" else ("chinese", "zho")
 
 
-def make_row(
-    *,
-    lang_code: str,
-    formosan_sentence: str,
-    target_col: str,
-    target_text: str,
-    source: str,
-    dialect: str,
-    row_type: str,
-    split: str,
-    include_provenance: bool,
-    provenance: dict[str, str],
-) -> dict[str, str]:
-    row = {
-        "lang_code": lang_code,
-        "formosan_sentence": formosan_sentence,
-        target_col: target_text,
-        "source": source,
-        "dialect": dialect,
-        "row_type": row_type,
-        "split": split,
-    }
-    if include_provenance:
-        for col in PROVENANCE_COLUMNS:
-            row[col] = provenance.get(col, "")
-    return row
+def detected_source_mismatch(record: dict[str, Any], direction: Direction) -> bool:
+    detected = str(record.get("detected_source_language") or "").strip().upper()
+    if not detected:
+        return False
+    expected = direction.deepl_source_lang.split("-")[0].upper()
+    return detected.split("-")[0] != expected
+
+
+def synthetic_row(
+    source_row: pd.Series,
+    record: dict[str, Any],
+    direction: Direction,
+    cache_key: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if detected_source_mismatch(record, direction):
+        return None, "deepl_detected_source_language_mismatch"
+    raw_translation = str(record.get("translation") or "")
+    normalized = normalize_text(raw_translation)
+    if not normalized.text:
+        return None, "empty_pivot_translation"
+
+    row = {str(column): value for column, value in source_row.to_dict().items()}
+    row.pop(direction.source_text_col, None)
+    row[direction.target_text_col] = normalized.text
+    row["target_raw"] = raw_translation
+    row["target_transformations"] = "|".join(normalized.transformations)
+    row["target_lang"] = target_profile(direction)[1]
+    row["translation_index"] = ""
+    row["translation_kind"] = "synthetic"
+    row["translation_version"] = str(record.get("model_type_used") or "")
+    row["split"] = "train"
+    row["pivot_origin"] = "synthetic"
+    row["pivot_provider"] = PROVIDER
+    row["pivot_direction"] = direction.name
+    row["pivot_source_lang"] = direction.deepl_source_lang
+    row["pivot_target_lang"] = direction.deepl_target_lang
+    row["pivot_source_text"] = str(record.get("text") or "")
+    row["pivot_cache_key"] = cache_key
+    row["pivot_detected_source_lang"] = str(record.get("detected_source_language") or "")
+    row["row_id"] = content_row_id(
+        source_row.get("row_id", ""),
+        direction.name,
+        cache_key,
+    )
+    row["content_sha256"] = sha256_bytes(
+        "\u241f".join(
+            [
+                str(row.get("lang_code") or ""),
+                str(row.get("formosan_sentence") or ""),
+                normalized.text,
+                target_profile(direction)[1],
+                str(row.get("row_type") or ""),
+            ]
+        ).encode("utf-8")
+    )
+    existing_flags = [value for value in str(row.get("quality_flags") or "").split("|") if value]
+    row["quality_flags"] = "|".join(sorted(set([*existing_flags, "synthetic"])))
+    row["duplicate_group_size"] = 1
+    row["pair_fingerprint"] = sha256_bytes(
+        (exact_key(str(row.get("formosan_sentence") or "")) + "\u241f" + exact_key(normalized.text)).encode("utf-8")
+    )
+
+    decision = quality_decision(
+        pd.Series(row),
+        source_column="formosan_sentence",
+        target_column=direction.target_text_col,
+        target_language=target_profile(direction)[0],
+        keep_redactions=False,
+    )
+    if decision.disposition != "accepted":
+        return None, f"pivot_quality:{decision.reason}"
+    return row, ""
 
 
 def write_pivot_output(
@@ -873,7 +919,6 @@ def write_pivot_output(
     *,
     args: argparse.Namespace,
     cache: dict[str, dict[str, Any]],
-    selected_splits: Optional[set[str]],
 ) -> OutputBuildResult:
     result = OutputBuildResult()
     original_df = read_corpus(direction.original_target_path, f"{direction.name} original target corpus")
@@ -883,61 +928,41 @@ def write_pivot_output(
     validate_columns(original_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
 
-    target_lookup = target_split_lookup(original_df)
+    target_keys = target_formosan_keys(original_df)
     output_path = args.out_dir / direction.output_filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-
-    output_cols = [
-        "lang_code",
-        "formosan_sentence",
-        direction.target_text_col,
-        "source",
-        "dialect",
-        "row_type",
-        "split",
-    ]
-    if args.include_provenance:
-        output_cols.extend(PROVENANCE_COLUMNS)
-
-    seen_rows: set[tuple[str, str, str, str]] = set()
+    incomplete_path = output_path.with_suffix(output_path.suffix + ".incomplete")
+    rejection_path = args.out_dir / f"pivot_rejections_{direction.name}.csv"
+    output_cols = output_columns(original_df, source_df, direction)
+    seen_rows: set[tuple[str, str, str]] = set()
+    rejections: list[dict[str, str]] = []
 
     with tmp_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=output_cols, extrasaction="ignore")
         writer.writeheader()
 
         for _, row in original_df.iterrows():
-            split = normalize_split(row.get("split", "train"))
             target_text = str(row.get(direction.target_text_col, "")).strip()
             formosan = str(row.get("formosan_sentence", "")).strip()
             lang_code = str(row.get("lang_code", "")).strip()
             if not target_text or not formosan:
-                continue
-            dedupe_key = (lang_code, formosan, target_text, split)
+                raise RuntimeError(f"Original {direction.name} target corpus contains an empty required row")
+            if str(row.get("kindOf") or "standard").strip().lower() != "standard":
+                raise RuntimeError(f"Original {direction.name} target corpus contains a non-standard row")
+            dedupe_key = (
+                lang_code,
+                exact_key(formosan),
+                exact_key(target_text),
+            )
             if args.dedupe and dedupe_key in seen_rows:
                 result.duplicate_rows_skipped += 1
                 continue
             seen_rows.add(dedupe_key)
-            out_row = make_row(
-                lang_code=lang_code,
-                formosan_sentence=formosan,
-                target_col=direction.target_text_col,
-                target_text=target_text,
-                source=str(row.get("source", "")),
-                dialect=str(row.get("dialect", "")),
-                row_type=str(row.get("row_type", "unknown") or "unknown"),
-                split=split,
-                include_provenance=args.include_provenance,
-                provenance={
-                    "pivot_origin": "original",
-                    "pivot_provider": "",
-                    "pivot_direction": "",
-                    "pivot_source_lang": "",
-                    "pivot_target_lang": "",
-                    "pivot_source_text": "",
-                    "pivot_cache_key": "",
-                },
-            )
+            out_row = row.to_dict()
+            out_row["pivot_origin"] = str(row.get("pivot_origin") or "original")
+            for column in PROVENANCE_COLUMNS:
+                out_row.setdefault(column, "")
             writer.writerow(out_row)
             result.output_rows += 1
 
@@ -951,16 +976,13 @@ def write_pivot_output(
             unit="row",
             disable=args.quiet,
         ):
-            if not split_selected(row.get("split", "train"), selected_splits):
-                continue
-
             source_text = str(row.get(direction.source_text_col, "")).strip()
             formosan = str(row.get("formosan_sentence", "")).strip()
             lang_code = str(row.get("lang_code", "")).strip()
             if not source_text or not formosan:
                 continue
             f_key = formosan_key(row)
-            if args.skip_target_overlaps and f_key[0] and f_key[1] and f_key in target_lookup:
+            if args.skip_target_overlaps and f_key[0] and f_key[1] and f_key in target_keys:
                 result.target_overlap_rows_skipped += 1
                 continue
 
@@ -978,55 +1000,58 @@ def write_pivot_output(
                 result.synthetic_rows_missing += 1
                 continue
 
-            split, changed = choose_synthetic_split(
-                row=row,
-                target_lookup=target_lookup,
-                split_policy=args.split_policy,
+            out_row, rejection_reason = synthetic_row(
+                row,
+                record,
+                direction,
+                key,
             )
-            if args.split_policy == "drop-conflicts" and not split:
+            if out_row is None:
                 result.synthetic_rows_missing += 1
-                result.split_overrides += 1
+                result.rejected_rows += 1
+                rejections.append(
+                    {
+                        "direction": direction.name,
+                        "row_id": str(row.get("row_id") or ""),
+                        "source_record_id": str(row.get("source_record_id") or ""),
+                        "pivot_cache_key": key,
+                        "reason": rejection_reason,
+                        "source_text": source_text,
+                        "translation": str(record.get("translation") or ""),
+                    }
+                )
                 continue
-            if changed:
-                result.split_overrides += 1
-
-            target_text = str(record.get("translation", "")).strip()
-            if not target_text:
-                result.synthetic_rows_missing += 1
-                continue
-
-            dedupe_key = (lang_code, formosan, target_text, split)
+            target_text = str(out_row[direction.target_text_col])
+            dedupe_key = (
+                lang_code,
+                exact_key(formosan),
+                exact_key(target_text),
+            )
             if args.dedupe and dedupe_key in seen_rows:
                 result.duplicate_rows_skipped += 1
                 continue
             seen_rows.add(dedupe_key)
-
-            out_row = make_row(
-                lang_code=lang_code,
-                formosan_sentence=formosan,
-                target_col=direction.target_text_col,
-                target_text=target_text,
-                source=str(row.get("source", "")),
-                dialect=str(row.get("dialect", "")),
-                row_type=str(row.get("row_type", "unknown") or "unknown"),
-                split=split,
-                include_provenance=args.include_provenance,
-                provenance={
-                    "pivot_origin": "synthetic",
-                    "pivot_provider": PROVIDER,
-                    "pivot_direction": direction.name,
-                    "pivot_source_lang": direction.deepl_source_lang,
-                    "pivot_target_lang": direction.deepl_target_lang,
-                    "pivot_source_text": source_text,
-                    "pivot_cache_key": key,
-                },
-            )
             writer.writerow(out_row)
             result.synthetic_rows_available += 1
             result.synthetic_rows_written += 1
             result.output_rows += 1
 
-    os.replace(tmp_path, output_path)
+    if rejections:
+        with rejection_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rejections[0]))
+            writer.writeheader()
+            writer.writerows(rejections)
+    else:
+        rejection_path.unlink(missing_ok=True)
+
+    if result.synthetic_rows_missing or result.rejected_rows:
+        output_path.unlink(missing_ok=True)
+        incomplete_path.unlink(missing_ok=True)
+        os.replace(tmp_path, incomplete_path)
+        result.incomplete_path = str(incomplete_path)
+    else:
+        incomplete_path.unlink(missing_ok=True)
+        os.replace(tmp_path, output_path)
     return result
 
 
@@ -1038,18 +1063,49 @@ def write_manifest(
     sources: dict[str, str],
 ) -> Path:
     manifest_path = args.out_dir / "pivot_manifest.json"
+    stats_payload = [stats.__dict__ for stats in direction_stats]
+    complete = all(
+        not stats.stopped_reason
+        and stats.errors == 0
+        and stats.synthetic_rows_missing == 0
+        and stats.deferred_by_budget_unique == 0
+        and stats.skipped_over_request_limit == 0
+        and bool(stats.output_path)
+        and Path(str(stats.output_path)).is_file()
+        for stats in direction_stats
+    )
+    source_records = {
+        name: {
+            "path": path,
+            "sha256": sha256_file(Path(path)),
+        }
+        for name, path in sources.items()
+    }
+    cache_records: dict[str, dict[str, Any]] = {}
+    for stats in direction_stats:
+        for path_string in [*(stats.read_cache_paths or []), stats.cache_path]:
+            if not path_string:
+                continue
+            path = Path(path_string)
+            cache_records[str(path)] = {
+                "exists": path.is_file(),
+                "sha256": sha256_file(path) if path.is_file() else None,
+                "bytes": path.stat().st_size if path.is_file() else 0,
+            }
     manifest = {
+        "schema_version": 2,
+        "pipeline_version": load_pipeline_config()["pipeline_version"],
         "created_at": now_iso(),
         "provider": PROVIDER,
-        "sources": sources,
+        "sources": source_records,
         "outputs": {
             "out_dir": str(args.out_dir),
             "cache_dir": str(args.cache_dir),
         },
+        "caches": cache_records,
         "settings": {
             "directions": args.directions,
             "splits": args.splits,
-            "split_policy": args.split_policy,
             "batch_size": args.batch_size,
             "max_request_bytes": args.max_request_bytes,
             "target_zh": args.target_zh,
@@ -1067,12 +1123,11 @@ def write_manifest(
             "skip_translation": args.skip_translation,
         },
         "deepl_usage_at_start": usage,
-        "stats": [stats.__dict__ for stats in direction_stats],
+        "stats": stats_payload,
+        "complete": complete,
     }
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = manifest_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    os.replace(tmp_path, manifest_path)
+    atomic_write_json(manifest_path, manifest)
     return manifest_path
 
 
@@ -1137,17 +1192,10 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     )
 
     ap.add_argument("--directions", default="both", help="both, en2zh, zh2en, or comma-separated values")
-    ap.add_argument("--splits", default="all", help="all or comma-separated train,validate,test")
     ap.add_argument(
-        "--split-policy",
-        choices=["target-if-overlap", "source", "drop-conflicts"],
-        default="target-if-overlap",
-        help=(
-            "How to assign synthetic row splits. target-if-overlap keeps source splits unless "
-            "the same Formosan sentence already has a different split in the target corpus; "
-            "drop-conflicts omits those conflicting synthetic rows. This is only used when "
-            "--include-target-overlaps is set."
-        ),
+        "--splits",
+        default="all",
+        help="Compatibility option. Corpus pipeline v2 requires all rows before its single split.",
     )
     ap.add_argument(
         "--include-target-overlaps",
@@ -1206,7 +1254,13 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     ap.add_argument("--no-write-output", action="store_true")
     ap.add_argument("--include-provenance", action="store_true", default=True)
     ap.add_argument("--minimal-schema", dest="include_provenance", action="store_false")
-    ap.add_argument("--dedupe", action="store_true", help="Drop exact duplicate output rows after originals win.")
+    ap.add_argument(
+        "--no-dedupe",
+        dest="dedupe",
+        action="store_false",
+        help="Diagnostic only. Production output deduplicates after original rows win.",
+    )
+    ap.set_defaults(dedupe=True)
     ap.add_argument("--quiet", action="store_true")
     return ap
 
@@ -1231,7 +1285,8 @@ def main() -> None:
         args.model_type = None
 
     selected_direction_names = parse_directions(args.directions)
-    selected_splits = parse_split_filter(args.splits)
+    if args.splits.strip().lower() not in {"all", "*"}:
+        raise SystemExit("Corpus pipeline v2 requires --splits all; splitting occurs once after pivoting")
     directions = build_directions(args)
 
     api_key_env_names = parse_api_key_envs(args.api_key_env)
@@ -1244,8 +1299,7 @@ def main() -> None:
     if not args.dry_run and not args.skip_translation:
         if not deepl_keys:
             raise SystemExit(
-                "Missing DeepL API key. Checked environment variable(s): "
-                f"{', '.join(api_key_env_names) or '(none)'}."
+                f"Missing DeepL API key. Checked environment variable(s): {', '.join(api_key_env_names) or '(none)'}."
             )
         client = DeepLClient(
             keys=deepl_keys,
@@ -1279,7 +1333,6 @@ def main() -> None:
         print("Read caches:  " + ", ".join(str(path) for path in args.read_cache_dir))
     print(f"Directions:   {', '.join(selected_direction_names)}")
     print(f"Splits:       {args.splits}")
-    print(f"Split policy: {args.split_policy}")
 
     for name in selected_direction_names:
         direction = directions[name]
@@ -1287,7 +1340,6 @@ def main() -> None:
             direction,
             args=args,
             client=client,
-            selected_splits=selected_splits,
             budget=budget,
         )
         caches[name] = cache
@@ -1300,7 +1352,6 @@ def main() -> None:
                 direction,
                 args=args,
                 cache=caches[stats.direction],
-                selected_splits=selected_splits,
             )
             stats.original_rows = result.original_rows
             stats.synthetic_rows_available = result.synthetic_rows_available
@@ -1313,7 +1364,8 @@ def main() -> None:
             stats.duplicate_rows_skipped = result.duplicate_rows_skipped
             stats.split_overrides = result.split_overrides
             stats.output_rows = result.output_rows
-            stats.output_path = str(args.out_dir / direction.output_filename)
+            stats.errors += result.rejected_rows
+            stats.output_path = result.incomplete_path or str(args.out_dir / direction.output_filename)
 
     manifest: Optional[Path] = None
     if not args.dry_run:
@@ -1339,6 +1391,12 @@ def main() -> None:
             print(f"{stats.direction}: stopped early: {stats.stopped_reason}")
     if manifest is not None:
         print(f"Manifest: {manifest}")
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        if manifest_payload.get("complete") is not True:
+            raise SystemExit(
+                "DeepL pivot is incomplete. Caches were preserved, but finalized "
+                f"outputs were not promoted; inspect {manifest} and rerun."
+            )
     else:
         print("Dry run: no manifest or output files written.")
 

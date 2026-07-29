@@ -14,11 +14,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
-from build_experiment_splits import one_edit_conflicts, split_targets  # noqa: E402
+from build_experiment_splits import (  # noqa: E402
+    build_hard_split,
+    one_edit_conflicts,
+    split_targets,
+)
+from mt_common import add_normalized_columns  # noqa: E402
 from mt_metrics import score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
 from train_directional_nllb import metric_improved  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
+from validate_experiment import validate_provenance, validate_splits  # noqa: E402
 from verify_experiment_manifest import manifest_errors  # noqa: E402
 from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
 
@@ -66,6 +72,129 @@ class LeakageTests(unittest.TestCase):
                 min_validate_rows=150,
             ),
             (7_500, 2_500),
+        )
+
+    @staticmethod
+    def hard_split_fixture() -> pd.DataFrame:
+        rows = []
+        for document in range(60):
+            for sentence in range(3):
+                digest = hashlib.sha256(
+                    f"{document}:{sentence}".encode()
+                ).hexdigest()
+                rows.append(
+                    {
+                        "row_id": f"human-{document}-{sentence}",
+                        "source_record_id": f"record-{document}-{sentence}",
+                        "lang_code": "ami",
+                        "formosan_sentence": (
+                            f"{digest[:8]} {digest[8:16]} {digest[16:24]} "
+                            f"{digest[24:32]} {digest[32:40]}"
+                        ),
+                        "english_sentence": (
+                            f"{digest[40:48]} {digest[48:56]} sentence "
+                            f"{document} number {sentence}"
+                        ),
+                        "source": f"FormosanBank/Corpora/Test/XML/doc-{document}.xml",
+                        "repository": "FormosanBank",
+                        "repository_commit": "a" * 40,
+                        "xml_path": f"Corpora/Test/XML/doc-{document}.xml",
+                        "xml_id": f"S-{sentence}",
+                        "kindOf": "standard",
+                        "dialect": "Test",
+                        "row_type": "sentence",
+                        "pivot_origin": "original",
+                        "quality_flags": "",
+                    }
+                )
+            rows.append(
+                {
+                    **rows[-1],
+                    "row_id": f"synthetic-{document}",
+                    "source_record_id": f"synthetic-record-{document}",
+                    "formosan_sentence": f"synthetic unique {document}",
+                    "english_sentence": f"synthetic target {document}",
+                    "xml_id": f"pivot-{document}",
+                    "pivot_origin": "synthetic",
+                }
+            )
+            rows.append(
+                {
+                    **rows[-2],
+                    "row_id": f"lexeme-{document}",
+                    "source_record_id": f"lexeme-record-{document}",
+                    "formosan_sentence": f"lexeme{document}",
+                    "english_sentence": f"entry{document}",
+                    "xml_id": f"W-{document}",
+                    "row_type": "lexeme",
+                }
+            )
+        rows.append({**rows[0], "row_id": "duplicate-pair"})
+        return pd.DataFrame(rows)
+
+    def test_hard_split_is_human_document_disjoint_and_large(self) -> None:
+        raw = self.hard_split_fixture()
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        output, excluded, duplicates, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+        evaluation = output[output["split"].isin({"test", "validate"})]
+        train = output[output["split"].eq("train")]
+        self.assertTrue(evaluation["row_type"].eq("sentence").all())
+        self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
+        self.assertFalse(
+            set(train["document_id"]) & set(evaluation["document_id"])
+        )
+        self.assertEqual(len(duplicates), 1)
+        self.assertGreater(len(excluded), 0)
+        self.assertTrue(report["complete"])
+
+        provenance = validate_provenance(output)
+        validation = validate_splits(
+            output,
+            target_col="english_sentence",
+            min_test_ratio=0.075,
+            min_validate_ratio=0.025,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+        )
+        self.assertTrue(provenance["ok"], provenance)
+        self.assertTrue(validation["ok"], validation)
+
+    def test_independent_validator_rejects_synthetic_same_document_eval(self) -> None:
+        frame = self.hard_split_fixture().iloc[:3].copy()
+        frame["split"] = ["train", "test", "validate"]
+        frame.loc[frame.index[1], "pivot_origin"] = "synthetic"
+        validation = validate_splits(
+            frame,
+            target_col="english_sentence",
+            min_test_ratio=0,
+            min_validate_ratio=0,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.82,
+        )
+        self.assertFalse(validation["ok"])
+        self.assertEqual(validation["synthetic_eval_rows"], 1)
+        self.assertGreater(
+            validation["train_evaluation"]["document_overlap"],
+            0,
         )
 
 

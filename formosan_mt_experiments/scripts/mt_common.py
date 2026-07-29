@@ -195,31 +195,35 @@ def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -
 def source_bucket(source: object) -> str:
     """Coarse source family used by splitting, sampling, and reporting."""
     s = "" if pd.isna(source) else str(source)
-    if "xue_xi_ci_biao_learning_vocabulary" in s:
+    lowered = s.lower()
+    if "xue_xi_ci_biao_learning_vocabulary" in lowered:
         return "learning_vocab"
-    if "qing_jing_zu_yu_contextual_indigenous_language" in s:
+    if "qing_jing_zu_yu_contextual_indigenous_language" in lowered:
         return "classroom_context"
-    if "Dict" in s or "Dictionary" in s:
+    if "dict" in lowered or "dictionary" in lowered:
         return "dictionary"
-    if "tu_hua_gu_shi_pian_picture_story" in s:
+    if "tu_hua_gu_shi_pian_picture_story" in lowered:
         return "picture_story"
-    if "hui_ben_ping_tai_picture_book_platform" in s:
+    if "hui_ben_ping_tai_picture_book_platform" in lowered:
         return "picture_book"
-    if "zu_yu_duan_wen_indigenous_language_essays" in s:
+    if "zu_yu_duan_wen_indigenous_language_essays" in lowered:
         return "essays"
-    if "yue_du_shu_xie_pian_reading_writing" in s:
+    if "yue_du_shu_xie_pian_reading_writing" in lowered:
         return "reading_writing"
-    if "wen_hua_pian_cultural_section" in s:
+    if "wen_hua_pian_cultural_section" in lowered:
         return "culture"
-    if "jiu_jie_jiao_cai_nine_level_materials" in s:
+    if "jiu_jie_jiao_cai_nine_level_materials" in lowered:
         return "nine_level"
-    if "YouTube" in s:
+    if "youtube" in lowered:
         return "youtube"
-    if "NTU" in s:
+    if "ntu" in lowered:
         return "ntu"
-    if "President" in s or "Apology" in s:
+    if "president" in lowered or "apology" in lowered:
         return "presidential_apology"
-    return s.split("/")[0] if s else "unknown"
+    parts = [part for part in s.replace("\\", "/").split("/") if part]
+    if len(parts) >= 3 and parts[0].lower() == "formosanbank" and parts[1] == "Corpora":
+        return parts[2]
+    return parts[0] if parts else "unknown"
 
 
 def add_normalized_columns(
@@ -258,9 +262,19 @@ def require_columns(df: pd.DataFrame, columns: Iterable[str], context: str) -> N
 def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.DataFrame:
     # Provenance columns mix empty values and strings. Infer against the whole
     # file so chunk boundaries cannot change dtypes or emit noisy warnings.
-    df = pd.read_csv(path, low_memory=False)
+    df = pd.read_csv(
+        path,
+        low_memory=False,
+        keep_default_na=False,
+        na_filter=False,
+    )
     require_columns(df, ["lang_code", "formosan_sentence", target_col, "source", "dialect"], str(path))
-    df = df.dropna(subset=["lang_code", "formosan_sentence", target_col]).copy()
+    required_nonempty = (
+        df["lang_code"].astype(str).str.strip().ne("")
+        & df["formosan_sentence"].astype(str).str.strip().ne("")
+        & df[target_col].astype(str).str.strip().ne("")
+    )
+    df = df[required_nonempty].copy()
     df["lang_code"] = df["lang_code"].astype(str).str.strip().str.lower()
     if "row_type" not in df.columns:
         df["row_type"] = "unknown"
@@ -347,8 +361,14 @@ def special_tokens_from_corpus(
     min_dialect_frequency: int = 3,
 ) -> list[str]:
     tokens = set(base_special_tokens())
-    if "source" in df.columns:
-        for bucket in sorted(df["source"].map(source_bucket).dropna().unique()):
+    if "source_bucket" in df.columns:
+        buckets = df["source_bucket"]
+    elif "source" in df.columns:
+        buckets = df["source"].map(source_bucket)
+    else:
+        buckets = pd.Series(dtype=str)
+    if not buckets.empty:
+        for bucket in sorted(buckets.dropna().unique()):
             tokens.add(f"<dom_{safe_tag_value(bucket)}>")
     if "dialect" in df.columns and max_dialect_tags > 0:
         dialects = df["dialect"].map(lambda x: safe_tag_value(x, "default")).value_counts()

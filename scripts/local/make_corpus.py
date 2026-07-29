@@ -1,117 +1,108 @@
 #!/usr/bin/env python3
-"""Extract MT-ready raw parallel rows from downloaded FormosanBank XML."""
+"""Extract provenance-complete MT rows from canonical standard XML tiers."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import sys
+import json
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
 
+from pipeline_common import atomic_write_json, content_row_id, sha256_bytes, stable_json_hash, utc_now
 from tqdm import tqdm
 
 TARGET_MAP: dict[str, set[str]] = {
     "chinese": {"zh", "zho", "chi", "cmn"},
     "english": {"en", "eng"},
 }
-
 UNIT_TAGS = {
     "sentences": ("S",),
     "words": ("W",),
     "morphemes": ("M",),
 }
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+OUTPUT_COLUMNS = [
+    "row_id",
+    "source_record_id",
+    "content_sha256",
+    "lang_code",
+    "formosan_sentence",
+    "target_text",
+    "source",
+    "repository",
+    "repository_commit",
+    "xml_path",
+    "corpus_id",
+    "xml_id",
+    "kindOf",
+    "dialect",
+    "row_type",
+    "formosan_original",
+    "formosan_standard",
+    "target_lang",
+    "translation_index",
+    "translation_kind",
+    "translation_version",
+    "contains_unclear",
+]
 
 
 @dataclass(frozen=True)
 class ExtractedPair:
-    source_text: str
+    row_id: str
+    source_record_id: str
+    content_sha256: str
+    lang_code: str
+    formosan_sentence: str
     target_text: str
-    kind_of: str
-    row_type: str
+    source: str
+    repository: str
+    repository_commit: str
+    xml_path: str
+    corpus_id: str
     xml_id: str
+    kind_of: str
+    dialect: str
+    row_type: str
+    formosan_original: str
+    formosan_standard: str
+    target_lang: str
+    translation_index: int
+    translation_kind: str
+    translation_version: str
+    contains_unclear: bool
+
+    def to_csv_row(self) -> dict[str, object]:
+        row = asdict(self)
+        row["kindOf"] = row.pop("kind_of")
+        return row
 
 
-def list_xml_files(root: Path) -> Iterable[Path]:
-    return root.rglob("*.xml")
+def xml_lang(element: ET.Element) -> str:
+    return (element.attrib.get(XML_LANG) or element.attrib.get("xml:lang") or "").strip().lower()
 
 
-def xml_lang(elem: ET.Element) -> str:
-    return (
-        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang")
-        or elem.attrib.get("xml:lang")
-        or ""
-    ).strip().lower()
+def mixed_text(element: ET.Element) -> str:
+    return "".join(element.itertext()).strip()
 
 
-def choose_form(elem: ET.Element, kind_preference: str, allow_fallback: bool) -> tuple[str, str] | None:
-    forms = elem.findall("FORM")
-    for form in forms:
-        if (form.get("kindOf") or "").strip().lower() == kind_preference:
-            text = (form.text or "").strip()
-            if text:
-                return text, kind_preference
-
-    if allow_fallback:
-        for form in forms:
-            text = (form.text or "").strip()
-            if text:
-                return text, (form.get("kindOf") or "unknown").strip() or "unknown"
-    return None
+def direct_form(element: ET.Element, kind_of: str) -> ET.Element | None:
+    matches = [form for form in element.findall("FORM") if (form.get("kindOf") or "").strip().lower() == kind_of]
+    if len(matches) > 1:
+        raise ValueError(f"{element.tag} id={element.get('id', '')!r} has {len(matches)} {kind_of!r} FORM tiers")
+    return matches[0] if matches else None
 
 
 def row_type_for_tag(tag: str) -> str:
-    if tag == "S":
-        return "sentence"
-    if tag == "W":
-        return "lexeme"
-    return "morpheme"
+    return {"S": "sentence", "W": "lexeme", "M": "morpheme"}[tag]
 
 
 def wanted_tags(units: set[str]) -> set[str]:
-    tags: set[str] = set()
-    for unit in units:
-        tags.update(UNIT_TAGS[unit])
-    return tags
-
-
-def extract_pairs(
-    xml_path: Path,
-    target_codes: set[str],
-    kind_preference: str,
-    units: set[str],
-    allow_form_fallback: bool,
-) -> list[ExtractedPair]:
-    try:
-        root = ET.parse(xml_path).getroot()
-    except ET.ParseError:
-        return []
-
-    pairs: list[ExtractedPair] = []
-    tags = wanted_tags(units)
-    for elem in root.iter():
-        if elem.tag not in tags:
-            continue
-        form = choose_form(elem, kind_preference, allow_fallback=allow_form_fallback)
-        if form is None:
-            continue
-        source_text, actual_kind = form
-        for transl in elem.findall("TRANSL"):
-            target_lang = xml_lang(transl)
-            target_text = (transl.text or "").strip()
-            if target_lang in target_codes and target_text:
-                pairs.append(
-                    ExtractedPair(
-                        source_text=source_text,
-                        target_text=target_text,
-                        kind_of=actual_kind,
-                        row_type=row_type_for_tag(elem.tag),
-                        xml_id=elem.get("id", ""),
-                    )
-                )
-    return pairs
+    return {tag for unit in units for tag in UNIT_TAGS[unit]}
 
 
 def parse_units(raw: str) -> set[str]:
@@ -122,97 +113,235 @@ def parse_units(raw: str) -> set[str]:
     return units or {"sentences", "words"}
 
 
-def main() -> None:
+def load_fetch_inventory(xml_dir: Path) -> dict[str, dict[str, str]]:
+    manifest_path = xml_dir / "_fetch_manifest.json"
+    inventory_path = xml_dir / "_fetch_inventory.jsonl"
+    if not manifest_path.is_file() or not inventory_path.is_file():
+        raise SystemExit(f"Missing immutable fetch manifest/inventory under {xml_dir}; rerun fetch_xml.py")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Malformed fetch manifest {manifest_path}: {exc}") from exc
+    if manifest.get("complete") is not True:
+        raise SystemExit(f"Fetch manifest is incomplete: {manifest_path}")
+
+    inventory: dict[str, dict[str, str]] = {}
+    with inventory_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Malformed fetch inventory {inventory_path}:{line_number}: {exc}") from exc
+            if record.get("status") != "kept":
+                continue
+            destination = str(record.get("destination") or "")
+            if not destination:
+                raise SystemExit(f"Kept fetch record has no destination at line {line_number}")
+            inventory[destination] = {
+                "repository": str(record.get("repository") or ""),
+                "repository_commit": str(record.get("commit_sha") or ""),
+                "source_path": str(record.get("source_path") or ""),
+                "sha256": str(record.get("sha256") or ""),
+            }
+    return inventory
+
+
+def extract_file(
+    xml_path: Path,
+    *,
+    xml_dir: Path,
+    provenance: dict[str, str],
+    target_codes: set[str],
+    tags: set[str],
+) -> tuple[list[ExtractedPair], Counter[str]]:
+    stats: Counter[str] = Counter()
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    source_language = xml_lang(root)
+    dialect = (root.get("dialect") or "UNKNOWN").strip() or "UNKNOWN"
+    corpus_id = (root.get("id") or "").strip()
+    relative = str(xml_path.relative_to(xml_dir))
+    source_path = f"{provenance['repository']}/{provenance['source_path']}"
+    pairs: list[ExtractedPair] = []
+
+    for element in root.iter():
+        if element.tag not in tags:
+            continue
+        stats[f"{element.tag.lower()}_units_seen"] += 1
+        standard = direct_form(element, "standard")
+        if standard is None:
+            stats["missing_standard"] += 1
+            raise ValueError(f"{relative}:{element.tag}:{element.get('id', '')} has no standard FORM")
+        standard_text = mixed_text(standard)
+        if not standard_text:
+            stats["empty_standard"] += 1
+            raise ValueError(f"{relative}:{element.tag}:{element.get('id', '')} has an empty standard FORM")
+        original = direct_form(element, "original")
+        original_text = mixed_text(original) if original is not None else ""
+        contains_unclear = any(child.tag == "UNCLEAR" for child in standard.iter())
+
+        target_index = 0
+        for translation in element.findall("TRANSL"):
+            target_language = xml_lang(translation)
+            if target_language not in target_codes:
+                continue
+            target_text = mixed_text(translation)
+            if not target_text:
+                stats["empty_target"] += 1
+                continue
+            xml_id = (element.get("id") or "").strip()
+            row_id = content_row_id(
+                provenance["repository"],
+                provenance["source_path"],
+                element.tag,
+                xml_id,
+                target_language,
+                target_index,
+            )
+            source_record_id = content_row_id(
+                provenance["repository"],
+                provenance["source_path"],
+                element.tag,
+                xml_id,
+            )
+            content_hash = sha256_bytes(
+                "\u241f".join(
+                    [
+                        source_language,
+                        standard_text,
+                        target_text,
+                        target_language,
+                        row_type_for_tag(element.tag),
+                    ]
+                ).encode("utf-8")
+            )
+            pairs.append(
+                ExtractedPair(
+                    row_id=row_id,
+                    source_record_id=source_record_id,
+                    content_sha256=content_hash,
+                    lang_code=source_language,
+                    formosan_sentence=standard_text,
+                    target_text=target_text,
+                    source=source_path,
+                    repository=provenance["repository"],
+                    repository_commit=provenance["repository_commit"],
+                    xml_path=provenance["source_path"],
+                    corpus_id=corpus_id,
+                    xml_id=xml_id,
+                    kind_of="standard",
+                    dialect=dialect,
+                    row_type=row_type_for_tag(element.tag),
+                    formosan_original=original_text,
+                    formosan_standard=standard_text,
+                    target_lang=target_language,
+                    translation_index=target_index,
+                    translation_kind=(translation.get("kindOf") or "").strip(),
+                    translation_version=(translation.get("ver") or "").strip(),
+                    contains_unclear=contains_unclear,
+                )
+            )
+            target_index += 1
+            stats["pairs"] += 1
+    return pairs, stats
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build a raw parallel corpus from FormosanBank XML.",
+        description="Extract canonical standard-tier parallel rows from FormosanBank XML.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--xml-dir", default="downloaded_xml", type=Path)
     parser.add_argument("--target", required=True, choices=TARGET_MAP.keys())
     parser.add_argument("--out", default="corpus.csv", type=Path)
     parser.add_argument(
-        "--original",
-        action="store_true",
-        help='Prefer FORM kindOf="original" instead of "standard".',
-    )
-    parser.add_argument(
-        "--allow-form-fallback",
-        action="store_true",
-        help="If the preferred FORM kind is missing, fall back to the first non-empty FORM.",
-    )
-    parser.add_argument(
         "--units",
         default="sentences,words",
-        help="Comma-separated XML unit types to extract: sentences, words, morphemes.",
+        help="Comma-separated XML units: sentences, words, morphemes.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    kind_pref = "original" if args.original else "standard"
-    target_codes = TARGET_MAP[args.target]
-    units = parse_units(args.units)
 
-    xml_files = list(list_xml_files(args.xml_dir))
+def main() -> None:
+    args = parse_args()
+    xml_dir = args.xml_dir.expanduser().resolve()
+    xml_files = sorted(xml_dir.rglob("*.xml"))
     if not xml_files:
-        sys.exit(f"No XML files found under {args.xml_dir}")
+        raise SystemExit(f"No XML files found under {xml_dir}")
 
-    first_src_lang = "src"
-    for path in xml_files:
-        try:
-            first_src_lang = xml_lang(ET.parse(path).getroot()) or "src"
-            if first_src_lang:
-                break
-        except ET.ParseError:
+    fetch_inventory = load_fetch_inventory(xml_dir)
+    target_codes = TARGET_MAP[args.target]
+    tags = wanted_tags(parse_units(args.units))
+    all_stats: Counter[str] = Counter()
+    file_reports: list[dict[str, object]] = []
+    errors: list[str] = []
+    extracted: list[ExtractedPair] = []
+
+    for xml_path in tqdm(xml_files, desc="Extract XML", unit="file"):
+        relative = str(xml_path.relative_to(xml_dir))
+        provenance = fetch_inventory.get(relative)
+        if provenance is None:
+            errors.append(f"{relative}: no kept record in fetch inventory")
             continue
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    total_pairs = 0
-    row_type_counts: dict[str, int] = {}
-    with args.out.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                first_src_lang,
-                args.target,
-                "source",
-                "kindOf",
-                "dialect",
-                "row_type",
-                "xml_id",
-            ]
-        )
-
-        for xml_path in tqdm(xml_files, desc="XML files", unit="file"):
-            source_path = str(xml_path.relative_to(args.xml_dir))
-            try:
-                root = ET.parse(xml_path).getroot()
-                dialect = root.attrib.get("dialect", "UNKNOWN")
-            except ET.ParseError:
-                dialect = "UNKNOWN"
-
-            pairs = extract_pairs(
+        try:
+            pairs, stats = extract_file(
                 xml_path,
-                target_codes,
-                kind_pref,
-                units,
-                allow_form_fallback=args.allow_form_fallback,
+                xml_dir=xml_dir,
+                provenance=provenance,
+                target_codes=target_codes,
+                tags=tags,
             )
-            for pair in pairs:
-                writer.writerow(
-                    [
-                        pair.source_text,
-                        pair.target_text,
-                        source_path,
-                        pair.kind_of,
-                        dialect,
-                        pair.row_type,
-                        pair.xml_id,
-                    ]
-                )
-                row_type_counts[pair.row_type] = row_type_counts.get(pair.row_type, 0) + 1
-            total_pairs += len(pairs)
+        except (ET.ParseError, ValueError) as exc:
+            errors.append(f"{relative}: {exc}")
+            continue
+        extracted.extend(pairs)
+        all_stats.update(stats)
+        all_stats["files_parsed"] += 1
+        all_stats["files_with_pairs" if pairs else "files_without_pairs"] += 1
+        file_reports.append({"path": relative, "pairs": len(pairs), **dict(stats)})
 
-    print(f"Wrote {total_pairs:,} raw pairs -> {args.out}")
-    print("Row types: " + ", ".join(f"{k}={v:,}" for k, v in sorted(row_type_counts.items())))
+    if errors:
+        preview = "\n".join(f"  - {error}" for error in errors[:25])
+        suffix = f"\n  ... and {len(errors) - 25} more" if len(errors) > 25 else ""
+        raise SystemExit(f"Extraction failed:\n{preview}{suffix}")
+    if not extracted:
+        raise SystemExit(f"No {args.target} translation pairs found under {xml_dir}")
+
+    target_column = args.target
+    output_columns = [
+        column.replace("target_text", target_column)
+        for column in OUTPUT_COLUMNS
+    ]
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with args.out.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=output_columns)
+        writer.writeheader()
+        for pair in extracted:
+            row = pair.to_csv_row()
+            row[target_column] = row.pop("target_text")
+            writer.writerow(row)
+
+    report = {
+        "schema_version": 2,
+        "created_at": utc_now(),
+        "xml_dir": str(xml_dir),
+        "output": str(args.out),
+        "source_language": extracted[0].lang_code,
+        "target": args.target,
+        "target_codes": sorted(target_codes),
+        "units": sorted(parse_units(args.units)),
+        "files_total": len(xml_files),
+        "rows": len(extracted),
+        "counts": dict(sorted(all_stats.items())),
+        "file_inventory_sha256": stable_json_hash(file_reports),
+        "complete": True,
+    }
+    report_path = args.out.with_suffix(".extraction.json")
+    atomic_write_json(report_path, report)
+    print(f"Wrote {len(extracted):,} standard-tier pairs -> {args.out}")
+    print(f"Extraction report: {report_path}")
 
 
 if __name__ == "__main__":
