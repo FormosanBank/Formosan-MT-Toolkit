@@ -11,6 +11,7 @@ import os
 import random
 import re
 import shutil
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter, deque
@@ -349,6 +350,26 @@ def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
 
 
+def write_blob_cache(cache_path: Path, content: bytes) -> None:
+    """Atomically cache a blob without sharing temporary paths across workers."""
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{cache_path.name}.",
+        suffix=".tmp",
+        dir=cache_path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(cache_path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def classify_xml(
     xml_bytes: bytes,
     src_lang: str,
@@ -417,10 +438,7 @@ def download_blob(
                         "checksum_error",
                         error="downloaded bytes do not match Git tree blob SHA",
                     )
-                RAW_XML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                temporary = cache_path.with_suffix(".tmp")
-                temporary.write_bytes(xml_bytes)
-                temporary.replace(cache_path)
+                write_blob_cache(cache_path, xml_bytes)
                 break
             error = f"HTTP {response.status_code}"
             if response.status_code not in TRANSIENT_HTTP_STATUSES:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import hashlib
 import io
@@ -28,7 +29,7 @@ from corpus_quality import (  # noqa: E402
     normalize_dataframe,
     normalize_text,
 )
-from fetch_xml import classify_xml, git_blob_sha  # noqa: E402
+from fetch_xml import classify_xml, git_blob_sha, write_blob_cache  # noqa: E402
 from filter_split_corpus import (  # noqa: E402
     filter_rule_counts,
     print_filter_rule_summary,
@@ -504,6 +505,20 @@ class AcquisitionTests(unittest.TestCase):
             git_blob_sha(b"hello\n"),
             "ce013625030ba8dba906f756967f9e9ca394464a",
         )
+
+    def test_concurrent_blob_cache_writes_are_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_path = Path(temporary) / "blob.xml"
+            content = b"<TEXT xml:lang=\"ami\"/>"
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+                writes = [
+                    executor.submit(write_blob_cache, cache_path, content)
+                    for _ in range(100)
+                ]
+                for write in writes:
+                    write.result()
+            self.assertEqual(cache_path.read_bytes(), content)
+            self.assertEqual(list(cache_path.parent.glob("*.tmp")), [])
 
     def test_pipeline_pins_full_formosanbank_revision(self) -> None:
         config = load_pipeline_config()
