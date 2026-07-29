@@ -102,9 +102,12 @@ Production builds require a clean Git checkout. They fail if acquisition,
 parsing, QC, row conservation, pivot completion, split validation, exposure
 auditing, or provenance packaging is incomplete.
 
-Fetches use bounded concurrency, retries, exponential backoff, and a shared
-GitHub snapshot cache. If GitHub rate-limits a run, resume with existing files
-and lower concurrency:
+Fetches resolve repository heads once per named build, record the immutable
+commit set in `source_repository_snapshot.json`, and reuse it for every
+language. Private repositories are traversed only under `Final_XML`; public
+data is traversed only under `Corpora`. Raw downloads use bounded concurrency,
+retries, exponential backoff, and content-addressed caching. If GitHub
+rate-limits a run, resume with existing files and lower concurrency:
 
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot --exclude-bible \

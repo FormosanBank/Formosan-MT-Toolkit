@@ -54,6 +54,12 @@ DeepL keys in numeric order, reuses response caches by content key, preserves
 `pivot_origin`/`pivot_direction`, and requires zero missing eligible synthetic
 rows before these artifacts are considered complete.
 
+Each public/private build records one immutable
+`source_repository_snapshot.json`. Every language fetch reuses those exact
+repository commits, and private tree discovery is limited to `Final_XML`.
+This keeps one build internally consistent and avoids resolving and traversing
+every organization repository once per language.
+
 ## Release Outputs
 
 Each named build produces:

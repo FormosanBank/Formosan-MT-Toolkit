@@ -50,6 +50,7 @@ class BuildPaths:
     final_dir: Path
     split_root: Path
     manifest_path: Path
+    source_snapshot_path: Path
 
     def xml_dir(self, lang: Language) -> Path:
         return self.root / f"downloaded_{lang.code}"
@@ -131,6 +132,7 @@ def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
     final_dir = root / "pivot_corpora_final"
     split_root = root / "formosan_mt_experiments" / "data"
     manifest_path = root / "mt_build_manifest.json"
+    source_snapshot_path = root / "source_repository_snapshot.json"
 
     return BuildPaths(
         root=root,
@@ -139,6 +141,7 @@ def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
         final_dir=final_dir,
         split_root=split_root,
         manifest_path=manifest_path,
+        source_snapshot_path=source_snapshot_path,
     )
 
 
@@ -316,6 +319,7 @@ def package_training_provenance(
     provenance_dir.mkdir(parents=True)
     sources = {
         "mt_build_manifest.json": paths.manifest_path,
+        "source_repository_snapshot.json": paths.source_snapshot_path,
         "corpus_pipeline.json": PIPELINE_CONFIG_PATH,
         "aggregate_manifest.json": final_corpus_dir / "aggregate_manifest.json",
         "split_en_in_domain_hard.json": (
@@ -399,6 +403,8 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         cmd.extend(["--download-retries", str(args.fetch_download_retries)])
         cmd.extend(["--retry-base-sleep", str(args.fetch_retry_base_sleep)])
         cmd.extend(["--retry-max-sleep", str(args.fetch_retry_max_sleep)])
+        cmd.extend(["--repository-snapshot", str(paths.source_snapshot_path)])
+        cmd.append("--refresh-repository-metadata")
         if args.allow_download_failures:
             cmd.append("--allow-download-failures")
         if not args.keep_downloaded:
@@ -716,6 +722,7 @@ def write_manifest(
     }
     missing_artifacts = sorted(name for name in required_artifacts if not artifacts.get(name, {}).get("exists"))
     stage_paths = {
+        "source_repository_snapshot": paths.source_snapshot_path,
         "processed_aggregate": paths.processed_dir / "aggregate_manifest.json",
         "final_aggregate": final_corpus_dir / "aggregate_manifest.json",
         "split_en": paths.split_root / "splits_en_v1" / "report_in_domain_hard.json",
@@ -792,6 +799,7 @@ def write_manifest(
             "pivot_read_cache_dirs": [str(path) for path in pivot_read_cache_dirs(args, paths)],
             "keep_redactions": args.keep_redactions,
             "fresh_downloads": not args.keep_downloaded,
+            "source_repository_snapshot": str(paths.source_snapshot_path),
             "keep_build_output": args.keep_build_output,
             "allow_dirty_repository": args.allow_dirty_repository,
             "fetch_workers": args.fetch_workers,
@@ -1103,6 +1111,8 @@ def run_build(args: argparse.Namespace) -> Path:
     if not args.dry_run:
         paths.raw_dir.mkdir(parents=True, exist_ok=True)
         paths.processed_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run and not args.skip_fetch and not args.keep_downloaded:
+        remove_path(paths.source_snapshot_path)
 
     language_reports = [build_language(lang, args, paths) for lang in languages]
 

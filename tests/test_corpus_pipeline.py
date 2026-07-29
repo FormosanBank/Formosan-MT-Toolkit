@@ -11,12 +11,14 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
+import fetch_xml  # noqa: E402
 from clean_xml import (  # noqa: E402
     audit_standard_tiers,
     ensure_standard_tiers,
@@ -29,7 +31,14 @@ from corpus_quality import (  # noqa: E402
     normalize_dataframe,
     normalize_text,
 )
-from fetch_xml import classify_xml, git_blob_sha, write_blob_cache  # noqa: E402
+from fetch_xml import (  # noqa: E402
+    classify_xml,
+    get_tree,
+    git_blob_sha,
+    load_or_create_repository_snapshot,
+    repository_selection,
+    write_blob_cache,
+)
 from filter_split_corpus import (  # noqa: E402
     filter_rule_counts,
     print_filter_rule_summary,
@@ -519,6 +528,119 @@ class AcquisitionTests(unittest.TestCase):
                     write.result()
             self.assertEqual(cache_path.read_bytes(), content)
             self.assertEqual(list(cache_path.parent.glob("*.tmp")), [])
+
+    def test_tree_discovery_is_scoped_to_final_xml(self) -> None:
+        commit_sha = "a" * 40
+        final_xml_sha = "b" * 40
+
+        def response(payload: dict) -> mock.Mock:
+            result = mock.Mock()
+            result.json.return_value = payload
+            return result
+
+        def api_get(url: str, *, params: dict | None = None) -> mock.Mock:
+            if url.endswith(commit_sha):
+                self.assertIsNone(params)
+                return response(
+                    {
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "Final_XML",
+                                "type": "tree",
+                                "sha": final_xml_sha,
+                            },
+                            {
+                                "path": "large-unrelated-data",
+                                "type": "tree",
+                                "sha": "c" * 40,
+                            },
+                        ],
+                    }
+                )
+            if url.endswith(final_xml_sha):
+                self.assertEqual(params, {"recursive": "1"})
+                return response(
+                    {
+                        "truncated": False,
+                        "tree": [
+                            {
+                                "path": "Paiwan/sample.xml",
+                                "type": "blob",
+                                "sha": "d" * 40,
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(f"Unexpected API request: {url}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                mock.patch.object(fetch_xml, "CACHE_DIR", Path(temporary)),
+                mock.patch.object(
+                    fetch_xml,
+                    "api_get",
+                    side_effect=api_get,
+                ) as get,
+            ):
+                tree = get_tree(
+                    "FormosanBank",
+                    "example",
+                    commit_sha,
+                    root_path="Final_XML",
+                )
+        self.assertEqual(tree[0]["path"], "Final_XML/Paiwan/sample.xml")
+        self.assertEqual(get.call_count, 2)
+
+    def test_repository_snapshot_is_resolved_once_and_reused(self) -> None:
+        selection = repository_selection(
+            org="FormosanBank",
+            public=False,
+            branch=None,
+            discovered=["RepoB", "RepoA"],
+            selected=["RepoB", "RepoA"],
+            excluded=[],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = Path(temporary) / "source_repository_snapshot.json"
+            with (
+                mock.patch.object(
+                    fetch_xml,
+                    "get_default_branch",
+                    return_value="main",
+                ) as branch,
+                mock.patch.object(
+                    fetch_xml,
+                    "resolve_commit",
+                    side_effect=["a" * 40, "b" * 40],
+                ) as resolve,
+            ):
+                first = load_or_create_repository_snapshot(
+                    snapshot,
+                    selection=selection,
+                    refresh_metadata=True,
+                )
+            self.assertEqual(branch.call_count, 2)
+            self.assertEqual(resolve.call_count, 2)
+
+            with (
+                mock.patch.object(
+                    fetch_xml,
+                    "get_default_branch",
+                    side_effect=AssertionError("snapshot should be reused"),
+                ),
+                mock.patch.object(
+                    fetch_xml,
+                    "resolve_commit",
+                    side_effect=AssertionError("snapshot should be reused"),
+                ),
+            ):
+                second = load_or_create_repository_snapshot(
+                    snapshot,
+                    selection=selection,
+                    refresh_metadata=True,
+                )
+        self.assertEqual(first, second)
 
     def test_pipeline_pins_full_formosanbank_revision(self) -> None:
         config = load_pipeline_config()

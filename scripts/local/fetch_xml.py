@@ -119,6 +119,13 @@ class DownloadResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class RepositoryRef:
+    name: str
+    requested_ref: str
+    commit_sha: str
+
+
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
 
@@ -227,9 +234,9 @@ def api_get(url: str, *, params: dict[str, object] | None = None) -> requests.Re
     return response
 
 
-def get_repos(org: str) -> list[str]:
+def get_repos(org: str, *, refresh: bool = False) -> list[str]:
     cache_name = f"repos_{org.lower()}.json"
-    cached = read_metadata_cache(cache_name)
+    cached = None if refresh else read_metadata_cache(cache_name)
     if isinstance(cached, list):
         return [str(name) for name in cached]
     repos: list[str] = []
@@ -247,9 +254,9 @@ def get_repos(org: str) -> list[str]:
     return repos
 
 
-def get_default_branch(org: str, repo: str) -> str:
+def get_default_branch(org: str, repo: str, *, refresh: bool = False) -> str:
     cache_name = f"repo_{org.lower()}_{repo.lower()}.json"
-    cached = read_metadata_cache(cache_name)
+    cached = None if refresh else read_metadata_cache(cache_name)
     if isinstance(cached, dict) and cached.get("default_branch"):
         return str(cached["default_branch"])
     payload = api_get(f"{GITHUB_API}/repos/{org}/{repo}").json()
@@ -266,9 +273,15 @@ def resolve_commit(org: str, repo: str, reference: str) -> str:
     return commit
 
 
-def _walk_tree(org: str, repo: str, root_sha: str) -> list[dict]:
+def _walk_tree(
+    org: str,
+    repo: str,
+    root_sha: str,
+    *,
+    root_path: str = "",
+) -> list[dict]:
     output: list[dict] = []
-    pending: deque[tuple[str, str]] = deque([("", root_sha)])
+    pending: deque[tuple[str, str]] = deque([(root_path.strip("/"), root_sha)])
     while pending:
         prefix, tree_sha = pending.popleft()
         payload = api_get(f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{tree_sha}").json()
@@ -289,27 +302,174 @@ def _walk_tree(org: str, repo: str, root_sha: str) -> list[dict]:
     return output
 
 
-def get_tree(org: str, repo: str, commit_sha: str) -> list[dict]:
-    cache_name = f"tree_{org.lower()}_{repo.lower()}_{commit_sha}.json"
+def get_tree(
+    org: str,
+    repo: str,
+    commit_sha: str,
+    *,
+    root_path: str = "",
+) -> list[dict]:
+    normalized_root = root_path.strip("/")
+    root_key = hashlib.sha256(normalized_root.encode("utf-8")).hexdigest()[:12]
+    cache_name = f"tree_{org.lower()}_{repo.lower()}_{commit_sha}_{root_key}.json"
     cached = read_metadata_cache(cache_name, max_age=None)
     if isinstance(cached, dict) and cached.get("complete") is True and isinstance(cached.get("tree"), list):
-        tree = list(cached["tree"])
-        print(f"   {repo}@{commit_sha[:12]}: {len(tree)} cached tree entries")
-        return tree
+        return list(cached["tree"])
+
+    tree_sha = commit_sha
+    if normalized_root:
+        for component in normalized_root.split("/"):
+            payload = api_get(
+                f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{tree_sha}"
+            ).json()
+            entries = payload.get("tree")
+            if payload.get("truncated"):
+                raise RuntimeError(
+                    f"GitHub truncated a non-recursive tree for {repo}:{tree_sha}"
+                )
+            if not isinstance(entries, list):
+                raise RuntimeError(f"Missing Git tree entries for {repo}:{tree_sha}")
+            match = next(
+                (
+                    item
+                    for item in entries
+                    if item.get("type") == "tree"
+                    and str(item.get("path") or "") == component
+                ),
+                None,
+            )
+            if match is None:
+                write_metadata_cache(
+                    cache_name,
+                    {"complete": True, "root_path": normalized_root, "tree": []},
+                )
+                return []
+            tree_sha = str(match["sha"])
 
     payload = api_get(
-        f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{commit_sha}",
+        f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{tree_sha}",
         params={"recursive": "1"},
     ).json()
     tree = payload.get("tree")
     if not isinstance(tree, list):
         raise RuntimeError(f"GitHub returned no tree for {org}/{repo}@{commit_sha}")
     if payload.get("truncated"):
-        print(f"   {repo}: recursive tree was truncated; traversing subtrees")
-        tree = _walk_tree(org, repo, commit_sha)
-    write_metadata_cache(cache_name, {"complete": True, "tree": tree})
-    print(f"   {repo}@{commit_sha[:12]}: {len(tree)} tree entries")
+        tree = _walk_tree(org, repo, tree_sha, root_path=normalized_root)
+    elif normalized_root:
+        tree = [
+            {**item, "path": f"{normalized_root}/{item['path']}"}
+            for item in tree
+        ]
+    write_metadata_cache(
+        cache_name,
+        {
+            "complete": True,
+            "root_path": normalized_root,
+            "tree": tree,
+        },
+    )
     return tree
+
+
+def repository_selection(
+    *,
+    org: str,
+    public: bool,
+    branch: str | None,
+    discovered: list[str],
+    selected: list[str],
+    excluded: list[str],
+) -> dict[str, object]:
+    return {
+        "organization": org,
+        "public": public,
+        "requested_branch": branch,
+        "repositories_discovered": sorted(discovered),
+        "repositories_selected": sorted(selected),
+        "repositories_excluded": sorted(excluded),
+    }
+
+
+def load_or_create_repository_snapshot(
+    path: Path,
+    *,
+    selection: dict[str, object],
+    refresh_metadata: bool,
+) -> list[RepositoryRef]:
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"Repository snapshot is unreadable at {path}: {exc}"
+            ) from exc
+        if payload.get("complete") is not True:
+            raise SystemExit(f"Repository snapshot is incomplete at {path}")
+        if payload.get("selection") != selection:
+            raise SystemExit(
+                f"Repository snapshot selection does not match this fetch: {path}. "
+                "Remove it or choose a different --repository-snapshot path."
+            )
+        records = payload.get("repositories")
+        if not isinstance(records, list):
+            raise SystemExit(f"Repository snapshot has no repository records: {path}")
+        refs = [
+            RepositoryRef(
+                name=str(record.get("name") or ""),
+                requested_ref=str(record.get("requested_ref") or ""),
+                commit_sha=str(record.get("commit_sha") or ""),
+            )
+            for record in records
+            if isinstance(record, dict)
+        ]
+        selected = selection["repositories_selected"]
+        if (
+            not isinstance(selected, list)
+            or len(refs) != len(selected)
+            or any(
+                not ref.name
+                or not ref.requested_ref
+                or len(ref.commit_sha) != 40
+                for ref in refs
+            )
+        ):
+            raise SystemExit(f"Repository snapshot contains malformed records: {path}")
+        return refs
+
+    org = str(selection["organization"])
+    branch = selection["requested_branch"]
+    selected = [str(name) for name in selection["repositories_selected"]]
+    refs: list[RepositoryRef] = []
+    errors: list[str] = []
+    for repo in tqdm(selected, desc="Resolve repository snapshot", unit="repo"):
+        try:
+            reference = (
+                str(branch)
+                if branch
+                else get_default_branch(org, repo, refresh=refresh_metadata)
+            )
+            refs.append(
+                RepositoryRef(
+                    name=repo,
+                    requested_ref=reference,
+                    commit_sha=resolve_commit(org, repo, reference),
+                )
+            )
+        except (requests.RequestException, RuntimeError) as exc:
+            errors.append(f"{repo}: {exc}")
+
+    payload = {
+        "schema_version": 1,
+        "created_at": utc_now(),
+        "selection": selection,
+        "repositories": [asdict(ref) for ref in refs],
+        "errors": errors,
+        "complete": not errors and len(refs) == len(selected),
+    }
+    atomic_write_json(path, payload)
+    if errors:
+        raise SystemExit("Repository snapshot failed:\n  - " + "\n  - ".join(errors))
+    return refs
 
 
 def raw_url(org: str, repo: str, path: str, commit_sha: str) -> str:
@@ -523,6 +683,16 @@ def parse_args() -> argparse.Namespace:
         help="Diagnostic escape hatch. The fetch manifest remains incomplete.",
     )
     parser.add_argument("--public", action="store_true")
+    parser.add_argument(
+        "--repository-snapshot",
+        type=Path,
+        help="Build-scoped repository ref manifest shared by every language fetch.",
+    )
+    parser.add_argument(
+        "--refresh-repository-metadata",
+        action="store_true",
+        help="Refresh org/default-branch metadata when creating a repository snapshot.",
+    )
     parser.add_argument("--no-public-language-path-prefilter", action="store_true")
     parser.add_argument("--exclude-bible", action="store_true")
     parser.add_argument("--exclude-repo", action="append", default=[])
@@ -551,7 +721,35 @@ def main() -> None:
 
     if not GITHUB_TOKEN:
         print("GitHub token is not set; public API rate limits apply.")
-    repos = ["FormosanBank"] if args.public else get_repos(args.org)
+    snapshot_path = (
+        args.repository_snapshot.expanduser().resolve()
+        if args.repository_snapshot
+        else None
+    )
+    existing_snapshot: dict[str, object] | None = None
+    if snapshot_path and snapshot_path.is_file():
+        try:
+            existing_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                f"Repository snapshot is unreadable at {snapshot_path}: {exc}"
+            ) from exc
+    if existing_snapshot:
+        snapshot_selection = existing_snapshot.get("selection")
+        if not isinstance(snapshot_selection, dict):
+            raise SystemExit(
+                f"Repository snapshot has no selection record: {snapshot_path}"
+            )
+        repos = [
+            str(name)
+            for name in snapshot_selection.get("repositories_discovered", [])
+        ]
+    else:
+        repos = (
+            ["FormosanBank"]
+            if args.public
+            else get_repos(args.org, refresh=args.refresh_repository_metadata)
+        )
     selected_repos = [
         repo
         for repo in repos
@@ -561,17 +759,54 @@ def main() -> None:
     if not selected_repos:
         raise SystemExit("No repositories remain after exclusions")
 
+    selection = repository_selection(
+        org=args.org,
+        public=args.public,
+        branch=args.branch,
+        discovered=repos,
+        selected=selected_repos,
+        excluded=excluded_repo_names,
+    )
+    if snapshot_path:
+        repository_refs = load_or_create_repository_snapshot(
+            snapshot_path,
+            selection=selection,
+            refresh_metadata=args.refresh_repository_metadata,
+        )
+    else:
+        repository_refs = []
+        for repo in selected_repos:
+            reference = args.branch or get_default_branch(args.org, repo)
+            repository_refs.append(
+                RepositoryRef(
+                    name=repo,
+                    requested_ref=reference,
+                    commit_sha=resolve_commit(args.org, repo, reference),
+                )
+            )
+
     results: list[DownloadResult] = []
     snapshots: list[RepositorySnapshot] = []
     repository_errors: list[str] = []
     future_jobs: list[futures.Future[DownloadResult]] = []
 
     with futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        for repo in tqdm(selected_repos, desc="Repositories", unit="repo"):
+        tree_root = "Corpora" if args.public else "Final_XML"
+        for repository_ref in tqdm(
+            repository_refs,
+            desc="Repository XML trees",
+            unit="repo",
+        ):
+            repo = repository_ref.name
             try:
-                reference = args.branch or get_default_branch(args.org, repo)
-                commit_sha = resolve_commit(args.org, repo, reference)
-                tree = get_tree(args.org, repo, commit_sha)
+                reference = repository_ref.requested_ref
+                commit_sha = repository_ref.commit_sha
+                tree = get_tree(
+                    args.org,
+                    repo,
+                    commit_sha,
+                    root_path=tree_root,
+                )
             except (requests.RequestException, RuntimeError) as exc:
                 repository_errors.append(f"{repo}: {exc}")
                 continue
@@ -675,6 +910,14 @@ def main() -> None:
         "dialect": args.dialect,
         "public": args.public,
         "requested_branch": args.branch,
+        "repository_snapshot": (
+            {
+                "path": str(snapshot_path),
+                "sha256": sha256_file(snapshot_path),
+            }
+            if snapshot_path
+            else None
+        ),
         "repositories_discovered": sorted(repos),
         "repositories_excluded": excluded_repo_names,
         "repositories": [asdict(snapshot) for snapshot in sorted(snapshots, key=lambda row: row.name.lower())],
