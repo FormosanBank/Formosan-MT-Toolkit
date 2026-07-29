@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "pipeline_version": "formosan-mt-corpus-v2",
+  "formosanbank": {
+    "org": "FormosanBank",
+    "repo": "FormosanBank",
+    "qc_revision": "98df3773bf26ae2ef5373cd97e0841762126e61d"
+  },
+  "cleaning": {
+    "profile": "formosan-mt-v2",
+    "unicode_normalization": "NFC",
+    "require_standard_form": true,
+    "preserve_structural_row_type": true
+  },
+  "pivot": {
+    "require_complete": true,
+    "synthetic_eval": false
+  },
+  "splits": {
+    "seed": 42,
+    "train_ratio": 0.9,
+    "validate_ratio": 0.025,
+    "test_ratio": 0.075,
+    "min_test_rows": 500,
+    "min_validate_rows": 150,
+    "lexical_eval": false,
+    "synthetic_eval": false
+  }
+}

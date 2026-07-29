@@ -1,47 +1,20 @@
 #!/usr/bin/env python3
-"""
-STEP 1: 
+"""Fetch an immutable, fully inventoried FormosanBank XML snapshot."""
 
-Harvest XML files from FormosanBank repositories.
-
-Two modes:
-----------
-1. Default mode: Searches through all repos in the FormosanBank org for files in Final_XML/ folders
-2. Public release mode (--public): Only looks inside XML/ directories anywhere under
-   FormosanBank/FormosanBank/Corpora/ (files may live directly in XML/ or in deeper
-   subdirectories such as XML/Yami/...)
-
-The script filters XML files whose <TEXT xml:lang="…"> == src_lang 
-(and, optionally, whose <TRANSL xml:lang="…"> == tgt_lang).
-
-NOTE: Please do not set the target lang as currently target language tags
-are not standardized across the XML files. Simply set the source language and 
-make_corpus.py will take care of the rest after. 
-
-Usage examples
---------------
-# Default mode (all repos, Final_XML folders)
-$ python fetch_xml.py --src-lang ami
-$ python fetch_xml.py --src-lang pwn
-
-# Public release mode (anything at or below an XML/ directory under Corpora/)
-$ python fetch_xml.py --src-lang ami --public
-$ python fetch_xml.py --src-lang pwn --public --tgt-lang zh
-"""
 from __future__ import annotations
 
 import argparse
-import concurrent.futures as fut
+import concurrent.futures as futures
 import hashlib
 import json
 import os
 import random
 import re
 import shutil
-import sys
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -50,28 +23,33 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+from pipeline_common import atomic_write_json, sha256_bytes, stable_json_hash, utc_now
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
 
-# Load environment variables from .env file
-# Look for .env in project root (two levels up from this script)
-project_root = Path(__file__).parent.parent.parent
-load_dotenv(project_root / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 
-# ─────────────────────────────  language maps  ───────────────────────────────
-# Map language codes to their equivalent sets (same as make_corpus.py)
+GITHUB_API = "https://api.github.com"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+MAX_WORKERS = 4
+REQUEST_TIMEOUT = 30
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
+CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
+CACHE_DIR = PROJECT_ROOT / "corpus_builds" / ".github_metadata_cache"
+RAW_XML_CACHE_DIR = PROJECT_ROOT / "corpus_builds" / ".github_raw_xml_cache"
+EXACT_BIBLE_REPOS = ("Formosan-Taiwan-Bible-Society-Bibles",)
+
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
-    # Chinese variants
     "zh": {"zh", "zho", "chi", "cmn"},
     "zho": {"zh", "zho", "chi", "cmn"},
     "chi": {"zh", "zho", "chi", "cmn"},
     "cmn": {"zh", "zho", "chi", "cmn"},
-    # English variants
     "en": {"en", "eng"},
     "eng": {"en", "eng"},
 }
-
 LANGUAGE_PATH_HINTS: dict[str, set[str]] = {
     "ami": {"ami", "amis"},
     "bnn": {"bnn", "bunun"},
@@ -89,45 +67,70 @@ LANGUAGE_PATH_HINTS: dict[str, set[str]] = {
     "xnb": {"xnb", "kanakanavu"},
     "xsy": {"xsy", "saisiyat"},
 }
+PATH_HINT_TO_LANGUAGE_CODES = {hint: code for code, hints in LANGUAGE_PATH_HINTS.items() for hint in hints}
 
-PATH_HINT_TO_LANGUAGE_CODES = {
-    hint: code
-    for code, hints in LANGUAGE_PATH_HINTS.items()
-    for hint in hints
-}
+SESSION = requests.Session()
+if GITHUB_TOKEN:
+    SESSION.headers.update({"Authorization": f"Bearer {GITHUB_TOKEN}"})
+SESSION.mount(
+    "https://",
+    HTTPAdapter(
+        max_retries=Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "HEAD"]),
+            respect_retry_after_header=True,
+        )
+    ),
+)
+
+
+@dataclass(frozen=True)
+class RepositorySnapshot:
+    name: str
+    requested_ref: str
+    commit_sha: str
+    tree_entries: int
+    xml_candidates: int
+    queued: int
+    excluded: int
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    repository: str
+    commit_sha: str
+    source_path: str
+    git_blob_sha: str
+    status: str
+    bytes: int = 0
+    sha256: str = ""
+    destination: str = ""
+    root_language: str = ""
+    dialect: str = ""
+    error: str = ""
 
 
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
-    """Get all equivalent language codes for a given language code."""
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
 
 
 def path_language_hint_codes(path: str) -> set[str]:
-    """Return language codes that are explicitly named by path components/tokens."""
     tokens: set[str] = set()
     for component in path.split("/"):
-        lowered = component.lower()
-        if lowered.endswith(".xml"):
-            lowered = lowered[:-4]
+        lowered = component.lower().removesuffix(".xml")
         tokens.add(lowered)
         tokens.update(part for part in re.split(r"[^a-z0-9]+", lowered) if part)
-    return {
-        PATH_HINT_TO_LANGUAGE_CODES[token]
-        for token in tokens
-        if token in PATH_HINT_TO_LANGUAGE_CODES
-    }
+    return {PATH_HINT_TO_LANGUAGE_CODES[token] for token in tokens if token in PATH_HINT_TO_LANGUAGE_CODES}
 
 
 def public_path_may_match_src_lang(path: str, src_lang: str) -> bool:
-    """Conservative prefilter for public corpus paths before raw XML download."""
     hints = path_language_hint_codes(path)
-    if not hints:
-        return True
-    return src_lang.strip().lower() in hints
+    return not hints or src_lang.strip().lower() in hints
 
 
 def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
-    """Parse repeatable or comma-separated case-insensitive substring patterns."""
     patterns: list[str] = []
     for value in values or []:
         for part in value.split(","):
@@ -137,21 +140,12 @@ def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
     return patterns
 
 
-EXACT_BIBLE_REPOS = (
-    "Formosan-Taiwan-Bible-Society-Bibles",
-)
-
-
 def normalize_repo_name(value: str) -> str:
-    """Return the repo-name component from a GitHub repo name/full-name/URL."""
     text = value.strip().rstrip("/")
-    if text.startswith("https://github.com/"):
-        text = text.removeprefix("https://github.com/")
-    if text.startswith("git@github.com:"):
-        text = text.removeprefix("git@github.com:")
-    if text.endswith(".git"):
-        text = text[:-4]
-    return text.split("/")[-1].strip().lower()
+    for prefix in ("https://github.com/", "git@github.com:"):
+        if text.startswith(prefix):
+            text = text.removeprefix(prefix)
+    return text.removesuffix(".git").split("/")[-1].strip().lower()
 
 
 def parse_exact_repos(values: Iterable[str] | None) -> list[str]:
@@ -165,17 +159,17 @@ def parse_exact_repos(values: Iterable[str] | None) -> list[str]:
 
 
 def add_exact_repos(repos: list[str], defaults: Iterable[str]) -> list[str]:
-    out = list(repos)
+    output = list(repos)
     for repo in defaults:
         normalized = normalize_repo_name(repo)
-        if normalized not in out:
-            out.append(normalized)
-    return out
+        if normalized not in output:
+            output.append(normalized)
+    return output
 
 
 def matches_exclude_pattern(value: str, patterns: Iterable[str]) -> bool:
-    haystack = value.lower()
-    return any(pattern in haystack for pattern in patterns)
+    lowered = value.lower()
+    return any(pattern in lowered for pattern in patterns)
 
 
 def matches_exact_repo(repo: str, excluded_repos: Iterable[str]) -> bool:
@@ -184,53 +178,23 @@ def matches_exact_repo(repo: str, excluded_repos: Iterable[str]) -> bool:
 
 def public_release_corpus_root(path: str) -> str | None:
     parts = path.split("/")
-    if len(parts) >= 3 and parts[0] == "Corpora":
-        return parts[1]
-    return None
+    return parts[1] if len(parts) >= 3 and parts[0] == "Corpora" else None
 
 
 def matches_excluded_public_corpus_root(path: str, excluded_repos: Iterable[str]) -> bool:
-    corpus_root = public_release_corpus_root(path)
-    return bool(corpus_root and matches_exact_repo(corpus_root, excluded_repos))
+    root = public_release_corpus_root(path)
+    return bool(root and matches_exact_repo(root, excluded_repos))
 
 
-# ─────────────────────────────  config  ──────────────────────────────────────
-GITHUB_API = "https://api.github.com"
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
-MAX_WORKERS = 4
-REQUEST_TIMEOUT = 10  # seconds
-TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
-RETRIES = Retry(
-    total=5,
-    backoff_factor=0.5,
-    status_forcelist=(500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "HEAD"]),
-)
-
-# single global Session → connection pooling + retries
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-SESSION.mount("https://", HTTPAdapter(max_retries=RETRIES))
-CACHE_DIR = project_root / "corpus_builds" / ".github_metadata_cache"
-RAW_XML_CACHE_DIR = project_root / "corpus_builds" / ".github_raw_xml_cache"
-CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
-# ─────────────────────────────────────────────────────────────────────────────
+def is_public_release_xml_path(path: str) -> bool:
+    parts = path.split("/")
+    return path.lower().endswith(".xml") and len(parts) >= 3 and parts[0] == "Corpora" and "XML" in parts[:-1]
 
 
-@dataclass(frozen=True)
-class DownloadResult:
-    status: str
-    path: Path | None = None
-    url: str | None = None
-    error: str | None = None
-
-
-def read_metadata_cache(name: str):
+def read_metadata_cache(name: str, *, max_age: float | None = CACHE_MAX_AGE_SECONDS):
     path = CACHE_DIR / name
     try:
-        if time.time() - path.stat().st_mtime > CACHE_MAX_AGE_SECONDS:
+        if max_age is not None and time.time() - path.stat().st_mtime > max_age:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -238,72 +202,42 @@ def read_metadata_cache(name: str):
 
 
 def write_metadata_cache(name: str, payload) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = CACHE_DIR / name
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_json(CACHE_DIR / name, payload)
 
 
-def get_repos(org: str) -> Iterable[str]:
-    """Yield every repository name in the organisation."""
+def api_get(url: str, *, params: dict[str, object] | None = None) -> requests.Response:
+    response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    if response.status_code == 403:
+        message = ""
+        try:
+            message = str(response.json().get("message", ""))
+        except (ValueError, AttributeError):
+            message = response.text.strip()
+        remaining = response.headers.get("X-RateLimit-Remaining", "unknown")
+        reset = response.headers.get("X-RateLimit-Reset", "unknown")
+        raise RuntimeError(f"GitHub denied {url}: {message} (rate-limit remaining={remaining}, reset={reset})")
+    response.raise_for_status()
+    return response
+
+
+def get_repos(org: str) -> list[str]:
     cache_name = f"repos_{org.lower()}.json"
     cached = read_metadata_cache(cache_name)
     if isinstance(cached, list):
-        yield from (str(name) for name in cached)
-        return
-
+        return [str(name) for name in cached]
     repos: list[str] = []
     page = 1
     while True:
-        r = SESSION.get(
+        payload = api_get(
             f"{GITHUB_API}/orgs/{org}/repos",
-            params={"per_page": 100, "page": page},
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        # Better diagnostics for 403s / rate limits / permission issues
-        if r.status_code == 403:
-            try:
-                data = r.json()
-                message = data.get("message", "")
-            except Exception:
-                message = r.text.strip()
-
-            remaining = r.headers.get("X-RateLimit-Remaining")
-            reset = r.headers.get("X-RateLimit-Reset")
-
-            err_lines = [
-                f"❌  GitHub returned 403 Forbidden for org '{org}' (page={page}).",
-                f"   Message: {message!r}",
-            ]
-            if remaining is not None:
-                err_lines.append(
-                    f"   X-RateLimit-Remaining={remaining}, X-RateLimit-Reset={reset}"
-                )
-            err_lines.append(
-                "   This usually means either:\n"
-                "     • your GITHUB_TOKEN no longer has access to this org "
-                "(scopes / SSO / membership), or\n"
-                "     • you've hit a rate limit / abuse detection and must wait.\n"
-                "   Try:\n"
-                "     curl -H \"Authorization: token $GITHUB_TOKEN\" "
-                "https://api.github.com/orgs/formosanbank\n"
-                "   to see the full error message."
-            )
-            sys.exit("\n".join(err_lines))
-
-        r.raise_for_status()
-        data = r.json()
-        if not data:
+            params={"per_page": 100, "page": page, "type": "all"},
+        ).json()
+        if not payload:
             break
-
-        # remove entry with name "Formosan-Wikipedias"
-        data = [repo for repo in data if repo["name"] != "Formosan-Wikipedias"]
-        repos.extend(repo["name"] for repo in data)
+        repos.extend(str(repo["name"]) for repo in payload)
         page += 1
     write_metadata_cache(cache_name, repos)
-    yield from repos
+    return repos
 
 
 def get_default_branch(org: str, repo: str) -> str:
@@ -311,49 +245,75 @@ def get_default_branch(org: str, repo: str) -> str:
     cached = read_metadata_cache(cache_name)
     if isinstance(cached, dict) and cached.get("default_branch"):
         return str(cached["default_branch"])
-    meta = SESSION.get(f"{GITHUB_API}/repos/{org}/{repo}", timeout=REQUEST_TIMEOUT)
-    meta.raise_for_status()
-    branch = str(meta.json().get("default_branch", "main"))
+    payload = api_get(f"{GITHUB_API}/repos/{org}/{repo}").json()
+    branch = str(payload.get("default_branch") or "main")
     write_metadata_cache(cache_name, {"default_branch": branch})
     return branch
 
 
-def get_tree(org: str, repo: str, branch: str):
-    """Return the full git tree (recursive) for a repo/branch."""
-    cache_name = f"tree_{org.lower()}_{repo.lower()}_{branch.lower()}.json"
-    cached = read_metadata_cache(cache_name)
-    if isinstance(cached, list):
-        print(f"   🌲 {repo}@{branch}: {len(cached)} cached tree entries")
-        return cached
-    r = SESSION.get(
-        f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{branch}",
+def resolve_commit(org: str, repo: str, reference: str) -> str:
+    payload = api_get(f"{GITHUB_API}/repos/{org}/{repo}/commits/{quote(reference, safe='')}").json()
+    commit = str(payload.get("sha") or "")
+    if len(commit) != 40:
+        raise RuntimeError(f"Could not resolve {org}/{repo}@{reference} to a full commit SHA")
+    return commit
+
+
+def _walk_tree(org: str, repo: str, root_sha: str) -> list[dict]:
+    output: list[dict] = []
+    pending: deque[tuple[str, str]] = deque([("", root_sha)])
+    while pending:
+        prefix, tree_sha = pending.popleft()
+        payload = api_get(f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{tree_sha}").json()
+        if payload.get("truncated"):
+            raise RuntimeError(f"Non-recursive GitHub tree unexpectedly truncated for {repo}:{tree_sha}")
+        entries = payload.get("tree")
+        if not isinstance(entries, list):
+            raise RuntimeError(f"Missing Git tree entries for {repo}:{tree_sha}")
+        for item in entries:
+            relative = str(item.get("path") or "")
+            full_path = f"{prefix}/{relative}" if prefix else relative
+            entry = dict(item)
+            entry["path"] = full_path
+            if entry.get("type") == "tree":
+                pending.append((full_path, str(entry["sha"])))
+            else:
+                output.append(entry)
+    return output
+
+
+def get_tree(org: str, repo: str, commit_sha: str) -> list[dict]:
+    cache_name = f"tree_{org.lower()}_{repo.lower()}_{commit_sha}.json"
+    cached = read_metadata_cache(cache_name, max_age=None)
+    if isinstance(cached, dict) and cached.get("complete") is True and isinstance(cached.get("tree"), list):
+        tree = list(cached["tree"])
+        print(f"   {repo}@{commit_sha[:12]}: {len(tree)} cached tree entries")
+        return tree
+
+    payload = api_get(
+        f"{GITHUB_API}/repos/{org}/{repo}/git/trees/{commit_sha}",
         params={"recursive": "1"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    r.raise_for_status()
-    tree = r.json().get("tree", [])
-    write_metadata_cache(cache_name, tree)
-    print(f"   🌲 {repo}@{branch}: {len(tree)} tree entries")
+    ).json()
+    tree = payload.get("tree")
+    if not isinstance(tree, list):
+        raise RuntimeError(f"GitHub returned no tree for {org}/{repo}@{commit_sha}")
+    if payload.get("truncated"):
+        print(f"   {repo}: recursive tree was truncated; traversing subtrees")
+        tree = _walk_tree(org, repo, commit_sha)
+    write_metadata_cache(cache_name, {"complete": True, "tree": tree})
+    print(f"   {repo}@{commit_sha[:12]}: {len(tree)} tree entries")
     return tree
 
 
-def raw_url(org: str, repo: str, path: str, branch: str) -> str:
-    """
-    Build a raw.githubusercontent.com URL for a given repo/path/branch.
-
-    The path is split and each segment is percent-encoded so that non-ASCII
-    components (e.g., Chinese chars) and spaces are encoded correctly.
-    """
+def raw_url(org: str, repo: str, path: str, commit_sha: str) -> str:
     encoded_path = "/".join(quote(part) for part in path.split("/"))
-    return f"https://raw.githubusercontent.com/{org}/{repo}/{branch}/{encoded_path}"
+    return f"https://raw.githubusercontent.com/{org}/{repo}/{commit_sha}/{encoded_path}"
 
 
 def retry_after_seconds(value: str | None) -> float | None:
     if not value:
         return None
     value = value.strip()
-    if not value:
-        return None
     if value.isdigit():
         return max(0.0, float(value))
     try:
@@ -375,58 +335,38 @@ def retry_sleep_seconds(
     retry_after = retry_after_seconds(response.headers.get("Retry-After") if response else None)
     if retry_after is not None:
         return min(max_sleep, retry_after)
-    backoff = base_sleep * (2 ** attempt)
-    jitter = random.uniform(0.0, max(base_sleep, 0.1))
-    return min(max_sleep, backoff + jitter)
+    return min(max_sleep, base_sleep * (2**attempt) + random.uniform(0.0, max(base_sleep, 0.1)))
 
 
-def is_public_release_xml_path(path: str) -> bool:
-    """
-    Return True for any XML file that lives somewhere under a Corpora/.../XML/
-    subtree in the public release repo.
-
-    Accepted examples:
-      - Corpora/Foo/XML/file.xml
-      - Corpora/Foo/XML/Yami/file.xml
-      - Corpora/Foo/Bar/XML/nested/deeper/file.xml
-    """
-    if not path.lower().endswith(".xml"):
-        return False
-
-    parts = path.split("/")
-    if len(parts) < 3 or parts[0] != "Corpora":
-        return False
-
-    # Match any file directly in XML/ or any deeper descendant of XML/.
-    return "XML" in parts[:-1]
+def git_blob_sha(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode()
+    return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
 
 
-def wants_file(xml_bytes: bytes, src_lang: str, tgt_lang: str | None, dialect: str | None):
+def classify_xml(
+    xml_bytes: bytes,
+    src_lang: str,
+    tgt_lang: str | None,
+    dialect: str | None,
+) -> tuple[str, str, str, str]:
     try:
         root = ET.fromstring(xml_bytes)
-    except ET.ParseError as e:
-        print(f"⚠️  XML parse error in file: {e}")
-        return False
-
-    xml_lang = root.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").strip().lower()
-    xml_dialect = root.attrib.get("dialect", "").strip().lower()
-
-    src_ok = (xml_lang == src_lang.strip().lower())
-    dialect_ok = True if dialect is None else (xml_dialect == dialect.strip().lower())
-
-    if not src_ok or not dialect_ok:
-        return False
-
-    if tgt_lang is None:
-        return True
-
-    target_codes = get_equivalent_lang_codes(tgt_lang.lower())
-
-    return any(
-        elem.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "").strip().lower()
-        in target_codes
-        for elem in root.iter("TRANSL")
-    )
+    except ET.ParseError as exc:
+        return "parse_error", "", "", str(exc)
+    root_language = (root.attrib.get(XML_LANG) or "").strip().lower()
+    root_dialect = (root.attrib.get("dialect") or "").strip()
+    if root_language != src_lang.strip().lower():
+        return "source_language_mismatch", root_language, root_dialect, ""
+    if dialect is not None and root_dialect.lower() != dialect.strip().lower():
+        return "dialect_mismatch", root_language, root_dialect, ""
+    if tgt_lang:
+        target_codes = get_equivalent_lang_codes(tgt_lang.lower())
+        if not any(
+            (translation.attrib.get(XML_LANG) or "").strip().lower() in target_codes
+            for translation in root.iter("TRANSL")
+        ):
+            return "target_language_mismatch", root_language, root_dialect, ""
+    return "kept", root_language, root_dialect, ""
 
 
 def download_blob(
@@ -435,7 +375,7 @@ def download_blob(
     item: dict,
     src_lang: str,
     tgt_lang: str | None,
-    branch: str,
+    commit_sha: str,
     out_dir: Path,
     dialect: str | None,
     *,
@@ -443,415 +383,288 @@ def download_blob(
     retry_base_sleep: float,
     retry_max_sleep: float,
 ) -> DownloadResult:
-    """
-    Download → filter → save one blob using raw.githubusercontent.com
-    (so we don't burn through the REST API core rate limit).
-
-    Returns destination Path or None.
-    """
-    url = raw_url(org, repo, item["path"], branch)
-    cache_path = RAW_XML_CACHE_DIR / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.xml"
+    source_path = str(item["path"])
+    expected_blob = str(item["sha"])
+    url = raw_url(org, repo, source_path, commit_sha)
+    cache_path = RAW_XML_CACHE_DIR / f"{expected_blob}.xml"
+    xml_bytes = b""
     try:
-        if time.time() - cache_path.stat().st_mtime <= CACHE_MAX_AGE_SECONDS:
-            xml_bytes = cache_path.read_bytes()
-        else:
-            xml_bytes = b""
+        cached = cache_path.read_bytes()
+        if git_blob_sha(cached) == expected_blob:
+            xml_bytes = cached
     except OSError:
-        xml_bytes = b""
+        pass
 
-    # retry loop for transient HTTP issues
-    last_error = ""
+    error = ""
     for attempt in range(download_retries if not xml_bytes else 0):
         response: requests.Response | None = None
         try:
             response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
             if response.status_code == 200:
                 xml_bytes = response.content
+                if git_blob_sha(xml_bytes) != expected_blob:
+                    return DownloadResult(
+                        repo,
+                        commit_sha,
+                        source_path,
+                        expected_blob,
+                        "checksum_error",
+                        error="downloaded bytes do not match Git tree blob SHA",
+                    )
                 RAW_XML_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                tmp_cache_path = cache_path.with_suffix(".tmp")
-                tmp_cache_path.write_bytes(xml_bytes)
-                tmp_cache_path.replace(cache_path)
+                temporary = cache_path.with_suffix(".tmp")
+                temporary.write_bytes(xml_bytes)
+                temporary.replace(cache_path)
                 break
-            last_error = f"HTTP {response.status_code}"
+            error = f"HTTP {response.status_code}"
             if response.status_code not in TRANSIENT_HTTP_STATUSES:
-                print(
-                    f"❌  [{repo}] Non-retryable HTTP {response.status_code} for {url}"
+                break
+        except requests.RequestException as exc:
+            error = str(exc)
+        if attempt < download_retries - 1:
+            time.sleep(
+                retry_sleep_seconds(
+                    response,
+                    attempt,
+                    base_sleep=retry_base_sleep,
+                    max_sleep=retry_max_sleep,
                 )
-                return DownloadResult(status="failed", url=url, error=last_error)
-            print(
-                f"⚠️  [{repo}] HTTP {response.status_code} for {url} "
-                f"(attempt {attempt + 1}/{download_retries})"
             )
-        except requests.exceptions.RequestException as e:
-            last_error = str(e)
-            print(
-                f"⚠️  [{repo}] Error fetching {url} "
-                f"on attempt {attempt + 1}/{download_retries}: {e}"
-            )
-        if attempt == download_retries - 1:
-            print(f"❌  [{repo}] Giving up on {url} after {download_retries} attempts")
-            return DownloadResult(status="failed", url=url, error=last_error)
-        time.sleep(
-            retry_sleep_seconds(
-                response,
-                attempt,
-                base_sleep=retry_base_sleep,
-                max_sleep=retry_max_sleep,
-            )
+    if not xml_bytes:
+        return DownloadResult(repo, commit_sha, source_path, expected_blob, "download_error", error=error)
+
+    status, root_language, root_dialect, parse_error = classify_xml(xml_bytes, src_lang, tgt_lang, dialect)
+    digest = sha256_bytes(xml_bytes)
+    if status != "kept":
+        return DownloadResult(
+            repo,
+            commit_sha,
+            source_path,
+            expected_blob,
+            status,
+            bytes=len(xml_bytes),
+            sha256=digest,
+            root_language=root_language,
+            dialect=root_dialect,
+            error=parse_error,
         )
-    else:
-        if xml_bytes:
-            pass
-        else:
-            return DownloadResult(status="failed", url=url, error=last_error or "unknown error")
 
-    if not wants_file(xml_bytes, src_lang, tgt_lang, dialect):
-        # Uncomment for super-verbose logging:
-        # print(f"   ↷ [{repo}] Skipped {item['path']} (lang filter)")
-        return DownloadResult(status="skipped", url=url)
-
-    dest = out_dir / repo / item["path"]
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(xml_bytes)
-    # Uncomment for per-file success logging:
-    # print(f"   ✅ [{repo}] Saved {dest}")
-    return DownloadResult(status="kept", path=dest, url=url)
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--src-lang", required=True, help="e.g. ami, pau, tsu")
-    parser.add_argument(
-        "--tgt-lang", help="optional target language filter (e.g. zh, zho, en)"
+    destination = out_dir / repo / source_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(xml_bytes)
+    return DownloadResult(
+        repo,
+        commit_sha,
+        source_path,
+        expected_blob,
+        "kept",
+        bytes=len(xml_bytes),
+        sha256=digest,
+        destination=str(destination.relative_to(out_dir)),
+        root_language=root_language,
+        dialect=root_dialect,
     )
+
+
+def write_inventory(path: Path, rows: list[DownloadResult]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(rows, key=lambda row: (row.repository.lower(), row.source_path))
+    with path.open("w", encoding="utf-8") as handle:
+        for row in ordered:
+            handle.write(json.dumps(asdict(row), ensure_ascii=False, sort_keys=True) + "\n")
+    return stable_json_hash([asdict(row) for row in ordered])
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fetch an immutable FormosanBank XML snapshot.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--src-lang", required=True)
+    parser.add_argument("--tgt-lang")
     parser.add_argument("--org", default="formosanbank")
-    parser.add_argument("--branch", help="force a branch name for all repos")
-    parser.add_argument(
-        "--out-dir",
-        help="where to store the files (default: downloaded_{src_lang})",
-    )
-    parser.add_argument(
-        "--clean-output",
-        action="store_true",
-        help="Remove the output directory before downloading so stale XML cannot survive.",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=MAX_WORKERS,
-        help=(
-            "Concurrent raw GitHub downloads. Lower values are slower but avoid "
-            f"429 rate limiting. Default: {MAX_WORKERS}."
-        ),
-    )
-    parser.add_argument(
-        "--download-retries",
-        type=int,
-        default=8,
-        help="Attempts per XML candidate for transient HTTP failures such as 429.",
-    )
-    parser.add_argument(
-        "--retry-base-sleep",
-        type=float,
-        default=2.0,
-        help="Initial exponential-backoff sleep in seconds for raw XML downloads.",
-    )
-    parser.add_argument(
-        "--retry-max-sleep",
-        type=float,
-        default=60.0,
-        help="Maximum sleep in seconds between raw XML download retries.",
-    )
+    parser.add_argument("--branch", help="Force one branch/ref for every repository")
+    parser.add_argument("--out-dir")
+    parser.add_argument("--clean-output", action="store_true")
+    parser.add_argument("--workers", type=int, default=MAX_WORKERS)
+    parser.add_argument("--download-retries", type=int, default=8)
+    parser.add_argument("--retry-base-sleep", type=float, default=2.0)
+    parser.add_argument("--retry-max-sleep", type=float, default=60.0)
     parser.add_argument(
         "--allow-download-failures",
         action="store_true",
-        help="Do not abort if one or more XML candidates could not be downloaded.",
+        help="Diagnostic escape hatch. The fetch manifest remains incomplete.",
     )
-    parser.add_argument(
-        "--public",
-        action="store_true",
-        help=(
-            "Use public release structure: look anywhere under XML/ directories "
-            "inside FormosanBank/FormosanBank/Corpora/"
-        ),
-    )
-    parser.add_argument(
-        "--no-public-language-path-prefilter",
-        action="store_true",
-        help=(
-            "In --public mode, do not skip XML paths whose directory/file tokens "
-            "clearly name a different Formosan language."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-bible",
-        action="store_true",
-        help="Exclude the exact Formosan-Taiwan-Bible-Society-Bibles repo/corpus root.",
-    )
-    parser.add_argument(
-        "--exclude-repo",
-        action="append",
-        default=[],
-        help=(
-            "Exact repository name/full-name/URL to skip before scanning. "
-            "Can be repeated or comma-separated."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-repo-pattern",
-        action="append",
-        default=[],
-        help=(
-            "Case-insensitive substring for repositories to skip before scanning. "
-            "Can be repeated or comma-separated."
-        ),
-    )
-    parser.add_argument(
-        "--exclude-path-pattern",
-        action="append",
-        default=[],
-        help=(
-            "Case-insensitive substring for XML paths to skip after repo scanning. "
-            "Can be repeated or comma-separated."
-        ),
-    )
-    parser.add_argument(
-        "--dialect",
-        default=None,
-        help=("optional dialect filter for if you would like to also filter by the xml:dialect tag"),
-    )
+    parser.add_argument("--public", action="store_true")
+    parser.add_argument("--no-public-language-path-prefilter", action="store_true")
+    parser.add_argument("--exclude-bible", action="store_true")
+    parser.add_argument("--exclude-repo", action="append", default=[])
+    parser.add_argument("--exclude-repo-pattern", action="append", default=[])
+    parser.add_argument("--exclude-path-pattern", action="append", default=[])
+    parser.add_argument("--dialect")
     args = parser.parse_args()
-    if args.workers < 1:
-        raise SystemExit("--workers must be >= 1")
-    if args.download_retries < 1:
-        raise SystemExit("--download-retries must be >= 1")
-    if args.retry_base_sleep < 0:
-        raise SystemExit("--retry-base-sleep must be >= 0")
-    if args.retry_max_sleep < 0:
-        raise SystemExit("--retry-max-sleep must be >= 0")
+    if args.workers < 1 or args.download_retries < 1:
+        raise SystemExit("--workers and --download-retries must be >= 1")
+    if args.retry_base_sleep < 0 or args.retry_max_sleep < 0:
+        raise SystemExit("Retry sleep values must be >= 0")
+    return args
 
-    exact_excluded_repos = parse_exact_repos(args.exclude_repo)
-    repo_exclude_patterns = parse_exclude_patterns(args.exclude_repo_pattern)
-    path_exclude_patterns = parse_exclude_patterns(args.exclude_path_pattern)
+
+def main() -> None:
+    args = parse_args()
+    exact_excluded = parse_exact_repos(args.exclude_repo)
     if args.exclude_bible:
-        exact_excluded_repos = add_exact_repos(exact_excluded_repos, EXACT_BIBLE_REPOS)
-
-    if not GITHUB_TOKEN:
-        sys.exit("❌  Please set the GITHUB_TOKEN environment variable")
-
-    print(
-        f"⚙️  Config:\n"
-        f"   src_lang   = {args.src_lang}\n"
-        f"   dialect    = {args.dialect}\n"
-        f"   tgt_lang   = {args.tgt_lang}\n"
-        f"   org        = {args.org}\n"
-        f"   public     = {args.public}\n"
-        f"   public_path_prefilter = {args.public and not args.no_public_language_path_prefilter}\n"
-        f"   exclude_repos_exact = {exact_excluded_repos or None}\n"
-        f"   exclude_repo_patterns = {repo_exclude_patterns or None}\n"
-        f"   exclude_path_patterns = {path_exclude_patterns or None}\n"
-        f"   branch_arg = {args.branch}\n"
-        f"   workers    = {args.workers}\n"
-        f"   retries    = {args.download_retries}\n"
-        f"   backoff    = {args.retry_base_sleep}s..{args.retry_max_sleep}s\n"
-        f"   token_len  = {len(GITHUB_TOKEN)}"
-    )
-
-    dialect = args.dialect if args.dialect else None
-    # Set default output directory if none provided
-    if args.out_dir is None:
-        args.out_dir = f"downloaded_{args.src_lang}"
-
-    out_dir = Path(args.out_dir)
+        exact_excluded = add_exact_repos(exact_excluded, EXACT_BIBLE_REPOS)
+    repo_patterns = parse_exclude_patterns(args.exclude_repo_pattern)
+    path_patterns = parse_exclude_patterns(args.exclude_path_pattern)
+    out_dir = Path(args.out_dir or f"downloaded_{args.src_lang}").expanduser().resolve()
     if args.clean_output and out_dir.exists():
-        print(f"🧹  Removing stale download directory: {out_dir.resolve()}")
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"📂  Output directory: {out_dir.resolve()}")
 
-    # Show which language codes will be matched if target language is specified
-    if args.tgt_lang:
-        equivalent_codes = get_equivalent_lang_codes(args.tgt_lang.lower())
-        print(
-            f"🔍  Target language '{args.tgt_lang}' will match: "
-            f"{sorted(equivalent_codes)}"
-        )
+    if not GITHUB_TOKEN:
+        print("GitHub token is not set; public API rate limits apply.")
+    repos = ["FormosanBank"] if args.public else get_repos(args.org)
+    selected_repos = [
+        repo
+        for repo in repos
+        if not matches_exact_repo(repo, exact_excluded) and not matches_exclude_pattern(repo, repo_patterns)
+    ]
+    excluded_repo_names = sorted(set(repos) - set(selected_repos))
+    if not selected_repos:
+        raise SystemExit("No repositories remain after exclusions")
 
-    # Determine which repos to process based on --public flag
-    if args.public:
-        repos = ["FormosanBank"]
-        print(
-            "🌐  Public release mode: processing any XML file at or below "
-            "FormosanBank/FormosanBank/Corpora/**/XML/"
-        )
-    else:
-        repos = list(get_repos(args.org))
-        print(f"📦  Found {len(repos)} repos in {args.org}")
+    results: list[DownloadResult] = []
+    snapshots: list[RepositorySnapshot] = []
+    repository_errors: list[str] = []
+    future_jobs: list[futures.Future[DownloadResult]] = []
 
-    if exact_excluded_repos:
-        excluded_repos = [
-            repo for repo in repos if matches_exact_repo(repo, exact_excluded_repos)
-        ]
-        repos = [repo for repo in repos if not matches_exact_repo(repo, exact_excluded_repos)]
-        if excluded_repos:
-            print(
-                f"🚫  Excluded {len(excluded_repos)} exact repo(s): "
-                + ", ".join(sorted(excluded_repos))
-            )
-
-    if repo_exclude_patterns:
-        excluded_repos = [
-            repo for repo in repos if matches_exclude_pattern(repo, repo_exclude_patterns)
-        ]
-        repos = [
-            repo for repo in repos if not matches_exclude_pattern(repo, repo_exclude_patterns)
-        ]
-        if excluded_repos:
-            print(
-                f"🚫  Excluded {len(excluded_repos)} repo(s): "
-                + ", ".join(sorted(excluded_repos))
-            )
-
-    with fut.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = []
-
-        # ── repo-level progress bar ──────────────────────────────────────────
-        for repo in tqdm(repos, desc="Repos", unit="repo"):
-            # Determine branch for this repo
-            if args.branch is None:
-                try:
-                    branch = get_default_branch(args.org, repo)
-                    print(f"📦  Repo {repo}: using default branch '{branch}'")
-                except requests.RequestException as e:
-                    print(f"❌  Failed to get default branch for {repo}: {e}")
-                    continue
-            else:
-                branch = args.branch
-                print(f"📦  Repo {repo}: using forced branch '{branch}'")
-
+    with futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+        for repo in tqdm(selected_repos, desc="Repositories", unit="repo"):
             try:
-                tree = get_tree(args.org, repo, branch)
-            except requests.HTTPError as e:
-                if e.response.status_code == 409:  # empty repo or huge tree
-                    print(f"⚠️  Skipping repo {repo} (empty or too large for API)")
-                    continue
-                print(f"❌  HTTP error fetching tree for {repo}@{branch}: {e}")
-                continue
-            except requests.RequestException as e:
-                print(f"❌  Request error fetching tree for {repo}@{branch}: {e}")
+                reference = args.branch or get_default_branch(args.org, repo)
+                commit_sha = resolve_commit(args.org, repo, reference)
+                tree = get_tree(args.org, repo, commit_sha)
+            except (requests.RequestException, RuntimeError) as exc:
+                repository_errors.append(f"{repo}: {exc}")
                 continue
 
-            # Filter XML files based on mode
             if args.public:
-                # Public release: accept XML files directly under XML/ or deeper.
-                xml_blobs = [
-                    i
-                    for i in tree
-                    if i["type"] == "blob"
-                    and is_public_release_xml_path(i["path"])
+                candidates = [
+                    item
+                    for item in tree
+                    if item.get("type") == "blob" and is_public_release_xml_path(str(item.get("path") or ""))
                 ]
-                if not args.no_public_language_path_prefilter:
-                    before_language_prefilter = len(xml_blobs)
-                    xml_blobs = [
-                        i
-                        for i in xml_blobs
-                        if public_path_may_match_src_lang(i["path"], args.src_lang)
-                    ]
-                    removed = before_language_prefilter - len(xml_blobs)
-                    if removed:
-                        print(
-                            f"🚫  Repo {repo}: skipped {removed} XML candidates "
-                            f"whose public path clearly names another language"
-                        )
-                if exact_excluded_repos:
-                    before_exact_public_exclude = len(xml_blobs)
-                    xml_blobs = [
-                        i
-                        for i in xml_blobs
-                        if not matches_excluded_public_corpus_root(
-                            i["path"],
-                            exact_excluded_repos,
-                        )
-                    ]
-                    removed = before_exact_public_exclude - len(xml_blobs)
-                    if removed:
-                        print(
-                            f"🚫  Repo {repo}: excluded {removed} XML candidates "
-                            "from exact public corpus root(s)"
-                        )
             else:
-                # Default: look for Final_XML/*.xml pattern
-                xml_blobs = [
-                    i
-                    for i in tree
-                    if i["type"] == "blob"
-                    and i["path"].startswith("Final_XML/")
-                    and i["path"].lower().endswith(".xml")
+                candidates = [
+                    item
+                    for item in tree
+                    if item.get("type") == "blob"
+                    and str(item.get("path") or "").startswith("Final_XML/")
+                    and str(item.get("path") or "").lower().endswith(".xml")
                 ]
 
-            if path_exclude_patterns:
-                before_path_exclude = len(xml_blobs)
-                xml_blobs = [
-                    i
-                    for i in xml_blobs
-                    if not matches_exclude_pattern(i["path"], path_exclude_patterns)
-                ]
-                removed = before_path_exclude - len(xml_blobs)
-                if removed:
-                    print(f"🚫  Repo {repo}: excluded {removed} XML candidates by path pattern")
+            excluded_items: list[tuple[dict, str]] = []
+            queued: list[dict] = []
+            for item in candidates:
+                path = str(item["path"])
+                reason = ""
+                if args.public and exact_excluded and matches_excluded_public_corpus_root(path, exact_excluded):
+                    reason = "excluded_public_corpus_root"
+                elif path_patterns and matches_exclude_pattern(path, path_patterns):
+                    reason = "excluded_path_pattern"
+                elif (
+                    args.public
+                    and not args.no_public_language_path_prefilter
+                    and not public_path_may_match_src_lang(path, args.src_lang)
+                ):
+                    reason = "path_language_prefilter"
+                if reason:
+                    excluded_items.append((item, reason))
+                else:
+                    queued.append(item)
 
-            if not xml_blobs:
-                print(f"ℹ️  Repo {repo}: no XML blobs found (public={args.public})")
-                continue
-            else:
-                print(f"📄  Repo {repo}: {len(xml_blobs)} XML candidate files")
-
-            for item in xml_blobs:
-                futures.append(
-                    ex.submit(
+            for item, reason in excluded_items:
+                results.append(
+                    DownloadResult(
+                        repo,
+                        commit_sha,
+                        str(item["path"]),
+                        str(item["sha"]),
+                        reason,
+                    )
+                )
+            snapshots.append(
+                RepositorySnapshot(
+                    name=repo,
+                    requested_ref=reference,
+                    commit_sha=commit_sha,
+                    tree_entries=len(tree),
+                    xml_candidates=len(candidates),
+                    queued=len(queued),
+                    excluded=len(excluded_items),
+                )
+            )
+            for item in queued:
+                future_jobs.append(
+                    executor.submit(
                         download_blob,
                         args.org,
                         repo,
                         item,
                         args.src_lang,
                         args.tgt_lang,
-                        branch,  # kept for logging / future use
+                        commit_sha,
                         out_dir,
-                        dialect,
+                        args.dialect,
                         download_retries=args.download_retries,
                         retry_base_sleep=args.retry_base_sleep,
                         retry_max_sleep=args.retry_max_sleep,
                     )
                 )
 
-        # ── file-download progress bar ──────────────────────────────────────
-        print(f"📊  Total XML download tasks queued: {len(futures)}")
-        kept: list[Path] = []
-        failures: list[DownloadResult] = []
-        for f in tqdm(
-            fut.as_completed(futures),
-            total=len(futures),
+        for future in tqdm(
+            futures.as_completed(future_jobs),
+            total=len(future_jobs),
             desc="XML files",
             unit="file",
         ):
-            res = f.result()
-            if res.status == "kept" and res.path:
-                kept.append(res.path)
-            elif res.status == "failed":
-                failures.append(res)
+            results.append(future.result())
 
-    print(f"✅  Downloaded {len(kept)} XML files → {out_dir}")
-    if failures:
-        print(f"❌  Failed to download {len(failures)} XML candidate file(s).")
-        for failure in failures[:25]:
-            print(f"   - {failure.url}: {failure.error}")
-        if len(failures) > 25:
-            print(f"   ... and {len(failures) - 25} more")
-        if not args.allow_download_failures:
-            raise SystemExit(
-                "XML fetch incomplete. Re-run the command; completed downloads are "
-                "kept unless --clean-output removes them."
-            )
+    inventory_path = out_dir / "_fetch_inventory.jsonl"
+    inventory_hash = write_inventory(inventory_path, results)
+    status_counts = Counter(row.status for row in results)
+    hard_failures = sum(status_counts[status] for status in ("download_error", "checksum_error", "parse_error"))
+    complete = not repository_errors and hard_failures == 0 and status_counts["kept"] > 0
+    manifest = {
+        "schema_version": 2,
+        "created_at": utc_now(),
+        "organization": args.org,
+        "source_language": args.src_lang,
+        "target_language": args.tgt_lang,
+        "dialect": args.dialect,
+        "public": args.public,
+        "requested_branch": args.branch,
+        "repositories_discovered": sorted(repos),
+        "repositories_excluded": excluded_repo_names,
+        "repositories": [asdict(snapshot) for snapshot in sorted(snapshots, key=lambda row: row.name.lower())],
+        "repository_errors": repository_errors,
+        "status_counts": dict(sorted(status_counts.items())),
+        "inventory": inventory_path.name,
+        "inventory_sha256": inventory_hash,
+        "complete": complete,
+    }
+    manifest_path = out_dir / "_fetch_manifest.json"
+    atomic_write_json(manifest_path, manifest)
+    print(f"Kept {status_counts['kept']:,} XML files in {out_dir}")
+    print(f"Fetch manifest: {manifest_path}")
+
+    if repository_errors:
+        raise SystemExit("Repository discovery failed:\n  - " + "\n  - ".join(repository_errors))
+    if hard_failures and not args.allow_download_failures:
+        raise SystemExit(f"XML fetch incomplete: {hard_failures} download/checksum/parse failures; see {manifest_path}")
+    if not status_counts["kept"]:
+        raise SystemExit(f"No matching XML files were downloaded; see {manifest_path}")
 
 
 if __name__ == "__main__":
