@@ -379,6 +379,7 @@ class PipelineReportingTests(unittest.TestCase):
                 "field_tag": "TRANSL",
                 "field_kind": "",
                 "language": "zho",
+                "explicit_language": "zh",
                 "text": "「很好」",
             },
         }
@@ -389,16 +390,20 @@ class PipelineReportingTests(unittest.TestCase):
             },
             "token:TRANSL:0": {
                 **before["token:TRANSL:0"],
+                "language": "zho",
+                "explicit_language": "zho",
                 "text": "＂很好＂",
             },
         }
         summary = classify_cleaner_field_changes(before, after)
         self.assertEqual(summary["fields_modified"], 2)
+        self.assertEqual(summary["metadata_fields_modified"], 1)
         self.assertEqual(
             summary["rule_counts"],
             {
                 "normalize_chinese_double_quotes": 1,
                 "normalize_punctuation": 1,
+                "normalize_translation_language_zh_to_zho": 1,
                 "normalize_whitespace": 1,
                 "remove_standard_segmentation_markers": 1,
                 "trim_repeated_punctuation": 1,

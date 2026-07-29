@@ -102,6 +102,9 @@ def snapshot_cleaner_fields(
                         or unit.get(XML_LANG)
                         or root_language
                     ).strip().lower(),
+                    "explicit_language": (
+                        field.get(XML_LANG) or ""
+                    ).strip().lower(),
                     "text": field.text or "",
                 }
     return fields
@@ -126,18 +129,47 @@ def classify_cleaner_field_changes(
     after: dict[str, dict[str, str]],
 ) -> dict[str, object]:
     counts: Counter[str] = Counter()
-    modified_fields = 0
+    modified_keys: set[str] = set()
+    metadata_fields_modified = 0
     unclassified: list[dict[str, str]] = []
 
     for key, before_row in before.items():
         after_row = after.get(key)
         if after_row is None:
             continue
+        before_language = before_row.get(
+            "explicit_language",
+            before_row["language"],
+        )
+        after_language = after_row.get(
+            "explicit_language",
+            after_row["language"],
+        )
+        if before_language != after_language:
+            modified_keys.add(key)
+            metadata_fields_modified += 1
+            language_rule = {
+                ("en", "eng"): (
+                    "normalize_translation_language_en_to_eng"
+                ),
+                ("zh", "zho"): (
+                    "normalize_translation_language_zh_to_zho"
+                ),
+                ("", "eng"): (
+                    "infer_hundred_paiwan_gloss_language_eng"
+                ),
+            }.get((before_language, after_language))
+            if language_rule:
+                counts[language_rule] += 1
+            else:
+                counts[
+                    "unclassified_cleaner_metadata_change"
+                ] += 1
         original = before_row["text"]
         expected = after_row["text"]
         if original == expected:
             continue
-        modified_fields += 1
+        modified_keys.add(key)
         working = original
 
         def apply(rule: str, value: str) -> None:
@@ -235,7 +267,8 @@ def classify_cleaner_field_changes(
         counts["unexpected_cleaner_fields_added"] += added_fields
     return {
         "fields_scanned": len(before),
-        "fields_modified": modified_fields,
+        "fields_modified": len(modified_keys),
+        "metadata_fields_modified": metadata_fields_modified,
         "rule_counts": dict(sorted(counts.items())),
         "unclassified_examples": unclassified,
     }

@@ -585,7 +585,11 @@ def run_dialect_completion(
         if before[relative] != after:
             repairs.append(
                 {
-                    "repair": "complete_missing_dialect",
+                    "repair": (
+                        "normalize_dialect_alias"
+                        if before[relative]
+                        else "complete_missing_dialect"
+                    ),
                     "xml_path": relative,
                     "before": before[relative],
                     "after": after,
@@ -593,7 +597,14 @@ def run_dialect_completion(
             )
     stats = {
         "files_scanned": len(before),
-        "dialects_completed": len(repairs),
+        "dialects_completed": sum(
+            row["repair"] == "complete_missing_dialect"
+            for row in repairs
+        ),
+        "dialects_normalized": sum(
+            row["repair"] == "normalize_dialect_alias"
+            for row in repairs
+        ),
         "dialects_preserved": len(before) - len(repairs),
     }
     return stats, repairs, log

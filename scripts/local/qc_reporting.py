@@ -22,6 +22,16 @@ TRANSFORMATION_RE = re.compile(
 
 RULE_LABELS = {
     "complete_missing_dialect": "complete missing dialect",
+    "infer_hundred_paiwan_gloss_language_eng": (
+        "tag Hundred Paiwan gloss as English"
+    ),
+    "normalize_dialect_alias": "normalize legacy dialect label",
+    "normalize_translation_language_en_to_eng": (
+        "normalize translation language en -> eng"
+    ),
+    "normalize_translation_language_zh_to_zho": (
+        "normalize translation language zh -> zho"
+    ),
     "disambiguate_duplicate_id": "disambiguate duplicate XML ID",
     "remove_empty_source_lexical_unit": "remove empty source lexical unit",
     "remove_empty_source_sentence": "remove empty source sentence",
