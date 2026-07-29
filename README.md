@@ -7,28 +7,33 @@ Society repository, completes English/Chinese coverage with cached DeepL
 pivots, creates leakage-resistant evaluation splits, and trains four
 unidirectional SPM8k models per corpus variant.
 
+Corpus pipeline v2 is the first supported release path. July 2026 v1 manifests
+remain in `formosan_mt_experiments/manifests/` as historical experiment
+records; their corpora must not be reused as v2 training inputs.
+
 ## Current Production Path
 
 ```text
 FormosanBank Final_XML
-  -> fetch exact public/private scope
-  -> FormosanBank QC + standardization
-  -> extract FORM kindOf="standard"
-  -> MT filtering + lexeme classification
+  -> immutable repository/commit/blob inventory
+  -> pinned FormosanBank QC, preserving supplied standard tiers
+  -> extract only FORM kindOf="standard" with element-level provenance
+  -> conservative NFC cleaning + rejection ledger
   -> multilingual EN/ZH aggregates
-  -> cached DeepL pivot completion
-  -> connected-group hard splits
+  -> validated, transactional DeepL pivot completion
+  -> one document/group-aware hard split
   -> independent corpus validation
+  -> exact TAME-MT exposure audit
+  -> checksummed training bundle
   -> SPM8k NLLB setup
   -> f2en / en2f / f2zh / zh2f training
   -> final and best-checkpoint evaluation
 ```
 
-The current no-Bible corpus inventory, checksums, split counts, training
-configuration, and Andromeda job graph are tracked in
-[`formosan_mt_experiments/manifests/no_bible_v1_20260712.json`](formosan_mt_experiments/manifests/no_bible_v1_20260712.json).
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component ownership and
-[`docs/CURRENT_EXPERIMENT.md`](docs/CURRENT_EXPERIMENT.md) for the active flight.
+[`docs/NO_BIBLE_CORPUS_REBUILD.md`](docs/NO_BIBLE_CORPUS_REBUILD.md) for the
+release procedure. [`docs/CURRENT_EXPERIMENT.md`](docs/CURRENT_EXPERIMENT.md)
+documents the superseded July v1 flight.
 
 ## Repository Layout
 
@@ -56,9 +61,9 @@ configure `DEEPL_API_KEY` and any numbered `DEEPL_API_KEY_N` variables. The
 scripts load an ignored root `.env`, discover numbered keys in numeric order,
 and never print key values.
 
-The cleaner prefers a sibling `../FormosanBank` checkout so it runs the current
-canonical QC package. It can sync the required QC tree when that checkout is
-not present.
+The builder accepts a sibling `../FormosanBank` checkout only when its clean
+HEAD exactly matches the pinned QC commit. Otherwise it downloads and verifies
+the pinned QC tree.
 
 ## Build Corpora
 
@@ -93,6 +98,10 @@ outputs but preserve paid pivot caches unless explicitly told otherwise. Do not
 combine `--skip-fetch` with a first-time Bible exclusion because stale fetched
 XML could remain.
 
+Production builds require a clean Git checkout. They fail if acquisition,
+parsing, QC, row conservation, pivot completion, split validation, exposure
+auditing, or provenance packaging is incomplete.
+
 Fetches use bounded concurrency, retries, exponential backoff, and a shared
 GitHub snapshot cache. If GitHub rate-limits a run, resume with existing files
 and lower concurrency:
@@ -112,18 +121,24 @@ The model-facing artifact is
 again on Andromeda before any GPU dependency can start:
 
 - extract source text from `FORM kindOf="standard"`;
+- retain raw original, cleaned standard, XML locator, source commit, QC commit,
+  standard origin, and pre/post-QC hashes for every row;
 - route XML lexemes and morphemes to training only;
 - reserve at least 7.5% test and 2.5% validation for every language, measured
   against all final rows;
-- prefer human evaluation references, admitting synthetic sentence references
-  only when eligible human hard groups cannot meet a language floor;
+- keep every DeepL-generated row in training and every evaluation reference
+  human;
+- hold out source documents where a language has enough eligible documents;
 - keep exact normalized and punctuation/spacing skeleton source, target, and
   pair overlap at zero across train/evaluation;
 - remove train rows one insertion, deletion, or substitution away from an
   evaluation source or target;
+- reject character 4-gram Jaccard conflicts at or above 0.82 across all split
+  boundaries;
+- require exact TAME-MT source/target/pair overlap and exposure at 0.95 to be
+  zero in both translation directions;
 - keep connected one-to-many and many-to-one equivalence groups in one split;
-- report every fallback, synthetic evaluation row, removed conflict, count,
-  and checksum.
+- report every fallback, removed conflict, count, and checksum.
 
 Validate a built corpus directly:
 
@@ -133,18 +148,13 @@ python formosan_mt_experiments/scripts/validate_experiment.py \
   --target-lang english --min-test-ratio 0.075 --min-validate-ratio 0.025
 ```
 
-Verify the tracked experiment snapshot against all four local files and
-checksums:
-
-```bash
-python formosan_mt_experiments/scripts/verify_experiment_manifest.py \
-  --manifest formosan_mt_experiments/manifests/no_bible_v1_20260712.json \
-  --check-files
-```
+Each completed build writes `mt_build_manifest.json` and a portable
+`pivot_corpora_final/provenance/` bundle containing the build, pivot, split,
+validation, exposure, and configuration manifests.
 
 ## Train On Andromeda
 
-Transfer each final build with its provenance files, sync
+Transfer each final build directory, including its packaged provenance, sync
 `formosan_mt_experiments/`, then submit one flight per corpus:
 
 ```bash

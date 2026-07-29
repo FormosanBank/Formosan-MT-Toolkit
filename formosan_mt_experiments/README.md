@@ -22,10 +22,11 @@ unidirectional models:
 | `f2zh` | tagged Formosan | Traditional Chinese |
 | `zh2f` | tagged Traditional Chinese | Formosan |
 
-The active flight snapshot is
+The historical July 2026 flight snapshot is
 [`manifests/no_bible_v1_20260712.json`](manifests/no_bible_v1_20260712.json).
 It records corpus checksums, split totals, code commit, hyperparameters, and all
-validation/setup/training/evaluation job IDs.
+validation/setup/training/evaluation job IDs. It is not a corpus pipeline v2
+release manifest and must not be used to authorize new training.
 
 New submission manifests also contain a SHA-256 inventory of every active
 launcher, Slurm wrapper, Python module, configuration file, and tokenizer-setup
@@ -43,15 +44,17 @@ language it verifies at least 7.5% test and 2.5% validation against the complete
 final corpus denominator. It also requires:
 
 - no lexemes in validation or test;
+- no synthetic rows in validation or test;
+- standard-tier element/QC provenance on every row;
+- source-document holdout or a declared small-language fallback;
 - zero normalized source, target, or pair overlap across train/evaluation;
 - zero punctuation/spacing skeleton overlap across train/evaluation;
-- zero one-edit train/evaluation source or target conflicts.
+- zero one-edit and high character n-gram conflicts across every split
+  boundary.
 
-The splitter prefers human references for evaluation. If all eligible human
-sentence groups are exhausted before a language reaches its ratio floor, it
-may use synthetic sentence references for the residual deficit. This is
-reported explicitly; synthetic references are never silently admitted and XML
-lexemes remain training-only.
+The splitter uses only human sentence references for evaluation. Synthetic,
+lexical, and morpheme rows remain training-only. TAME-MT exact exposure audits
+run as part of the local corpus release before transfer to Andromeda.
 
 Run the gate locally with:
 
@@ -90,8 +93,8 @@ The canonical configuration is `configs/default_experiment.json`:
 
 | Setting | Value |
 |---|---:|
-| Base model | `facebook/nllb-200-distilled-600M` |
-| Formosan SPM extension | 8,192 |
+| Base model | `facebook/nllb-200-distilled-600M@f8d333a098d19b4fd9a8b18f94170487ad3f821d` |
+| Auxiliary SPM | 8,192 pieces, Formosan train text only |
 | Updates | 300,000 maximum |
 | Microbatch / accumulation | 16 / 4 |
 | Effective batch | 64 |
@@ -103,14 +106,19 @@ The canonical configuration is `configs/default_experiment.json`:
 | Selection metric | chrF2 |
 | Early stopping | 5 non-improving validations after step 30,000 |
 
+Tokenizer setup realigns shared NLLB embeddings by token identity after
+SentencePiece changes and hashes every artifact. Training verifies the corpus,
+independent validation, setup, profile, and file hashes before loading data.
 Validation logs corpus and per-language BLEU, chrF2, TER, exact match, empty
-output rate, output/reference length ratio, token loss, and perplexity. Training
-logs loss, learning rate, gradient norm, throughput, and peak CUDA memory.
+output rate, output/reference length ratio, token loss, and perplexity.
+Training logs loss, learning rate, gradient norm, throughput, and peak CUDA
+memory.
 
 Every generation validation writes an atomic `resume/` checkpoint containing
-model, optimizer, scheduler, scaler, and random state. A Slurm rerun resumes the
-latest complete checkpoint. Successful completion retains deployable `best/`
-and `final/` directories and removes transient resume state.
+model, optimizer, scheduler, scaler, random state, and the immutable run
+contract hash. A Slurm rerun refuses mismatched data/code/setup and otherwise
+resumes the latest complete checkpoint. Successful completion retains
+deployable `best/` and `final/` directories.
 
 ## Andromeda Layout
 
@@ -124,7 +132,8 @@ The tracked jobs use the canonical cluster layout:
 /scratch/$USER/projects/mt/formosan_mt_experiments/reports  final metrics/predictions
 ```
 
-Transfer data with provenance:
+Transfer the final directory. The corpus builder creates `provenance/`
+automatically:
 
 ```bash
 rsync -avP ../corpus_builds/public_no_bible/pivot_corpora_final/ \
@@ -133,8 +142,8 @@ rsync -avP ../corpus_builds/private_no_bible/pivot_corpora_final/ \
   andromeda:/projects/prudlab/formosan_parallel_corpora/private_no_bible/
 ```
 
-The corpus directory should also contain `provenance/mt_build_manifest.json`,
-the pivot manifest, and local validation reports.
+The submitter requires `provenance/mt_build_manifest.json`; validators produce
+fresh runtime reports before tokenizer setup can start.
 
 Submit each complete flight:
 
@@ -151,7 +160,7 @@ evaluations. A fixed `RUN_STAMP` is idempotent: pending, running, or completed
 jobs are reused; terminal failed jobs are resubmitted. Evaluations depend on
 successful training and target both `final/` and `best/`.
 
-Operational defaults match the current flight: `medium`/48h trainers on one
+Operational defaults use `medium`/48h trainers on one
 40GB-or-larger GPU, `short` CPU setup/validation, and `medium`/24h evaluation.
 All resources remain overridable through the launcher's environment variables.
 
@@ -167,7 +176,7 @@ SHA-256 in `release_manifest.json`.
 The production publication is recorded in
 [`manifests/huggingface_private_no_bible_20260716.json`](manifests/huggingface_private_no_bible_20260716.json).
 The cards disclose checkpoint selection, split constraints, full global and
-per-language metrics, BLEU tokenization, and synthetic-reference caveats.
+per-language metrics, BLEU tokenization, and reference provenance.
 
 ## Script Ownership
 
@@ -175,11 +184,12 @@ per-language metrics, BLEU tokenization, and synthetic-reference caveats.
 |---|---|
 | `build_experiment_splits.py` | Connected hard groups, ratio floors, fallbacks, leakage pruning, reports. |
 | `validate_experiment.py` | Independent data contract verification. |
+| `audit_corpus_exposure.py` | Exact TAME-MT exposure reports and release gates. |
 | `setup_formosan_nllb200.py` | Formosan SentencePiece extension and NLLB embedding initialization. |
 | `setup_tokenizer_sweep.py` | SPM extension, NLLB resize, token audit, smoke generation. |
 | `train_directional_nllb.py` | Sampling, optimization, validation metrics, checkpointing, resume. |
-| `evaluate_directional.py` | Full test generation and global/per-language/source-bin metrics. |
-| `mt_metrics.py` | Shared BLEU/chrF2/TER and diagnostic metric implementation. |
+| `evaluate_directional.py` | Default-tag headline and oracle-metadata diagnostic evaluation. |
+| `mt_metrics.py` | BLEU/chrF2/TER, signatures, diagnostics, and bootstrap intervals. |
 | `training_code_inventory.py` | Required production-code inventory and SHA-256 provenance. |
 | `publish_huggingface_models.py` | Builds audited Hub packages and atomically replaces the four production model repos. |
 | `slurm/submit_v1_spm8k_directional.sh` | Idempotent production DAG submission and manifest emission. |

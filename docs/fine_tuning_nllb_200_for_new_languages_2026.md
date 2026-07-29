@@ -2,6 +2,12 @@
 
 A practical successor to David Dale's NLLB tutorial, updated for current `transformers` and written as a public Colab workflow.
 
+> This is a standalone teaching example, not the repository's production
+> recipe. Production Formosan experiments must use the standard-tier corpus v2
+> release bundle and `formosan_mt_experiments/`, which adds document-aware
+> splits, TAME-MT exposure gates, pinned revisions, run contracts, and complete
+> provenance.
+
 **Author:** Hunter Scheppat, Boston College  
 **Project:** AI4CommSci Lab / FormosanBank  
 **Associated notebook:** `NLLB_200_MT.ipynb`
@@ -114,6 +120,8 @@ Required columns:
 - `source_lang`: short source language code, such as `tay`.
 - `target_lang`: short target language code, such as `en`.
 - `split`: `train`, `validate`, or `test`.
+- For FormosanBank input, `kindOf` must be `standard`; never substitute
+  unformatted `original` tiers.
 
 Optional but useful columns:
 
@@ -203,7 +211,10 @@ len(train_df), len(val_df), len(test_df)
 
 For low-resource corpora, random row splits are often too easy. Parallel corpora may contain repeated examples, dictionary entries, lesson templates, or near duplicates from the same source document.
 
-At minimum, check that train and eval do not share exact normalized source strings, target strings, or source-target pairs:
+At minimum, check that train and eval do not share exact normalized source
+strings, target strings, or source-target pairs. A research benchmark should
+also hold out documents and reject punctuation skeleton, one-edit, and fuzzy
+character n-gram conflicts:
 
 ```python
 SRC_COL = "source_sentence"
@@ -231,7 +242,10 @@ def leakage_report(train, *eval_sets):
 leakage_report(train_df, val_df, test_df)
 ```
 
-For your own corpus, prefer holding out by document, source file, speaker, or collection when that metadata exists. Exact overlap should be zero before you trust the evaluation.
+For your own corpus, prefer holding out by document, source file, speaker, or
+collection when that metadata exists. Exact overlap alone is not a sufficient
+hardness argument. Use TAME-MT or an equivalent train-aware audit and disclose
+its similarity thresholds.
 
 ## 4. Language IDs
 
@@ -418,22 +432,33 @@ def reload_tokenizer_with_spm_and_tokens(base_tokenizer, new_spm_path: str, spec
     shutil.rmtree(tmp, ignore_errors=True)
     return tok
 
-def warm_start_new_rows(model, tokenizer_old, tokenizer_new) -> int:
+def realign_and_warm_start_rows(model, tokenizer_old, tokenizer_new) -> dict:
     old_vocab = tokenizer_old.get_vocab()
     new_vocab = tokenizer_new.get_vocab()
-    new_tokens = sorted(set(new_vocab) - set(old_vocab))
-    if not new_tokens:
-        return 0
-
-    emb = model.get_input_embeddings().weight.data
+    old_embeddings = model.get_input_embeddings().weight.detach().clone()
+    model.resize_token_embeddings(len(tokenizer_new))
+    emb = model.get_input_embeddings().weight
     unk_old = tokenizer_old.unk_token_id
-    for tok in new_tokens:
-        new_id = tokenizer_new.convert_tokens_to_ids(tok)
-        old_ids = tokenizer_old(tok, add_special_tokens=False).input_ids
-        if not old_ids:
-            old_ids = [unk_old]
-        emb[new_id] = emb[old_ids].mean(0)
-    return len(new_tokens)
+    copied = 0
+    initialized = 0
+    with torch.no_grad():
+        for tok, new_id in new_vocab.items():
+            if tok in old_vocab:
+                emb[new_id] = old_embeddings[old_vocab[tok]]
+                copied += 1
+                continue
+            old_ids = [
+                idx
+                for idx in tokenizer_old(
+                    tok.replace("▁", " ").strip() or tok,
+                    add_special_tokens=False,
+                ).input_ids
+                if idx != unk_old
+            ] or [unk_old]
+            emb[new_id] = old_embeddings[old_ids].mean(0)
+            initialized += 1
+    model.tie_weights()
+    return {"shared_rows_realigned": copied, "new_rows_initialized": initialized}
 
 def seed_new_language_code(model, tokenizer, new_lid: str, seed_lid: str) -> bool:
     emb = model.get_input_embeddings().weight.data
@@ -448,10 +473,19 @@ def seed_new_language_code(model, tokenizer, new_lid: str, seed_lid: str) -> boo
 Apply the tokenizer update:
 
 ```python
-tokenizer_base = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, use_fast=False)
-model = AutoModelForSeq2SeqLM.from_pretrained(BASE_MODEL_NAME)
+BASE_MODEL_REVISION = "f8d333a098d19b4fd9a8b18f94170487ad3f821d"
+tokenizer_base = AutoTokenizer.from_pretrained(
+    BASE_MODEL_NAME,
+    revision=BASE_MODEL_REVISION,
+    use_fast=False,
+)
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    BASE_MODEL_NAME,
+    revision=BASE_MODEL_REVISION,
+)
 
-train_texts = train_df[SRC_COL].astype(str).tolist() + train_df[TGT_COL].astype(str).tolist()
+# The auxiliary model is Formosan-aware: use source-side training text only.
+train_texts = train_df[SRC_COL].astype(str).tolist()
 corpus_path = "spm_training_corpus.txt"
 char_counts = build_spm_corpus(train_texts, corpus_path)
 required_chars = "".join(ch for ch, n in char_counts.items() if n >= MIN_CHAR_FREQ)
@@ -466,15 +500,13 @@ added_pieces = merge_spm_models(
 )
 
 special_tokens = [SOURCE_LID, TARGET_LID]
-for frame in [train_df, val_df, test_df]:
-    for _, row in frame.iterrows():
-        special_tokens.extend(build_prefix(row, "src2tgt").split())
-        special_tokens.extend(build_prefix(row, "tgt2src").split())
+for _, row in train_df.iterrows():
+    special_tokens.extend(build_prefix(row, "src2tgt").split())
+    special_tokens.extend(build_prefix(row, "tgt2src").split())
 special_tokens = sorted(set(special_tokens))
 
 tokenizer = reload_tokenizer_with_spm_and_tokens(tokenizer_base, merged_spm_path, special_tokens)
-model.resize_token_embeddings(len(tokenizer))
-warmed = warm_start_new_rows(model, tokenizer_base, tokenizer)
+alignment = realign_and_warm_start_rows(model, tokenizer_base, tokenizer)
 seeded = seed_new_language_code(model, tokenizer, SOURCE_LID, seed_lid=TARGET_LID)
 
 model.config.decoder_start_token_id = tokenizer.eos_token_id
@@ -483,7 +515,7 @@ if getattr(model, "generation_config", None) is not None:
 
 model.to(device)
 
-print({"added_spm_pieces": added_pieces, "warm_started_rows": warmed, "seeded_language_code": seeded})
+print({"added_spm_pieces": added_pieces, **alignment, "seeded_language_code": seeded})
 ```
 
 Validate tokens:

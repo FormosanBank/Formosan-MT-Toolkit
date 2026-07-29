@@ -12,8 +12,9 @@ consistent.
 ### 1. Acquisition
 
 `fetch_xml.py` enumerates repositories visible through GitHub, resolves each
-default branch, and downloads XML with bounded workers, retries, exponential
-backoff, and a shared metadata/blob cache. Public mode restricts input to the
+branch to a commit, rejects truncated trees, and verifies every downloaded blob
+against its Git object ID. Repository, tree, download, checksum, and parse
+failures make the fetch manifest incomplete. Public mode restricts input to the
 public FormosanBank corpus tree. Private mode means every eligible repository
 visible to the token.
 
@@ -22,26 +23,34 @@ visible to the token.
 
 ### 2. FormosanBank QC
 
-`clean_xml.py` runs the canonical FormosanBank cleaner and standardizer with a
-valid package root and Python path. It handles current XML that already has a
-standard tier instead of assuming every sentence needs an original-to-standard
-copy. Validation can be enabled when a publication-grade XML audit is needed.
+`clean_xml.py` uses one commit-pinned FormosanBank QC snapshot. Existing
+`kindOf="standard"` tiers are never replaced with originals. Missing standards
+are derived only where required, then processed by the pinned canonical
+cleaner. Hard XML and text validators always run in production.
+
+Before QC, every S/W/M element receives a temporary transform ID. After QC the
+temporary attribute is removed and a sidecar records whether the standard was
+provided or derived, original/standard hashes before QC, the final standard
+hash, removal disposition, and stable final element locator.
 
 ### 3. Extraction
 
-`make_corpus.py` extracts `FORM kindOf="standard"` and target translations. It
-preserves source path, XML ID, dialect, source kind, and row type. Word-level
-XML material is marked as lexical data rather than inferred later from length
-alone.
+`make_corpus.py` refuses XML not accounted for by the immutable fetch
+inventory, verifies fetch/QC sidecar hashes, and extracts only
+`FORM kindOf="standard"`. Stable row IDs include the XML element index, so
+files with missing or repeated XML IDs remain traceable. Rows retain raw
+original, post-QC standard, repository commit, QC commit, dialect, structural
+type, target metadata, and transform hashes.
 
 ### 4. MT Filtering
 
-`filter_split_corpus.py` performs Unicode/text normalization, removes explicit
-missing markers and presentation artifacts, rejects source-side CJK leakage,
-filters empty/redacted/performative rows, deduplicates exact pairs, and applies
-separate sentence/lexeme fertility bounds. It records drop reasons and reject
-samples. Pairwise splits are useful diagnostics; the experiment splitter later
-rebuilds the authoritative hard split from the aggregate corpus.
+`filter_split_corpus.py` performs conservative NFC, control-character,
+HTML-entity, and whitespace normalization. It does not run English Moses rules
+on Formosan/Chinese, NFKC the model text, or delete parenthetical spans.
+Language/script, redaction, identity, markup, repetition, and broad fertility
+checks quarantine or reject questionable rows. Exact pairs are deduplicated,
+and every input row is conserved as accepted, rejected, quarantined, or
+deduplicated in a ledger. This stage never assigns data splits.
 
 ### 5. Aggregation And Pivoting
 
@@ -52,49 +61,66 @@ backs off on transient errors, and writes each successful response immediately
 to a content-keyed JSONL cache. Rebuilds read shared and build-local caches
 before spending quota.
 
-Pivot rows retain provider, direction, source text, origin, and cache key. A
-cached response is data provenance, not permission to treat the row as human.
+Pivot rows retain provider, direction, source text, origin, cache key, detected
+language, and inherited XML provenance. Responses pass the same script,
+identity, repetition, placeholder, and fertility checks as human rows.
+Unresolved candidates, invalid cache records, row errors, quota exhaustion, or
+a stop reason prevent output promotion and return a nonzero status.
 
 ### 6. Hard Splitting
 
 `formosan_mt_experiments/scripts/build_experiment_splits.py` ignores legacy
 pairwise split labels and builds the model-facing split. It:
 
-1. classifies lexical rows and locks them to training;
-2. forms connected components through normalized and punctuation/spacing
-   skeleton source and target keys, covering one-to-many and many-to-one rows;
-3. selects hard human sentence groups first;
-4. broadens to other human sentence groups when a language floor is short;
-5. uses synthetic sentence groups only for any remaining floor deficit;
-6. removes training rows one character edit from evaluation on either side;
-7. minimally trims low-value training rows only when indivisible groups leave a
-   final denominator just below the required ratio;
-8. fails if any language still has less than 7.5% test or 2.5% validation.
+1. deduplicates canonical source-target pairs;
+2. locks lexical, morpheme, and synthetic rows to training;
+3. forms connected components through normalized and punctuation/spacing
+   skeleton source and target keys;
+4. holds out complete human source documents where enough documents exist;
+5. uses declared human group-level fallbacks for small languages;
+6. removes one-edit and character 4-gram Jaccard conflicts on both sides across
+   train/test, train/validation, and test/validation;
+7. fails if any language has less than 7.5% test or 2.5% validation against the
+   complete deduplicated corpus denominator.
 
 The final denominator includes human, synthetic, sentence, and lexical rows.
 This prevents pivot growth from making evaluation statistically negligible.
 
 ### 7. Independent Validation
 
-`validate_experiment.py` recomputes split ratios and leakage properties from the
-emitted CSV. It does not trust the split-builder report. The same validator runs
-on Andromeda before tokenizer setup; Slurm `afterok` dependencies turn the data
-contract into a hard training gate.
+`validate_experiment.py` independently recomputes provenance, split ratios,
+document overlap, normalized/skeleton overlap, one-edit conflicts, and exact
+character n-gram conflicts from the emitted CSV. It requires human sentence
+evaluation and standard-tier provenance.
+
+`audit_corpus_exposure.py` then runs TAME-MT 0.2.2 with exact native retrieval
+in both MT directions. It reports SourceExposure, TargetExposure,
+PairLeakTopK, exact overlap, and translation-memory baselines by split and
+language. Exact overlap and exposure at 0.95 must be zero; 0.70 and 0.85 remain
+diagnostics. Exposure is evidence of similarity risk, not proof of
+memorization.
 
 ### 8. NLLB Training
 
-`setup_tokenizer_sweep.py` and `setup_formosan_nllb200.py` learn the 8k Formosan
-extension, add metadata tags, resize NLLB, audit tokenization, and smoke-test
-generation. Both live in the production experiment stack and are
-checksum-pinned before use.
+`setup_tokenizer_sweep.py` and `setup_formosan_nllb200.py` learn the auxiliary
+8k SPM from standard-tier Formosan training text only. They load a pinned
+NLLB-200 revision, realign every shared embedding by token identity after the
+SentencePiece ID shift, initialize new pieces from old subpieces, seed new
+Formosan language IDs, add train-derived metadata tags, and hash every setup
+artifact.
 
-`train_directional_nllb.py` trains one direction per checkpoint with
-source-bucket weighting and language-temperature sampling. It performs fixed
-per-language generation validation, selects best by chrF2, supports early
-stopping, and atomically saves full resume state.
+`train_directional_nllb.py` verifies the corpus, independent validation, setup,
+profile, and file hashes before training. It trains one direction per
+checkpoint with source-bucket weighting and language-temperature sampling,
+performs fixed human per-language generation validation, selects best by
+chrF2, supports early stopping, and binds every resume/checkpoint to an
+immutable run contract.
 
-`evaluate_directional.py` evaluates the entire test split and writes predictions
-plus global, language, source-bucket, dialect, and length-bin metrics.
+`evaluate_directional.py` evaluates the entire human test split. Default
+metadata tags are the headline score; oracle source/dialect tags are a separate
+diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures, stratified
+bootstrap confidence intervals, exact/empty/length diagnostics, and
+language/source/dialect/length slices.
 
 ## Data Products
 
@@ -103,11 +129,10 @@ plus global, language, source-bucket, dialect, and length-bin metrics.
 | Downloaded XML and raw/filtered rebuild CSVs | Regenerable | No |
 | DeepL JSONL response caches | Expensive source artifact | No; checksum and back up |
 | Named final no-Bible corpora | Current experiment input | No; manifest/checksum yes |
-| Split/validation reports | Current provenance | Copied with corpus; summary manifest in git |
+| Split/validation/exposure reports | Current provenance | Packaged beside final corpus |
 | Tokenizers, checkpoints, predictions | Cluster experiment output | No |
 | Experiment configuration and job graph | Reproducibility record | Yes |
 
-Historical model implementations and generated training formats remain
-recoverable from Git history rather than occupying the active tree. The
-repository itself contains only the named corpus builder and production SPM8k
-experiment path.
+`pivot_corpora_final/provenance/bundle_manifest.json` is the portable training
+contract. Historical model implementations and generated formats remain in Git
+history rather than the active tree.

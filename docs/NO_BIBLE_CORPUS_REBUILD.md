@@ -1,17 +1,20 @@
 # No-Bible Corpus Rebuild
 
-This document identifies the canonical public/private corpus matrix rebuilt on
-2026-07-12/13. Generated CSVs and paid DeepL caches are intentionally ignored
-by git; this tracked record makes their provenance and expected outputs
-auditable.
+This is the canonical corpus pipeline v2 release procedure. Generated CSVs and
+paid DeepL caches are intentionally ignored by git. A completed build is
+self-describing through its checksummed manifests and portable provenance
+bundle.
 
 ## Rebuild
 
 Prerequisites:
 
-- sibling `../FormosanBank` checkout for canonical QC;
+- a clean checkout of this repository;
 - `GITHUB_TOKEN` in `.env` for private repositories;
 - `DEEPL_API_KEY` plus any numbered `DEEPL_API_KEY_N` variables.
+
+A sibling `../FormosanBank` checkout is optional. It is accepted only when its
+clean HEAD equals the pinned QC commit.
 
 Run the complete fresh build:
 
@@ -19,11 +22,20 @@ Run the complete fresh build:
 ./build_corpora.sh --build-public-private --with-pivot --exclude-bible
 ```
 
-Resume without spending DeepL quota after caches are complete:
+Rebuild all data while reusing completed translations and making DeepL calls
+only for new eligible rows:
 
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot \
-  --pivot-skip-translation --exclude-bible --keep-build-output
+  --exclude-bible
+```
+
+Rebuild without any DeepL network calls, failing if the caches do not cover
+every eligible row:
+
+```bash
+./build_corpora.sh --build-public-private --with-pivot \
+  --pivot-skip-translation --exclude-bible
 ```
 
 Regenerate only the final leakage-controlled splits and checksummed manifests,
@@ -42,25 +54,24 @@ DeepL keys in numeric order, reuses response caches by content key, preserves
 `pivot_origin`/`pivot_direction`, and requires zero missing eligible synthetic
 rows before these artifacts are considered complete.
 
-## Headline Artifacts
+## Release Outputs
 
-| Artifact | Rows | SHA-256 |
-|---|---:|---|
-| public English hard | 461,875 | `579bd9bb84cf0ef91ea45888a7df2d766acc64785f79217fa3b2525051108118` |
-| public Chinese hard | 485,369 | `b16eb04e4dcc43b7c2412672f17e5eb3505853f308a3ed075804d9d1a592ac04` |
-| private English hard | 759,493 | `b9c0ad5147b116abcb7e9cef3878a5c2f25a282c47e5dfc85a1bde7d86b91db9` |
-| private Chinese hard | 791,330 | `39a69195b92a608512f991b1e67f0132cdcb59c2092c6155ef747c463b59cddd` |
+Each named build produces:
 
-The authoritative machine-readable inventories are each build's
-`mt_build_manifest.json`, `processed_corpora/pivot/pivot_manifest.json`, and
-split-directory `report_all_tiers.json`.
+- `pivot_corpora_final/big_corpus_en_in_domain_hard.csv`;
+- `pivot_corpora_final/big_corpus_zh_in_domain_hard.csv`;
+- `mt_build_manifest.json`;
+- `pivot_corpora_final/provenance/bundle_manifest.json`;
+- split, independent validation, and TAME-MT exposure reports.
+
+Rows and hashes are release outputs, not constants in source documentation.
+Read them from the build and bundle manifests.
 
 ## Evaluation Policy
 
 - XML lexemes/morphemes: training only.
-- Evaluation references prefer human translations. Synthetic sentence
-  references are admitted only for a per-language residual shortfall after all
-  eligible human sentence groups are exhausted; reports quantify these rows.
+- DeepL/synthetic rows: training only.
+- Evaluation: human sentence references only.
 - Final per-language split minimum: 7.5% test and 2.5% validation, measured
   against every emitted row including synthetic training rows.
 - Small-language desired floors: 500 test and 150 validation rows.
@@ -68,10 +79,22 @@ split-directory `report_all_tiers.json`.
 - Punctuation/spacing skeleton overlap: zero.
 - One-character insertion/deletion/substitution train/eval overlap: removed on
   both Formosan and target sides.
+- Character 4-gram Jaccard conflicts at or above 0.82: zero across all split
+  boundaries.
+- TAME-MT exact source/target/pair overlap and exposure at 0.95: zero in both
+  translation directions.
 
 The builder expands the human sentence candidate pool when the strict hard pool
-cannot meet those final-corpus percentages. It fails rather than silently
-emitting an undersized evaluation split. Lexemes remain training-only.
+cannot meet those final-corpus percentages, with a declared small-language
+fallback. It fails rather than silently emitting an undersized or synthetic
+evaluation split.
+
+## Historical Warning
+
+`formosan_mt_experiments/manifests/no_bible_v1_20260712.json` and the July 2026
+row counts describe the superseded v1 experiment. They predate the standard-tier
+and provenance repairs and are retained only to reproduce the published model
+history. Do not train new models from those CSVs.
 
 ## Storage
 

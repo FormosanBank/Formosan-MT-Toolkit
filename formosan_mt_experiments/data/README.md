@@ -4,7 +4,8 @@ This directory is for generated experiment artifacts. It is ignored by git excep
 
 Expected generated layout:
 
-- `splits_en_v1/`: regenerated tiered English MT splits (`lexical`, `in_domain_hard`, `hard_global`) plus split validation reports.
+- `splits_en_v1/` and `splits_zh_v1/`: the sole supported
+  `in_domain_hard` split plus independent validation and exposure reports.
 - `tokenizer_sweep_spm8192/`, `tokenizer_sweep_en_spm8192/`, `tokenizer_sweep_zh_spm8192/`: generated v1 SPM8k tokenizer/model setup outputs and tokenizer audits.
 - `runs/`: optional local training outputs. On Andromeda, put runs under `/scratch/$USER/projects/mt/formosan_mt_experiments/runs/`.
 
