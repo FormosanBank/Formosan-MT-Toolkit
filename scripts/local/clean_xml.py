@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -35,6 +36,8 @@ DEFAULT_QC_REVISION = str(FORMOSANBANK_CONFIG["qc_revision"])
 SYNC_PREFIXES = ("QC/", "Orthographies/", "dialects.csv")
 DEFAULT_QC_CACHE = PROJECT_ROOT / "scripts" / ".formosan_qc_repo"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+PROVENANCE_ATTR = "_mt_toolkit_transform_id"
+TRANSFORM_INVENTORY = "_qc_transform_inventory.jsonl"
 
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     "zh": {"zh", "zho", "chi", "cmn"},
@@ -303,8 +306,226 @@ def validate_input_files(directory: Path, src_lang: str, tgt_lang: str | None) -
     return dict(counts)
 
 
+def validate_fetch_contract(directory: Path) -> dict[str, object]:
+    manifest_path = directory / "_fetch_manifest.json"
+    inventory_path = directory / "_fetch_inventory.jsonl"
+    if not manifest_path.is_file() or not inventory_path.is_file():
+        raise SystemExit(
+            f"Missing fetch manifest/inventory under {directory}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"Malformed fetch manifest {manifest_path}: {exc}"
+        ) from exc
+    if manifest.get("complete") is not True:
+        raise SystemExit(f"Fetch manifest is incomplete: {manifest_path}")
+    inventory_hash = sha256_file(inventory_path)
+    if inventory_hash != manifest.get("inventory_sha256"):
+        raise SystemExit(
+            f"Fetch inventory hash mismatch under {directory}"
+        )
+    kept: set[str] = set()
+    with inventory_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"Malformed fetch inventory "
+                    f"{inventory_path}:{line_number}: {exc}"
+                ) from exc
+            if row.get("status") == "kept":
+                kept.add(str(row.get("destination") or ""))
+    actual = {
+        str(path.relative_to(directory))
+        for path in directory.rglob("*.xml")
+    }
+    if actual != kept:
+        raise SystemExit(
+            "Fetched XML set does not match its immutable inventory: "
+            f"missing={sorted(kept - actual)[:10]}, "
+            f"unexpected={sorted(actual - kept)[:10]}"
+        )
+    return {
+        "manifest_sha256": sha256_file(manifest_path),
+        "inventory_sha256": inventory_hash,
+        "xml_files": len(actual),
+    }
+
+
 def mixed_content_signature(element: ET.Element) -> str:
     return ET.tostring(element, encoding="unicode")
+
+
+def form_sha256(element: ET.Element | None) -> str | None:
+    if element is None:
+        return None
+    return hashlib.sha256(
+        ET.tostring(element, encoding="utf-8")
+    ).hexdigest()
+
+
+def tag_transform_sources(
+    corpus_dir: Path,
+) -> dict[str, dict[str, object]]:
+    records: dict[str, dict[str, object]] = {}
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        relative = str(xml_file.relative_to(corpus_dir))
+        unit_index = 0
+        for element in root.iter():
+            if element.tag not in {"S", "W", "M"}:
+                continue
+            if PROVENANCE_ATTR in element.attrib:
+                raise SystemExit(
+                    f"Reserved QC provenance attribute already exists: "
+                    f"{relative}:{element.tag}:{element.get('id', '')}"
+                )
+            token = hashlib.sha256(
+                (
+                    f"{relative}\u241f{element.tag}\u241f{unit_index}\u241f"
+                    f"{element.get('id', '')}"
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            originals = [
+                form
+                for form in element.findall("FORM")
+                if (form.get("kindOf") or "").strip().lower() == "original"
+            ]
+            standards = [
+                form
+                for form in element.findall("FORM")
+                if (form.get("kindOf") or "").strip().lower() == "standard"
+            ]
+            if len(originals) > 1 or len(standards) > 1:
+                raise SystemExit(
+                    f"Duplicate original/standard tier at "
+                    f"{relative}:{element.tag}:{element.get('id', '')}"
+                )
+            records[token] = {
+                "transform_id": token,
+                "xml_path": relative,
+                "element_tag": element.tag,
+                "xml_id": element.get("id", ""),
+                "source_element_index": unit_index,
+                "standard_origin": (
+                    "provided"
+                    if standards
+                    else "derived_from_original"
+                ),
+                "original_before_qc_sha256": form_sha256(
+                    originals[0] if originals else None
+                ),
+                "standard_before_qc_sha256": form_sha256(
+                    standards[0] if standards else None
+                ),
+            }
+            element.set(PROVENANCE_ATTR, token)
+            unit_index += 1
+        tree.write(xml_file, encoding="utf-8", xml_declaration=True)
+    return records
+
+
+def finalize_transform_inventory(
+    corpus_dir: Path,
+    records: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    retained: set[str] = set()
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+        relative = str(xml_file.relative_to(corpus_dir))
+        unit_index = 0
+        for element in root.iter():
+            if element.tag not in {"S", "W", "M"}:
+                continue
+            token = element.attrib.pop(PROVENANCE_ATTR, "")
+            if not token or token not in records:
+                raise SystemExit(
+                    f"QC cleaner lost transform provenance at "
+                    f"{relative}:{element.tag}:{element.get('id', '')}"
+                )
+            standards = [
+                form
+                for form in element.findall("FORM")
+                if (form.get("kindOf") or "").strip().lower() == "standard"
+            ]
+            if len(standards) != 1:
+                raise SystemExit(
+                    f"Expected one standard tier after QC at "
+                    f"{relative}:{element.tag}:{element.get('id', '')}"
+                )
+            record = records[token]
+            record.update(
+                {
+                    "final_element_index": unit_index,
+                    "standard_after_qc_sha256": form_sha256(standards[0]),
+                    "disposition": "retained",
+                }
+            )
+            retained.add(token)
+            unit_index += 1
+        tree.write(xml_file, encoding="utf-8", xml_declaration=True)
+
+    for token, record in records.items():
+        if token not in retained:
+            record.update(
+                {
+                    "final_element_index": None,
+                    "standard_after_qc_sha256": None,
+                    "disposition": "removed_by_cleaner",
+                }
+            )
+    return sorted(
+        records.values(),
+        key=lambda row: (
+            str(row["xml_path"]),
+            int(row["source_element_index"]),
+        ),
+    )
+
+
+def remove_transform_tags(corpus_dir: Path) -> None:
+    for xml_file in sorted(corpus_dir.rglob("*.xml")):
+        tree = ET.parse(xml_file)
+        changed = False
+        for element in tree.getroot().iter():
+            if PROVENANCE_ATTR in element.attrib:
+                element.attrib.pop(PROVENANCE_ATTR)
+                changed = True
+        if changed:
+            tree.write(xml_file, encoding="utf-8", xml_declaration=True)
+
+
+def write_transform_inventory(
+    corpus_dir: Path,
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
+    path = corpus_dir / TRANSFORM_INVENTORY
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+    retained = sum(row["disposition"] == "retained" for row in rows)
+    return {
+        "path": path.name,
+        "sha256": sha256_file(path),
+        "records": len(rows),
+        "retained": retained,
+        "removed_by_cleaner": len(rows) - retained,
+    }
 
 
 def copy_form(source: ET.Element, kind_of: str) -> ET.Element:
@@ -420,9 +641,26 @@ def run_command(cmd: list[str], qc_root: Path) -> None:
 
 
 def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[str, object]:
+    transform_sources = tag_transform_sources(corpus_dir)
     tier_completion = ensure_standard_tiers(corpus_dir)
     clean_script = qc_root / "QC" / "cleaning" / "clean_xml.py"
-    run_command([sys.executable, str(clean_script), "--corpora_path", str(corpus_dir)], qc_root)
+    try:
+        run_command(
+            [
+                sys.executable,
+                str(clean_script),
+                "--corpora_path",
+                str(corpus_dir),
+            ],
+            qc_root,
+        )
+    except BaseException:
+        remove_transform_tags(corpus_dir)
+        raise
+    transform_inventory = write_transform_inventory(
+        corpus_dir,
+        finalize_transform_inventory(corpus_dir, transform_sources),
+    )
     standard_audit = audit_standard_tiers(corpus_dir)
 
     validators: list[str] = []
@@ -442,6 +680,7 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
             validators.append(script_name)
     return {
         "tier_completion": tier_completion,
+        "transform_inventory": transform_inventory,
         "standard_audit": standard_audit,
         "validators": validators,
     }
@@ -453,6 +692,7 @@ def main() -> None:
     if not corpus_dir.is_dir():
         raise SystemExit(f"Input directory does not exist: {corpus_dir}")
 
+    fetch_snapshot = validate_fetch_contract(corpus_dir)
     qc_root = resolve_qc_root(args)
     input_counts = validate_input_files(corpus_dir, args.src_lang, args.tgt_lang)
     qc_result = run_qc_scripts(corpus_dir, qc_root, validate=not args.skip_validation)
@@ -472,6 +712,7 @@ def main() -> None:
             ),
         },
         "input": input_counts,
+        "fetch_snapshot": fetch_snapshot,
         **qc_result,
         "complete": not args.skip_validation,
     }

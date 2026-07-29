@@ -23,7 +23,13 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
-from pipeline_common import atomic_write_json, sha256_bytes, stable_json_hash, utc_now
+from pipeline_common import (
+    atomic_write_json,
+    sha256_bytes,
+    sha256_file,
+    stable_json_hash,
+    utc_now,
+)
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
@@ -466,13 +472,16 @@ def download_blob(
     )
 
 
-def write_inventory(path: Path, rows: list[DownloadResult]) -> str:
+def write_inventory(path: Path, rows: list[DownloadResult]) -> tuple[str, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered = sorted(rows, key=lambda row: (row.repository.lower(), row.source_path))
     with path.open("w", encoding="utf-8") as handle:
         for row in ordered:
             handle.write(json.dumps(asdict(row), ensure_ascii=False, sort_keys=True) + "\n")
-    return stable_json_hash([asdict(row) for row in ordered])
+    return (
+        sha256_file(path),
+        stable_json_hash([asdict(row) for row in ordered]),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -632,7 +641,10 @@ def main() -> None:
             results.append(future.result())
 
     inventory_path = out_dir / "_fetch_inventory.jsonl"
-    inventory_hash = write_inventory(inventory_path, results)
+    inventory_hash, inventory_records_hash = write_inventory(
+        inventory_path,
+        results,
+    )
     status_counts = Counter(row.status for row in results)
     hard_failures = sum(status_counts[status] for status in ("download_error", "checksum_error", "parse_error"))
     complete = not repository_errors and hard_failures == 0 and status_counts["kept"] > 0
@@ -652,6 +664,7 @@ def main() -> None:
         "status_counts": dict(sorted(status_counts.items())),
         "inventory": inventory_path.name,
         "inventory_sha256": inventory_hash,
+        "inventory_records_sha256": inventory_records_hash,
         "complete": complete,
     }
     manifest_path = out_dir / "_fetch_manifest.json"

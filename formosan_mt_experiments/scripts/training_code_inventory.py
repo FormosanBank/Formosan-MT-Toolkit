@@ -11,6 +11,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
     "scripts/build_experiment_splits.py",
     "scripts/evaluate_directional.py",
+    "scripts/experiment_config.py",
     "scripts/mt_common.py",
     "scripts/mt_metrics.py",
     "scripts/setup_formosan_nllb200.py",

@@ -27,5 +27,13 @@
     "lexical_eval": false,
     "synthetic_eval": false,
     "headline_tier": "in_domain_hard"
+  },
+  "exposure_audit": {
+    "tool": "tame-mt",
+    "version": "0.2.2",
+    "retrieval": "exact",
+    "normalization": "NFKC case-insensitive",
+    "high_threshold": 0.95,
+    "max_high_exposure_rate": 0.0
   }
 }

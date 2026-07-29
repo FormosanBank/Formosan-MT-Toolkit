@@ -14,7 +14,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
-from clean_xml import audit_standard_tiers, ensure_standard_tiers  # noqa: E402
+from clean_xml import (  # noqa: E402
+    audit_standard_tiers,
+    ensure_standard_tiers,
+    finalize_transform_inventory,
+    tag_transform_sources,
+)
 from corpus_quality import (  # noqa: E402
     apply_quality_rules,
     deduplicate_pairs,
@@ -85,6 +90,35 @@ class StandardTierTests(unittest.TestCase):
             self.assertEqual(stats["standard_copied_from_original"], 1)
             self.assertEqual(stats["original_copied_from_standard"], 1)
 
+    def test_qc_transform_inventory_distinguishes_provided_and_derived(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.write_xml(
+                directory,
+                '<S id="provided"><FORM kindOf="original">ma-lu</FORM>'
+                '<FORM kindOf="standard">malu</FORM></S>'
+                '<S id="derived"><FORM kindOf="original">pa-su</FORM></S>',
+            )
+            records = tag_transform_sources(directory)
+            ensure_standard_tiers(directory)
+            inventory = finalize_transform_inventory(directory, records)
+            origins = {
+                row["xml_id"]: row["standard_origin"]
+                for row in inventory
+            }
+            self.assertEqual(origins["provided"], "provided")
+            self.assertEqual(origins["derived"], "derived_from_original")
+            self.assertTrue(
+                all(
+                    row["standard_after_qc_sha256"]
+                    for row in inventory
+                )
+            )
+            self.assertNotIn(
+                "_mt_toolkit_transform_id",
+                (directory / "sample.xml").read_text(encoding="utf-8"),
+            )
+
 
 class AcquisitionTests(unittest.TestCase):
     def test_malformed_xml_is_not_a_language_mismatch(self) -> None:
@@ -143,6 +177,39 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             self.assertEqual(rows[0].formosan_original, "ma-lu=na.")
             self.assertEqual(rows[0].kind_of, "standard")
             self.assertEqual(rows[0].row_type, "sentence")
+
+    def test_extraction_ids_remain_unique_without_xml_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "sample.xml"
+            path.write_text(
+                '<?xml version="1.0"?>'
+                '<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+                'xml:lang="ami">'
+                '<S><FORM kindOf="standard">first sentence</FORM>'
+                '<TRANSL xml:lang="eng">first target</TRANSL></S>'
+                '<S><FORM kindOf="standard">second sentence</FORM>'
+                '<TRANSL xml:lang="eng">second target</TRANSL></S>'
+                "</TEXT>",
+                encoding="utf-8",
+            )
+            rows, _ = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"eng"},
+                tags={"S"},
+            )
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len({row.row_id for row in rows}), 2)
+            self.assertEqual(
+                {row.xml_element_index for row in rows},
+                {0, 1},
+            )
 
     def test_cleaning_preserves_parentheses_and_structural_sentence_type(self) -> None:
         self.assertEqual(normalize_text("  It is good (today).  ").text, "It is good (today).")
@@ -430,7 +497,8 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                         "sha256": "fixture",
                     }
                 )
-            (downloaded / "_fetch_inventory.jsonl").write_text(
+            fetch_inventory_path = downloaded / "_fetch_inventory.jsonl"
+            fetch_inventory_path.write_text(
                 "".join(
                     json.dumps(row, sort_keys=True) + "\n"
                     for row in inventory
@@ -442,12 +510,59 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                     {
                         "schema_version": 2,
                         "source_language": "ami",
+                        "inventory_sha256": hashlib.sha256(
+                            fetch_inventory_path.read_bytes()
+                        ).hexdigest(),
                         "complete": True,
                     }
                 ),
                 encoding="utf-8",
             )
             ensure_standard_tiers(downloaded)
+            qc_records = [
+                {
+                    "transform_id": f"transform-{document}",
+                    "xml_path": str(
+                        Path("FixtureRepo")
+                        / "Final_XML"
+                        / f"doc-{document}.xml"
+                    ),
+                    "element_tag": "S",
+                    "xml_id": f"s-{document}",
+                    "source_element_index": 0,
+                    "final_element_index": 0,
+                    "standard_origin": "provided",
+                    "original_before_qc_sha256": "a" * 64,
+                    "standard_before_qc_sha256": "b" * 64,
+                    "standard_after_qc_sha256": "c" * 64,
+                    "disposition": "retained",
+                }
+                for document in range(20)
+            ]
+            qc_inventory_path = downloaded / "_qc_transform_inventory.jsonl"
+            qc_inventory_path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True) + "\n"
+                    for row in qc_records
+                ),
+                encoding="utf-8",
+            )
+            (downloaded / "_qc_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "formosanbank_qc": {"revision": "d" * 40},
+                        "transform_inventory": {
+                            "path": qc_inventory_path.name,
+                            "sha256": hashlib.sha256(
+                                qc_inventory_path.read_bytes()
+                            ).hexdigest(),
+                        },
+                        "complete": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             make = ROOT / "scripts/local/make_corpus.py"
             clean = ROOT / "scripts/local/filter_split_corpus.py"

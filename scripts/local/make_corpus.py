@@ -11,7 +11,14 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from pipeline_common import atomic_write_json, content_row_id, sha256_bytes, stable_json_hash, utc_now
+from pipeline_common import (
+    atomic_write_json,
+    content_row_id,
+    sha256_bytes,
+    sha256_file,
+    stable_json_hash,
+    utc_now,
+)
 from tqdm import tqdm
 
 TARGET_MAP: dict[str, set[str]] = {
@@ -38,7 +45,14 @@ OUTPUT_COLUMNS = [
     "xml_path",
     "corpus_id",
     "xml_id",
+    "xml_element_index",
     "kindOf",
+    "standard_origin",
+    "original_before_qc_sha256",
+    "standard_before_qc_sha256",
+    "standard_after_qc_sha256",
+    "qc_transform_id",
+    "qc_revision",
     "dialect",
     "row_type",
     "formosan_original",
@@ -65,7 +79,14 @@ class ExtractedPair:
     xml_path: str
     corpus_id: str
     xml_id: str
+    xml_element_index: int
     kind_of: str
+    standard_origin: str
+    original_before_qc_sha256: str
+    standard_before_qc_sha256: str
+    standard_after_qc_sha256: str
+    qc_transform_id: str
+    qc_revision: str
     dialect: str
     row_type: str
     formosan_original: str
@@ -124,6 +145,13 @@ def load_fetch_inventory(xml_dir: Path) -> dict[str, dict[str, str]]:
         raise SystemExit(f"Malformed fetch manifest {manifest_path}: {exc}") from exc
     if manifest.get("complete") is not True:
         raise SystemExit(f"Fetch manifest is incomplete: {manifest_path}")
+    expected_hash = str(manifest.get("inventory_sha256") or "")
+    actual_hash = sha256_file(inventory_path)
+    if expected_hash != actual_hash:
+        raise SystemExit(
+            f"Fetch inventory hash mismatch: expected {expected_hash}, "
+            f"found {actual_hash}"
+        )
 
     inventory: dict[str, dict[str, str]] = {}
     with inventory_path.open(encoding="utf-8") as handle:
@@ -148,6 +176,74 @@ def load_fetch_inventory(xml_dir: Path) -> dict[str, dict[str, str]]:
     return inventory
 
 
+def load_qc_inventory(
+    xml_dir: Path,
+) -> tuple[dict[tuple[str, str, int, str], dict[str, str]], dict]:
+    manifest_path = xml_dir / "_qc_manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(
+            f"Missing pinned QC manifest under {xml_dir}; rerun clean_xml.py"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Malformed QC manifest {manifest_path}: {exc}") from exc
+    if manifest.get("complete") is not True:
+        raise SystemExit(f"QC manifest is incomplete: {manifest_path}")
+    inventory_meta = manifest.get("transform_inventory", {})
+    inventory_path = xml_dir / str(inventory_meta.get("path") or "")
+    if not inventory_path.is_file():
+        raise SystemExit(f"Missing QC transform inventory: {inventory_path}")
+    actual_hash = sha256_file(inventory_path)
+    expected_hash = str(inventory_meta.get("sha256") or "")
+    if actual_hash != expected_hash:
+        raise SystemExit(
+            f"QC transform inventory hash mismatch: expected {expected_hash}, "
+            f"found {actual_hash}"
+        )
+    records: dict[tuple[str, str, int, str], dict[str, str]] = {}
+    with inventory_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"Malformed QC transform inventory "
+                    f"{inventory_path}:{line_number}: {exc}"
+                ) from exc
+            if row.get("disposition") != "retained":
+                continue
+            key = (
+                str(row.get("xml_path") or ""),
+                str(row.get("element_tag") or ""),
+                int(row.get("final_element_index")),
+                str(row.get("xml_id") or ""),
+            )
+            if key in records:
+                raise SystemExit(
+                    f"Duplicate QC transform locator at "
+                    f"{inventory_path}:{line_number}: {key}"
+                )
+            records[key] = {
+                name: str(row.get(name) or "")
+                for name in (
+                    "transform_id",
+                    "standard_origin",
+                    "original_before_qc_sha256",
+                    "standard_before_qc_sha256",
+                    "standard_after_qc_sha256",
+                )
+            }
+    qc_revision = str(
+        manifest.get("formosanbank_qc", {}).get("revision") or ""
+    )
+    if len(qc_revision) != 40:
+        raise SystemExit(f"QC manifest has no pinned revision: {manifest_path}")
+    return records, manifest
+
+
 def extract_file(
     xml_path: Path,
     *,
@@ -155,6 +251,8 @@ def extract_file(
     provenance: dict[str, str],
     target_codes: set[str],
     tags: set[str],
+    qc_records: dict[tuple[str, str, int, str], dict[str, str]] | None = None,
+    qc_revision: str = "",
 ) -> tuple[list[ExtractedPair], Counter[str]]:
     stats: Counter[str] = Counter()
     tree = ET.parse(xml_path)
@@ -166,7 +264,12 @@ def extract_file(
     source_path = f"{provenance['repository']}/{provenance['source_path']}"
     pairs: list[ExtractedPair] = []
 
+    unit_index = 0
     for element in root.iter():
+        if element.tag not in {"S", "W", "M"}:
+            continue
+        element_index = unit_index
+        unit_index += 1
         if element.tag not in tags:
             continue
         stats[f"{element.tag.lower()}_units_seen"] += 1
@@ -181,6 +284,23 @@ def extract_file(
         original = direct_form(element, "original")
         original_text = mixed_text(original) if original is not None else ""
         contains_unclear = any(child.tag == "UNCLEAR" for child in standard.iter())
+        xml_id = (element.get("id") or "").strip()
+        qc_record = (
+            qc_records.get((relative, element.tag, element_index, xml_id))
+            if qc_records is not None
+            else None
+        )
+        if qc_records is not None and qc_record is None:
+            raise ValueError(
+                f"{relative}:{element.tag}:{xml_id} has no QC transform record"
+            )
+        qc_record = qc_record or {
+            "transform_id": "",
+            "standard_origin": "unknown",
+            "original_before_qc_sha256": "",
+            "standard_before_qc_sha256": "",
+            "standard_after_qc_sha256": "",
+        }
 
         target_index = 0
         for translation in element.findall("TRANSL"):
@@ -191,11 +311,11 @@ def extract_file(
             if not target_text:
                 stats["empty_target"] += 1
                 continue
-            xml_id = (element.get("id") or "").strip()
             row_id = content_row_id(
                 provenance["repository"],
                 provenance["source_path"],
                 element.tag,
+                element_index,
                 xml_id,
                 target_language,
                 target_index,
@@ -204,6 +324,7 @@ def extract_file(
                 provenance["repository"],
                 provenance["source_path"],
                 element.tag,
+                element_index,
                 xml_id,
             )
             content_hash = sha256_bytes(
@@ -231,7 +352,20 @@ def extract_file(
                     xml_path=provenance["source_path"],
                     corpus_id=corpus_id,
                     xml_id=xml_id,
+                    xml_element_index=element_index,
                     kind_of="standard",
+                    standard_origin=qc_record["standard_origin"],
+                    original_before_qc_sha256=qc_record[
+                        "original_before_qc_sha256"
+                    ],
+                    standard_before_qc_sha256=qc_record[
+                        "standard_before_qc_sha256"
+                    ],
+                    standard_after_qc_sha256=qc_record[
+                        "standard_after_qc_sha256"
+                    ],
+                    qc_transform_id=qc_record["transform_id"],
+                    qc_revision=qc_revision,
                     dialect=dialect,
                     row_type=row_type_for_tag(element.tag),
                     formosan_original=original_text,
@@ -272,6 +406,22 @@ def main() -> None:
         raise SystemExit(f"No XML files found under {xml_dir}")
 
     fetch_inventory = load_fetch_inventory(xml_dir)
+    qc_inventory, qc_manifest = load_qc_inventory(xml_dir)
+    actual_xml = {
+        str(path.relative_to(xml_dir))
+        for path in xml_files
+    }
+    expected_xml = set(fetch_inventory)
+    missing_xml = sorted(expected_xml - actual_xml)
+    unexpected_xml = sorted(actual_xml - expected_xml)
+    if missing_xml or unexpected_xml:
+        raise SystemExit(
+            "Downloaded XML does not match the immutable fetch inventory: "
+            f"missing={missing_xml[:10]}, unexpected={unexpected_xml[:10]}"
+        )
+    qc_revision = str(
+        qc_manifest["formosanbank_qc"]["revision"]
+    )
     target_codes = TARGET_MAP[args.target]
     tags = wanted_tags(parse_units(args.units))
     all_stats: Counter[str] = Counter()
@@ -292,6 +442,8 @@ def main() -> None:
                 provenance=provenance,
                 target_codes=target_codes,
                 tags=tags,
+                qc_records=qc_inventory,
+                qc_revision=qc_revision,
             )
         except (ET.ParseError, ValueError) as exc:
             errors.append(f"{relative}: {exc}")
@@ -300,7 +452,14 @@ def main() -> None:
         all_stats.update(stats)
         all_stats["files_parsed"] += 1
         all_stats["files_with_pairs" if pairs else "files_without_pairs"] += 1
-        file_reports.append({"path": relative, "pairs": len(pairs), **dict(stats)})
+        file_reports.append(
+            {
+                "path": relative,
+                "post_qc_sha256": sha256_file(xml_path),
+                "pairs": len(pairs),
+                **dict(stats),
+            }
+        )
 
     if errors:
         preview = "\n".join(f"  - {error}" for error in errors[:25])
@@ -331,6 +490,16 @@ def main() -> None:
         "source_language": extracted[0].lang_code,
         "target": args.target,
         "target_codes": sorted(target_codes),
+        "fetch_inventory_sha256": sha256_file(
+            xml_dir / "_fetch_inventory.jsonl"
+        ),
+        "qc_manifest_sha256": sha256_file(
+            xml_dir / "_qc_manifest.json"
+        ),
+        "qc_transform_inventory_sha256": qc_manifest[
+            "transform_inventory"
+        ]["sha256"],
+        "qc_revision": qc_revision,
         "units": sorted(parse_units(args.units)),
         "files_total": len(xml_files),
         "rows": len(extracted),

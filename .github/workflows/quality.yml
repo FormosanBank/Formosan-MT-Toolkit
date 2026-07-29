@@ -1,0 +1,40 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CPU PyTorch
+        run: >-
+          python -m pip install
+          --index-url https://download.pytorch.org/whl/cpu
+          torch==2.9.0
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check scripts/local formosan_mt_experiments/scripts tests
+      - name: Compile
+        run: >-
+          python -m compileall -q
+          scripts/local formosan_mt_experiments/scripts tests
+      - name: Test
+        run: pytest -q
+      - name: Check shell syntax
+        run: >-
+          bash -n build_corpora.sh
+          formosan_mt_experiments/slurm/*.sh
+          formosan_mt_experiments/slurm/*.sl

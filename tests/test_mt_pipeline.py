@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
+from audit_corpus_exposure import (  # noqa: E402
+    audit_direction,
+    build_tame_config,
+    gate_errors,
+)
 from build_experiment_splits import (  # noqa: E402
     build_hard_split,
     one_edit_conflicts,
@@ -103,7 +108,12 @@ class LeakageTests(unittest.TestCase):
                         "repository_commit": "a" * 40,
                         "xml_path": f"Corpora/Test/XML/doc-{document}.xml",
                         "xml_id": f"S-{sentence}",
+                        "xml_element_index": sentence,
                         "kindOf": "standard",
+                        "standard_origin": "provided",
+                        "standard_after_qc_sha256": digest,
+                        "qc_transform_id": f"transform-{document}-{sentence}",
+                        "qc_revision": "b" * 40,
                         "dialect": "Test",
                         "row_type": "sentence",
                         "pivot_origin": "original",
@@ -179,6 +189,31 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertTrue(provenance["ok"], provenance)
         self.assertTrue(validation["ok"], validation)
+
+    def test_hard_split_is_deterministic_for_identical_input(self) -> None:
+        keyed = add_normalized_columns(
+            self.hard_split_fixture(),
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        kwargs = {
+            "target_col": "english_sentence",
+            "test_ratio": 0.075,
+            "val_ratio": 0.025,
+            "seed": 42,
+            "min_formosan_tokens": 1,
+            "min_target_tokens": 1,
+            "attempts": 20,
+            "min_test_rows": 5,
+            "min_validate_rows": 2,
+            "ngram_threshold": 0.82,
+            "registry_in": None,
+        }
+        first, _, _, _ = build_hard_split(keyed.copy(), **kwargs)
+        second, _, _, _ = build_hard_split(keyed.copy(), **kwargs)
+        first_map = dict(zip(first["row_id"], first["split"], strict=True))
+        second_map = dict(zip(second["row_id"], second["split"], strict=True))
+        self.assertEqual(first_map, second_map)
 
     def test_independent_validator_rejects_synthetic_same_document_eval(self) -> None:
         frame = self.hard_split_fixture().iloc[:3].copy()
@@ -314,6 +349,88 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(report["shared_tokens_realigned"], 5)
         self.assertEqual(report["new_piece_rows_initialized"], 1)
         self.assertEqual(report["formosan_language_rows_seeded_from_english"], 1)
+
+
+class ExposureAuditTests(unittest.TestCase):
+    @staticmethod
+    def frame(*, duplicate_test: bool = False) -> pd.DataFrame:
+        rows = []
+        for index in range(12):
+            rows.append(
+                {
+                    "row_id": f"train-{index}",
+                    "lang_code": "ami",
+                    "formosan_sentence": f"train source phrase number {index} alpha",
+                    "english_sentence": f"train target phrase number {index} omega",
+                    "split": "train",
+                    "kindOf": "standard",
+                    "row_type": "sentence",
+                    "is_synthetic": "false",
+                }
+            )
+        for split, offset in (("test", 100), ("validate", 200)):
+            for index in range(4):
+                rows.append(
+                    {
+                        "row_id": f"{split}-{index}",
+                        "lang_code": "ami",
+                        "formosan_sentence": (
+                            "train source phrase number 0 alpha"
+                            if duplicate_test and split == "test" and index == 0
+                            else f"{split} heldout expression {offset + index} cedar"
+                        ),
+                        "english_sentence": (
+                            "train target phrase number 0 omega"
+                            if duplicate_test and split == "test" and index == 0
+                            else f"{split} reference wording {offset + index} quartz"
+                        ),
+                        "split": split,
+                        "kindOf": "standard",
+                        "row_type": "sentence",
+                        "is_synthetic": "false",
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_tame_release_gate_accepts_distant_human_evaluation(self) -> None:
+        config = build_tame_config(
+            high_threshold=0.95,
+            pair_k=10,
+            batch_size=64,
+        )
+        payload = audit_direction(
+            self.frame(),
+            direction="f2en",
+            target_col="english_sentence",
+            config=config,
+        )
+        self.assertEqual(
+            gate_errors(
+                {"f2en": payload},
+                high_threshold="0.95",
+                max_high_exposure_rate=0.0,
+            ),
+            [],
+        )
+
+    def test_tame_release_gate_rejects_exact_train_test_pair(self) -> None:
+        config = build_tame_config(
+            high_threshold=0.95,
+            pair_k=10,
+            batch_size=64,
+        )
+        payload = audit_direction(
+            self.frame(duplicate_test=True),
+            direction="f2en",
+            target_col="english_sentence",
+            config=config,
+        )
+        errors = gate_errors(
+            {"f2en": payload},
+            high_threshold="0.95",
+            max_high_exposure_rate=0.0,
+        )
+        self.assertTrue(any("exact_overlap" in error for error in errors))
 
 
 class ExperimentManifestTests(unittest.TestCase):

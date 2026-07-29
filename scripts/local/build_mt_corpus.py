@@ -307,6 +307,82 @@ def build_artifact_manifest(
     }
 
 
+def package_training_provenance(
+    paths: BuildPaths,
+    final_corpus_dir: Path,
+) -> Path:
+    provenance_dir = final_corpus_dir / "provenance"
+    remove_path(provenance_dir)
+    provenance_dir.mkdir(parents=True)
+    sources = {
+        "mt_build_manifest.json": paths.manifest_path,
+        "corpus_pipeline.json": PIPELINE_CONFIG_PATH,
+        "aggregate_manifest.json": final_corpus_dir / "aggregate_manifest.json",
+        "split_en_in_domain_hard.json": (
+            paths.split_root / "splits_en_v1" / "report_in_domain_hard.json"
+        ),
+        "split_zh_in_domain_hard.json": (
+            paths.split_root / "splits_zh_v1" / "report_in_domain_hard.json"
+        ),
+        "validate_en_in_domain_hard.json": (
+            paths.split_root
+            / "splits_en_v1"
+            / "validation_in_domain_hard.json"
+        ),
+        "validate_zh_in_domain_hard.json": (
+            paths.split_root
+            / "splits_zh_v1"
+            / "validation_in_domain_hard.json"
+        ),
+        "exposure_en_in_domain_hard.json": (
+            paths.split_root
+            / "splits_en_v1"
+            / "exposure_in_domain_hard.json"
+        ),
+        "exposure_zh_in_domain_hard.json": (
+            paths.split_root
+            / "splits_zh_v1"
+            / "exposure_in_domain_hard.json"
+        ),
+    }
+    pivot_manifest = (
+        paths.processed_dir / "pivot" / "pivot_manifest.json"
+    )
+    if pivot_manifest.is_file():
+        sources["pivot_manifest.json"] = pivot_manifest
+    missing = [
+        name
+        for name, source in sources.items()
+        if not source.is_file()
+    ]
+    if missing:
+        raise SystemExit(
+            f"Cannot package training provenance; missing {missing}"
+        )
+    artifacts: dict[str, dict[str, object]] = {}
+    for name, source in sources.items():
+        destination = provenance_dir / name
+        shutil.copy2(source, destination)
+        artifacts[name] = artifact_record(
+            destination,
+            compute_hash=True,
+        )
+    bundle_manifest = provenance_dir / "bundle_manifest.json"
+    atomic_write_json(
+        bundle_manifest,
+        {
+            "schema_version": 1,
+            "pipeline_version": PIPELINE_CONFIG["pipeline_version"],
+            "corpus_name": json.loads(
+                paths.manifest_path.read_text(encoding="utf-8")
+            ).get("corpus_name"),
+            "artifacts": artifacts,
+            "complete": True,
+        },
+    )
+    return bundle_manifest
+
+
 def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) -> dict:
     xml_dir = paths.xml_dir(lang)
     raw_zh = paths.raw_dir / f"{lang.code}_zh.csv"
@@ -584,6 +660,42 @@ def build_hard_splits(args: argparse.Namespace, corpus_dir: Path, output_root: P
                 out_dir / "validation_in_domain_hard.json",
                 stage=f"{target_lang} hard-split validation",
             )
+            run(
+                [
+                    PYTHON,
+                    str(
+                        script(
+                            "formosan_mt_experiments/scripts/"
+                            "audit_corpus_exposure.py"
+                        )
+                    ),
+                    "--input",
+                    str(hard_file),
+                    "--target-col",
+                    target_col,
+                    "--target-lang",
+                    target_lang,
+                    "--high-threshold",
+                    str(
+                        PIPELINE_CONFIG["exposure_audit"][
+                            "high_threshold"
+                        ]
+                    ),
+                    "--max-high-exposure-rate",
+                    str(
+                        PIPELINE_CONFIG["exposure_audit"][
+                            "max_high_exposure_rate"
+                        ]
+                    ),
+                    "--report",
+                    str(out_dir / "exposure_in_domain_hard.json"),
+                ],
+                dry_run=False,
+            )
+            require_json_manifest(
+                out_dir / "exposure_in_domain_hard.json",
+                stage=f"{target_lang} TAME-MT exposure audit",
+            )
         elif not args.dry_run:
             raise SystemExit(f"Hard split builder did not produce {hard_file}")
 
@@ -610,6 +722,8 @@ def write_manifest(
         "split_zh": paths.split_root / "splits_zh_v1" / "report_in_domain_hard.json",
         "validate_en": paths.split_root / "splits_en_v1" / "validation_in_domain_hard.json",
         "validate_zh": paths.split_root / "splits_zh_v1" / "validation_in_domain_hard.json",
+        "exposure_en": paths.split_root / "splits_en_v1" / "exposure_in_domain_hard.json",
+        "exposure_zh": paths.split_root / "splits_zh_v1" / "exposure_in_domain_hard.json",
     }
     if args.with_pivot:
         stage_paths["pivot"] = paths.processed_dir / "pivot" / "pivot_manifest.json"
@@ -633,6 +747,7 @@ def write_manifest(
         "requests",
         "sacrebleu",
         "sentencepiece",
+        "tame-mt",
         "torch",
         "transformers",
     ):
@@ -678,6 +793,7 @@ def write_manifest(
             "keep_redactions": args.keep_redactions,
             "fresh_downloads": not args.keep_downloaded,
             "keep_build_output": args.keep_build_output,
+            "allow_dirty_repository": args.allow_dirty_repository,
             "fetch_workers": args.fetch_workers,
             "fetch_download_retries": args.fetch_download_retries,
             "fetch_retry_base_sleep": args.fetch_retry_base_sleep,
@@ -712,6 +828,17 @@ def write_manifest(
     print(f"Manifest: {paths.manifest_path}")
     if not complete:
         raise SystemExit(f"Corpus build did not pass release gates; inspect {paths.manifest_path}")
+    try:
+        bundle_manifest = package_training_provenance(
+            paths,
+            final_corpus_dir,
+        )
+    except (Exception, SystemExit) as exc:
+        manifest["complete"] = False
+        manifest["release_gate"]["provenance_bundle_error"] = str(exc)
+        atomic_write_json(paths.manifest_path, manifest)
+        raise
+    print(f"Training provenance bundle: {bundle_manifest}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -848,6 +975,14 @@ def parse_args() -> argparse.Namespace:
         "--skip-artifact-checksums",
         action="store_true",
         help="Do not compute SHA-256 checksums for final corpus/split artifacts in the manifest.",
+    )
+    parser.add_argument(
+        "--allow-dirty-repository",
+        action="store_true",
+        help=(
+            "Diagnostic only: permit a non-dry-run build from a dirty Git checkout. "
+            "Production releases fail closed by default."
+        ),
     )
 
     parser.add_argument("--with-pivot", action="store_true")
@@ -1021,6 +1156,17 @@ def run_public_private(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    repository = git_state(PROJECT_ROOT)
+    if (
+        not args.dry_run
+        and not args.allow_dirty_repository
+        and repository.get("dirty")
+    ):
+        paths = ", ".join(repository.get("dirty_paths", []))
+        raise SystemExit(
+            "Production corpus builds require a clean Git checkout. "
+            f"Commit or remove local changes first: {paths}"
+        )
     if args.build_public_private:
         run_public_private(args)
     else:

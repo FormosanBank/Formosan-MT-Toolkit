@@ -22,6 +22,9 @@ def load_pipeline_config() -> dict[str, Any]:
         raise RuntimeError(f"Cannot load pipeline config {PIPELINE_CONFIG_PATH}: {exc}") from exc
     if not isinstance(value, dict) or value.get("schema_version") != 2:
         raise RuntimeError(f"Unsupported corpus pipeline config: {PIPELINE_CONFIG_PATH}")
+    exposure = value.get("exposure_audit", {})
+    if exposure.get("tool") != "tame-mt" or exposure.get("version") != "0.2.2":
+        raise RuntimeError("Corpus pipeline must pin tame-mt==0.2.2")
     return value
 
 
