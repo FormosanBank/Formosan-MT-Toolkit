@@ -146,6 +146,62 @@ def write_rejection_ledger(rows: pd.DataFrame, path: Path) -> None:
     rows.to_csv(path, index=False)
 
 
+def filter_rule_counts(rows: pd.DataFrame) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    if rows.empty:
+        return {}
+    for disposition, reason in zip(
+        rows["disposition"].astype(str),
+        rows["disposition_reason"].astype(str),
+    ):
+        rule = reason.strip() or "unspecified"
+        counts[f"{disposition.strip() or 'unknown'}:{rule}"] += 1
+    return dict(sorted(counts.items()))
+
+
+def print_filter_rule_summary(report: dict[str, object]) -> None:
+    print(f"\nMT filtering rule summary [{Path(str(report['input'])).name}]")
+    print(
+        "  Rows: "
+        f"{int(report['accepted_rows']):,} accepted / "
+        f"{int(report['initial_rows']):,} accounted"
+    )
+    transformations = {
+        str(rule): int(count)
+        for rule, count in dict(
+            report["transformation_counts"]
+        ).items()
+        if int(count) > 0
+    }
+    if transformations:
+        print("  Text transformations:")
+        for rule, count in sorted(
+            transformations.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            print(f"    {rule.replace('_', ' ')}: {count:,}")
+
+    rules = {
+        str(rule): int(count)
+        for rule, count in dict(report["filter_rule_counts"]).items()
+        if int(count) > 0
+    }
+    if rules:
+        print("  Removed or quarantined:")
+        for rule, count in sorted(
+            rules.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            disposition, reason = rule.split(":", 1)
+            print(
+                f"    {disposition} / "
+                f"{reason.replace('_', ' ')}: {count:,}"
+            )
+    else:
+        print("  Removed or quarantined: none")
+    print(f"  Rejection ledger: {report['rejection_ledger']}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Clean and deduplicate a standard-tier Formosan parallel corpus.",
@@ -223,6 +279,7 @@ def main() -> None:
     write_rejection_ledger(rejected, rejection_path)
 
     disposition_counts = Counter(rejected.get("disposition", pd.Series(dtype=str)).astype(str))
+    per_rule_counts = filter_rule_counts(rejected)
     report = {
         "schema_version": 2,
         "pipeline_version": config["pipeline_version"],
@@ -244,6 +301,7 @@ def main() -> None:
         "disposition_counts": dict(sorted(disposition_counts.items())),
         "reason_counts": reason_counts(rejected.get("disposition_reason", pd.Series(dtype=str)).astype(str)),
         "decision_counts": dict(sorted(decision_counts.items())),
+        "filter_rule_counts": per_rule_counts,
         "transformation_counts": dict(sorted(transformation_counts.items())),
         "row_type_counts": reason_counts(accepted["row_type"].astype(str)),
         "rejection_ledger": str(rejection_path),
@@ -255,7 +313,7 @@ def main() -> None:
     atomic_write_json(report_dir / "summary.json", report)
     if args.audit_samples > 0 and not rejected.empty:
         rejected.head(args.audit_samples).to_csv(report_dir / "reject_samples.csv", index=False)
-    print(f"Cleaned {initial_rows:,} rows -> {len(accepted):,} accepted, {len(rejected):,} rejected/deduplicated")
+    print_filter_rule_summary(report)
     print(f"Filter report: {report_dir / 'summary.json'}")
 
 

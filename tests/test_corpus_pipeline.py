@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -27,7 +29,11 @@ from corpus_quality import (  # noqa: E402
     normalize_text,
 )
 from fetch_xml import classify_xml, git_blob_sha  # noqa: E402
-from filter_split_corpus import read_csv  # noqa: E402
+from filter_split_corpus import (  # noqa: E402
+    filter_rule_counts,
+    print_filter_rule_summary,
+    read_csv,
+)
 from make_corpus import extract_file  # noqa: E402
 from pipeline_common import load_pipeline_config  # noqa: E402
 from pivot import (  # noqa: E402
@@ -35,6 +41,14 @@ from pivot import (  # noqa: E402
     load_cache,
     make_cache_key,
     synthetic_row,
+)
+from qc_change_audit import (  # noqa: E402
+    classify_cleaner_field_changes,
+)
+from qc_reporting import (  # noqa: E402
+    parse_cleaner_transformation,
+    run_cleaner_command,
+    summarize_validator_findings,
 )
 from xml_repairs import repair_mt_xml_structure  # noqa: E402
 
@@ -259,6 +273,181 @@ class StandardTierTests(unittest.TestCase):
                 "Substantive untyped content",
             ):
                 repair_mt_xml_structure(directory)
+
+
+class PipelineReportingTests(unittest.TestCase):
+    def test_cleaner_filename_chatter_is_logged_not_printed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            (corpus / "sample.xml").write_text(
+                "<TEXT/>",
+                encoding="utf-8",
+            )
+            log_path = corpus / "_qc_logs" / "clean_xml.log"
+            script = (
+                "print('Processing file: sample.xml');"
+                "print('File cleaned: /tmp/sample.xml');"
+                "print(\"  '’' → \\\"'\\\" : 2\")"
+            )
+            terminal = io.StringIO()
+            with (
+                contextlib.redirect_stdout(terminal),
+                contextlib.redirect_stderr(terminal),
+            ):
+                result = run_cleaner_command(
+                    [sys.executable, "-c", script],
+                    root,
+                    corpus_dir=corpus,
+                    log_path=log_path,
+                )
+            self.assertNotIn("Processing file", terminal.getvalue())
+            self.assertNotIn("File cleaned", terminal.getvalue())
+            self.assertIn("Processing file", log_path.read_text())
+            self.assertEqual(result["files_scanned"], 1)
+            self.assertEqual(result["files_cleaned"], 1)
+            self.assertEqual(
+                result["character_transformations"][0]["count"],
+                2,
+            )
+
+    def test_cleaner_field_changes_are_classified_by_rule(self) -> None:
+        before = {
+            "token:FORM:0": {
+                "xml_path": "sample.xml",
+                "xml_id": "s1",
+                "unit_tag": "S",
+                "field_tag": "FORM",
+                "field_kind": "standard",
+                "language": "ami",
+                "text": " ma-lu=na！！ ",
+            },
+            "token:TRANSL:0": {
+                "xml_path": "sample.xml",
+                "xml_id": "s1",
+                "unit_tag": "S",
+                "field_tag": "TRANSL",
+                "field_kind": "",
+                "language": "zho",
+                "text": "「很好」",
+            },
+        }
+        after = {
+            "token:FORM:0": {
+                **before["token:FORM:0"],
+                "text": "maluna!",
+            },
+            "token:TRANSL:0": {
+                **before["token:TRANSL:0"],
+                "text": "＂很好＂",
+            },
+        }
+        summary = classify_cleaner_field_changes(before, after)
+        self.assertEqual(summary["fields_modified"], 2)
+        self.assertEqual(
+            summary["rule_counts"],
+            {
+                "normalize_chinese_double_quotes": 1,
+                "normalize_punctuation": 1,
+                "normalize_whitespace": 1,
+                "remove_standard_segmentation_markers": 1,
+                "trim_repeated_punctuation": 1,
+            },
+        )
+        self.assertEqual(summary["unclassified_examples"], [])
+
+    def test_cleaner_transformations_are_parsed_without_file_noise(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_cleaner_transformation(
+                "  '’' → \"'\" : 1,234\n"
+            ),
+            {
+                "input": "’",
+                "output": "'",
+                "count": 1234,
+            },
+        )
+        self.assertEqual(
+            parse_cleaner_transformation(
+                "  '\\u200b' → '<deleted>' : 8"
+            ),
+            {
+                "input": "\u200b",
+                "output": "",
+                "count": 8,
+            },
+        )
+        self.assertIsNone(
+            parse_cleaner_transformation(
+                "Processing file: noisy.xml"
+            )
+        )
+
+    def test_validator_findings_are_summarized_by_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "findings.csv"
+            path.write_text(
+                "file,severity,rule_id,title\n"
+                "a.xml,SOFT,V122,parentheses\n"
+                "a.xml,SOFT,V122,parentheses\n"
+                "b.xml,WARN,V999,example\n",
+                encoding="utf-8",
+            )
+            summary = summarize_validator_findings(path)
+            self.assertEqual(summary["records"], 3)
+            self.assertEqual(summary["files_with_findings"], 2)
+            self.assertEqual(
+                summary["by_severity"]["SOFT"]["rules"]["V122"][
+                    "count"
+                ],
+                2,
+            )
+
+    def test_filter_summary_lists_each_disposition_and_rule(
+        self,
+    ) -> None:
+        rows = pd.DataFrame(
+            {
+                "disposition": [
+                    "rejected",
+                    "quarantine",
+                    "deduplicated",
+                ],
+                "disposition_reason": [
+                    "missing_translation_marker",
+                    "url",
+                    "duplicate_pair",
+                ],
+            }
+        )
+        counts = filter_rule_counts(rows)
+        report = {
+            "input": "/tmp/tay_zh.csv",
+            "initial_rows": 10,
+            "accepted_rows": 7,
+            "transformation_counts": {"unicode_nfc": 2},
+            "filter_rule_counts": counts,
+            "rejection_ledger": "/tmp/rejected.csv",
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            print_filter_rule_summary(report)
+        rendered = output.getvalue()
+        self.assertIn(
+            "rejected / missing translation marker: 1",
+            rendered,
+        )
+        self.assertIn("quarantine / url: 1", rendered)
+        self.assertIn(
+            "deduplicated / duplicate pair: 1",
+            rendered,
+        )
+        self.assertIn("unicode nfc: 2", rendered)
 
 
 class AcquisitionTests(unittest.TestCase):

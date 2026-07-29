@@ -46,6 +46,14 @@ are written to
 `_qc_repair_inventory.jsonl`, and validator findings are stored beside the
 cleaned XML rather than in the shared QC checkout.
 
+Pinned QC subprocess output is captured under `_qc_logs/`. Normal terminal
+output uses file/stage progress bars followed by rule-level counts for tier
+completion, text transformations, repaired and quarantined XML units, cleaner
+warnings, and validator findings. Pair filtering likewise reports every
+normalization, rejection, quarantine, and deduplication rule; the same counts
+are stored in the QC manifest and filter report. Cleaner rule counts measure
+fields changed by each rule, so one field can contribute to multiple rules.
+
 Before QC, every S/W/M element receives a temporary transform ID. After QC the
 temporary attribute is removed and a sidecar records whether the standard was
 provided or derived, original/standard hashes before QC, the final standard

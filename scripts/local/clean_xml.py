@@ -18,6 +18,17 @@ from urllib.parse import quote
 import requests
 from dotenv import load_dotenv
 from pipeline_common import atomic_write_json, load_pipeline_config, sha256_file, stable_json_hash, utc_now
+from qc_change_audit import (
+    classify_cleaner_field_changes,
+    snapshot_cleaner_fields,
+)
+from qc_reporting import (
+    QC_LOG_DIR,
+    print_qc_rule_summary,
+    run_captured_command,
+    run_cleaner_command,
+    summarize_validator_findings,
+)
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
@@ -540,7 +551,13 @@ def write_transform_inventory(
 def run_dialect_completion(
     corpus_dir: Path,
     qc_root: Path,
-) -> tuple[dict[str, int], list[dict[str, object]]]:
+    *,
+    log_path: Path,
+) -> tuple[
+    dict[str, int],
+    list[dict[str, object]],
+    dict[str, object],
+]:
     before: dict[str, str] = {}
     for xml_file in sorted(corpus_dir.rglob("*.xml")):
         root = ET.parse(xml_file).getroot()
@@ -550,20 +567,11 @@ def run_dialect_completion(
 
     utility = qc_root / "QC" / "utilities" / "fix_dialects.py"
     cmd = [sys.executable, str(utility), "--path", str(corpus_dir)]
-    print("+ " + " ".join(cmd))
-    result = subprocess.run(
+    log = run_captured_command(
         cmd,
-        cwd=qc_root,
-        env=qc_env(qc_root),
-        text=True,
-        capture_output=True,
+        qc_root,
+        log_path=log_path,
     )
-    if result.returncode:
-        if result.stdout:
-            print(result.stdout, file=sys.stderr)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
-        raise subprocess.CalledProcessError(result.returncode, cmd)
 
     repairs: list[dict[str, object]] = []
     for xml_file in sorted(corpus_dir.rglob("*.xml")):
@@ -588,12 +596,7 @@ def run_dialect_completion(
         "dialects_completed": len(repairs),
         "dialects_preserved": len(before) - len(repairs),
     }
-    print(
-        "Dialect completion: "
-        f"{stats['dialects_completed']:,} added, "
-        f"{stats['dialects_preserved']:,} preserved"
-    )
-    return stats, repairs
+    return stats, repairs, log
 
 
 def write_repair_inventory(
@@ -726,24 +729,25 @@ def audit_standard_tiers(corpus_dir: Path) -> dict[str, int | str]:
     return dict(stats)
 
 
-def qc_env(qc_root: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(qc_root) if not existing else f"{qc_root}{os.pathsep}{existing}"
-    return env
-
-
-def run_command(cmd: list[str], qc_root: Path) -> None:
-    print("+ " + " ".join(cmd))
-    subprocess.run(cmd, cwd=qc_root, env=qc_env(qc_root), check=True)
-
-
-def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[str, object]:
+def run_qc_scripts(
+    corpus_dir: Path,
+    qc_root: Path,
+    *,
+    validate: bool,
+) -> dict[str, object]:
+    logs_dir = corpus_dir / QC_LOG_DIR
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    for generated in (
+        corpus_dir / "cleaner_warnings.csv",
+        corpus_dir / "html_entities.log",
+    ):
+        generated.unlink(missing_ok=True)
     transform_sources = tag_transform_sources(corpus_dir)
     tier_completion = ensure_standard_tiers(corpus_dir)
+    cleaner_fields_before = snapshot_cleaner_fields(corpus_dir)
     clean_script = qc_root / "QC" / "cleaning" / "clean_xml.py"
     try:
-        run_command(
+        cleaner = run_cleaner_command(
             [
                 sys.executable,
                 str(clean_script),
@@ -751,10 +755,21 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
                 str(corpus_dir),
             ],
             qc_root,
+            corpus_dir=corpus_dir,
+            log_path=logs_dir / "clean_xml.log",
         )
-        dialect_completion, dialect_repairs = run_dialect_completion(
+        cleaner["field_changes"] = classify_cleaner_field_changes(
+            cleaner_fields_before,
+            snapshot_cleaner_fields(corpus_dir),
+        )
+        (
+            dialect_completion,
+            dialect_repairs,
+            dialect_log,
+        ) = run_dialect_completion(
             corpus_dir,
             qc_root,
+            log_path=logs_dir / "fix_dialects.log",
         )
         (
             mt_structure_repair,
@@ -781,31 +796,51 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
 
     validators: list[dict[str, object]] = []
     if validate:
-        for script_name in ("validate_xml.py", "validate_text.py"):
-            validator = qc_root / "QC" / "validation" / script_name
-            findings = corpus_dir / f"_qc_{Path(script_name).stem}_findings.csv"
-            run_command(
-                [
-                    sys.executable,
-                    str(validator),
-                    "by_path",
-                    "--path",
-                    str(corpus_dir),
-                    "--csv",
-                    str(findings),
-                ],
-                qc_root,
-            )
-            validators.append(
-                {
-                    "script": script_name,
-                    "findings": findings.name,
-                    "findings_sha256": sha256_file(findings),
-                }
-            )
+        with tqdm(
+            total=2,
+            desc="QC validate XML",
+            unit="check",
+            dynamic_ncols=True,
+        ) as progress:
+            for script_name in (
+                "validate_xml.py",
+                "validate_text.py",
+            ):
+                validator = (
+                    qc_root / "QC" / "validation" / script_name
+                )
+                stem = Path(script_name).stem
+                findings = corpus_dir / f"_qc_{stem}_findings.csv"
+                log = run_captured_command(
+                    [
+                        sys.executable,
+                        str(validator),
+                        "by_path",
+                        "--path",
+                        str(corpus_dir),
+                        "--csv",
+                        str(findings),
+                    ],
+                    qc_root,
+                    log_path=logs_dir / f"{stem}.log",
+                )
+                validators.append(
+                    {
+                        "script": script_name,
+                        "findings": findings.name,
+                        "findings_sha256": sha256_file(findings),
+                        "summary": summarize_validator_findings(
+                            findings
+                        ),
+                        "log": log,
+                    }
+                )
+                progress.update(1)
     return {
         "tier_completion": tier_completion,
+        "cleaner": cleaner,
         "dialect_completion": dialect_completion,
+        "dialect_log": dialect_log,
         "mt_structure_repair": mt_structure_repair,
         "transform_inventory": transform_inventory,
         "repair_inventory": repair_inventory,
@@ -846,8 +881,8 @@ def main() -> None:
     }
     manifest_path = corpus_dir / "_qc_manifest.json"
     atomic_write_json(manifest_path, manifest)
+    print_qc_rule_summary(args.src_lang, qc_result)
     print(f"QC manifest: {manifest_path}")
-    print("Done.")
 
 
 if __name__ == "__main__":
