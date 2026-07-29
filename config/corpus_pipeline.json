@@ -12,6 +12,7 @@
     "require_standard_form": true,
     "preserve_structural_row_type": true,
     "complete_missing_dialect_with_pinned_qc": true,
+    "remove_empty_source_sentences": true,
     "remove_empty_source_lexical_units": true,
     "remove_hard_text_annotation_units": true,
     "remove_lexical_annotation_units": true,

@@ -39,8 +39,10 @@ elements is stripped without altering internal spacing. W/M units with
 metalinguistic slash or parenthetical variants are excluded under `V121`, and
 sentence standards containing the null/elision symbol are excluded under
 `V120`. Forbidden zero-width characters are removed under `V131`. Empty
-sentence standards, substantive untyped content, and referenced duplicate IDs
-remain hard failures. All repairs are written to
+sentence units are quarantined wholesale, without falling back to their
+`original` tier. Any empty sentence that survives this repair, substantive
+untyped content, and referenced duplicate IDs remain hard failures. All repairs
+are written to
 `_qc_repair_inventory.jsonl`, and validator findings are stored beside the
 cleaned XML rather than in the shared QC checkout.
 

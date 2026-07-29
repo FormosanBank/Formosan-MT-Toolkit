@@ -752,25 +752,26 @@ def run_qc_scripts(corpus_dir: Path, qc_root: Path, *, validate: bool) -> dict[s
             ],
             qc_root,
         )
-    except BaseException:
-        remove_transform_tags(corpus_dir)
-        raise
-    dialect_completion, dialect_repairs = run_dialect_completion(
-        corpus_dir,
-        qc_root,
-    )
-    (
-        mt_structure_repair,
-        structure_repairs,
-        removal_dispositions,
-    ) = repair_mt_xml_structure(corpus_dir)
-    transform_inventory = write_transform_inventory(
-        corpus_dir,
-        finalize_transform_inventory(
+        dialect_completion, dialect_repairs = run_dialect_completion(
+            corpus_dir,
+            qc_root,
+        )
+        (
+            mt_structure_repair,
+            structure_repairs,
+            removal_dispositions,
+        ) = repair_mt_xml_structure(corpus_dir)
+        transform_rows = finalize_transform_inventory(
             corpus_dir,
             transform_sources,
             removal_dispositions,
-        ),
+        )
+    except BaseException:
+        remove_transform_tags(corpus_dir)
+        raise
+    transform_inventory = write_transform_inventory(
+        corpus_dir,
+        transform_rows,
     )
     repair_inventory = write_repair_inventory(
         corpus_dir,

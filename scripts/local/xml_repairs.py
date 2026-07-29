@@ -284,10 +284,21 @@ def repair_mt_xml_structure(
             )
             if standard is not None and not standard_text:
                 if element.tag == "S":
-                    raise SystemExit(
-                        f"Empty sentence standard FORM at "
-                        f"{relative}:{element.tag}:{element.get('id', '')}"
+                    removed = _remove_unit(
+                        element=element,
+                        parent=parent,
+                        relative=relative,
+                        disposition="removed_empty_source_sentence",
+                        repair="remove_empty_source_sentence",
+                        removal_dispositions=removal_dispositions,
+                        repairs=repairs,
                     )
+                    stats["empty_source_sentences_removed"] += 1
+                    stats[
+                        "empty_source_sentence_descendants_removed"
+                    ] += removed
+                    changed = True
+                    continue
                 if element.tag == "W" and any(
                     "".join(form.itertext()).strip()
                     for descendant in element.iter("M")

@@ -150,7 +150,10 @@ class StandardTierTests(unittest.TestCase):
                 '<S id="annotated"><FORM kindOf="original">*malu</FORM>'
                 '<FORM kindOf="standard">*malu</FORM></S>'
                 '<W id="variant"><FORM kindOf="standard">a/b</FORM></W>'
-                '<S id="null"><FORM kindOf="standard">∅</FORM></S>',
+                '<S id="null"><FORM kindOf="standard">∅</FORM></S>'
+                '<S id="empty-sentence"><FORM kindOf="original">'
+                '<UNCLEAR/></FORM><FORM kindOf="standard">'
+                '<UNCLEAR/></FORM></S>',
             )
             records = tag_transform_sources(directory)
             stats, repairs, dispositions = repair_mt_xml_structure(
@@ -182,9 +185,11 @@ class StandardTierTests(unittest.TestCase):
                     "lexical_annotation_descendants_removed": 1,
                     "null_source_sentences_removed": 1,
                     "null_source_sentence_descendants_removed": 1,
+                    "empty_source_sentences_removed": 1,
+                    "empty_source_sentence_descendants_removed": 1,
                 },
             )
-            self.assertEqual(len(repairs), 8)
+            self.assertEqual(len(repairs), 9)
             removed = [
                 row
                 for row in inventory
@@ -210,6 +215,13 @@ class StandardTierTests(unittest.TestCase):
             self.assertEqual(
                 sum(
                     row["disposition"] == "removed_null_source_sentence"
+                    for row in inventory
+                ),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    row["disposition"] == "removed_empty_source_sentence"
                     for row in inventory
                 ),
                 1,
