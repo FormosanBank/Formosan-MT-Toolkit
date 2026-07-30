@@ -325,7 +325,7 @@ def main() -> None:
     model = AutoModelForSeq2SeqLM.from_pretrained(
         base_model,
         revision=base_revision,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
     resize_report = resize_and_initialize(

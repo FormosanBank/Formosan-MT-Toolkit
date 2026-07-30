@@ -192,7 +192,7 @@ model_id = "REPLACE_MODEL_ID"
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
 model = AutoModelForSeq2SeqLM.from_pretrained(
     model_id,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
 )
 model.to("cuda" if torch.cuda.is_available() else "cpu")
 

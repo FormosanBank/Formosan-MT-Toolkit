@@ -721,7 +721,7 @@ def main() -> None:
     tokenizer = backend.load_tokenizer(resume_path or args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         load_path,
-        torch_dtype=LOAD_DTYPES[args.load_dtype],
+        dtype=LOAD_DTYPES[args.load_dtype],
         low_cpu_mem_usage=True,
     )
     backend.configure_model(model, tokenizer)
