@@ -13,6 +13,7 @@ from mt_common import (
     build_prefix,
     get_lid,
     is_formosan_to_target,
+    safe_tag_value,
     target_language_from_direction,
     target_lid_for,
 )
@@ -45,6 +46,69 @@ def token_id(tokenizer, token: str) -> int:
             f"Required token {token!r} does not round-trip through the tokenizer."
         )
     return value
+
+
+def token_exists(tokenizer, token: str) -> bool:
+    value = int(tokenizer.convert_tokens_to_ids(token))
+    return (
+        value != tokenizer.unk_token_id
+        and tokenizer.convert_ids_to_tokens(value) == token
+    )
+
+
+def normalize_control_metadata(
+    frame: pd.DataFrame,
+    tokenizer,
+    *,
+    mode: str = "oracle",
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Fallback held-out metadata that was intentionally absent from setup."""
+    if mode not in {"default", "oracle"}:
+        raise ValueError(f"Unsupported metadata mode: {mode}")
+    output = frame.copy()
+    if mode == "default":
+        output["source_bucket"] = "unknown"
+        output["dialect"] = "default"
+        return output, {
+            "domain_fallback_rows": len(output),
+            "dialect_fallback_rows": len(output),
+        }
+
+    def values(column: str, default: str) -> pd.Series:
+        if column not in output:
+            return pd.Series(default, index=output.index, dtype="object")
+        return output[column].map(
+            lambda value: (
+                default
+                if pd.isna(value) or not str(value).strip()
+                else str(value)
+            )
+        )
+
+    buckets = values("source_bucket", "unknown")
+    dialects = values("dialect", "default")
+    domain_available = {
+        value: token_exists(
+            tokenizer,
+            f"<dom_{safe_tag_value(value, 'unknown')}>",
+        )
+        for value in buckets.unique()
+    }
+    dialect_available = {
+        value: token_exists(
+            tokenizer,
+            f"<dialect_{safe_tag_value(value)}>",
+        )
+        for value in dialects.unique()
+    }
+    domain_missing = ~buckets.map(domain_available)
+    dialect_missing = ~dialects.map(dialect_available)
+    output["source_bucket"] = buckets.mask(domain_missing, "unknown")
+    output["dialect"] = dialects.mask(dialect_missing, "default")
+    return output, {
+        "domain_fallback_rows": int(domain_missing.sum()),
+        "dialect_fallback_rows": int(dialect_missing.sum()),
+    }
 
 
 def ensure_source_prefix_tokens(

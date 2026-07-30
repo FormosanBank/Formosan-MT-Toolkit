@@ -28,7 +28,7 @@ from build_experiment_splits import (  # noqa: E402
     split_targets,
 )
 from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
-from model_backends import get_backend  # noqa: E402
+from model_backends import get_backend, normalize_control_metadata  # noqa: E402
 from mt_common import add_normalized_columns  # noqa: E402
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
@@ -200,6 +200,42 @@ class ModelBackendTests(unittest.TestCase):
             },
         )
         self.assertNotIn("forced_bos_token_id", kwargs)
+
+    def test_unseen_evaluation_metadata_falls_back_to_setup_tokens(self) -> None:
+        tokenizer = FakeTokenizer()
+        tokenizer.vocab.update(
+            {
+                "<dom_unknown>": len(tokenizer.vocab),
+                "<dom_ntu>": len(tokenizer.vocab) + 1,
+                "<dialect_default>": len(tokenizer.vocab) + 2,
+                "<dialect_coastal>": len(tokenizer.vocab) + 3,
+            }
+        )
+        frame = pd.DataFrame(
+            {
+                "source_bucket": ["ntu", "held_out_source", None],
+                "dialect": ["Coastal", "Held Out", ""],
+            }
+        )
+        normalized, report = normalize_control_metadata(
+            frame,
+            tokenizer,
+        )
+        self.assertEqual(
+            normalized["source_bucket"].tolist(),
+            ["ntu", "unknown", "unknown"],
+        )
+        self.assertEqual(
+            normalized["dialect"].tolist(),
+            ["Coastal", "default", "default"],
+        )
+        self.assertEqual(
+            report,
+            {
+                "domain_fallback_rows": 1,
+                "dialect_fallback_rows": 1,
+            },
+        )
 
     def test_madlad_resize_updates_untied_input_and_output_vocab(self) -> None:
         tokenizer = FakeTokenizer()

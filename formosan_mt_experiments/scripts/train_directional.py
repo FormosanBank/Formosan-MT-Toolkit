@@ -31,6 +31,7 @@ from model_backends import (
     TaskSpec,
     ensure_source_prefix_tokens,
     get_backend,
+    normalize_control_metadata,
 )
 from mt_common import (
     EASY_BUCKETS,
@@ -89,17 +90,44 @@ def prepare_data(
     if unknown_splits:
         raise SystemExit(f"Training CSV has unknown splits: {unknown_splits}")
 
+    train = df[df["split"].eq("train")].copy()
+    val = df[df["split"].isin(["validate", "valid", "val"])].copy()
+    if train.empty:
+        raise SystemExit("No train rows found.")
+    if val.empty:
+        raise SystemExit("No human validation rows found")
+
+    validation_metadata_fallback = {
+        "domain_fallback_rows": 0,
+        "dialect_fallback_rows": 0,
+    }
+    if args.use_tags:
+        val, validation_metadata_fallback = normalize_control_metadata(
+            val,
+            tokenizer,
+            mode="oracle",
+        )
+    working = pd.concat([train, val]).sort_index()
+
     if args.use_tags and args.validate_tags:
         ensure_source_prefix_tokens(
             backend,
             tokenizer,
-            df,
+            train,
             args.direction,
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-    df = with_tagged_columns(
-        df,
+        ensure_source_prefix_tokens(
+            backend,
+            tokenizer,
+            val,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        )
+    working = with_tagged_columns(
+        working,
         args.direction,
         target_col=args.target_col,
         target_lang=args.target_lang,
@@ -112,12 +140,8 @@ def prepare_data(
         ),
     )
 
-    train = df[df["split"].eq("train")].copy()
-    val = df[df["split"].isin(["validate", "valid", "val"])].copy()
-    if train.empty:
-        raise SystemExit("No train rows found.")
-    if val.empty:
-        raise SystemExit("No human validation rows found")
+    train = working[working["split"].eq("train")].copy()
+    val = working[working["split"].isin(["validate", "valid", "val"])].copy()
     pivot_origin = val.get(
         "pivot_origin",
         pd.Series("original", index=val.index),
@@ -172,6 +196,7 @@ def prepare_data(
         "target_col": args.target_col,
         "use_tags": bool(args.use_tags),
         "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
+        "validation_metadata_fallback": validation_metadata_fallback,
         "synthetic_train_rows": int(
             train.get(
                 "pivot_origin",

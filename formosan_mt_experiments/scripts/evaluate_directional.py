@@ -23,6 +23,7 @@ from model_backends import (
     TaskSpec,
     ensure_source_prefix_tokens,
     get_backend,
+    normalize_control_metadata,
 )
 from mt_common import (
     FORMOSAN_CODES,
@@ -31,7 +32,6 @@ from mt_common import (
     is_formosan_to_target,
     normalize_target_language,
     read_parallel_csv,
-    safe_tag_value,
     source_bucket,
     target_col_for,
     target_language_from_direction,
@@ -214,51 +214,17 @@ def formosan_fragmentation(
     return pd.Series(values, index=evaluation.index)
 
 
-def token_exists(tokenizer, token: str) -> bool:
-    token_id = tokenizer.convert_tokens_to_ids(token)
-    return (
-        token_id != tokenizer.unk_token_id
-        and tokenizer.convert_ids_to_tokens(token_id) == token
-    )
-
-
 def metadata_frame(
     evaluation: pd.DataFrame,
     tokenizer,
     *,
     mode: str,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    output = evaluation.copy()
-    if mode == "default":
-        output["source_bucket"] = "unknown"
-        output["dialect"] = "default"
-        return output, {
-            "domain_fallback_rows": len(output),
-            "dialect_fallback_rows": len(output),
-        }
-    domain_fallback = 0
-    dialect_fallback = 0
-    buckets = []
-    dialects = []
-    for _, row in output.iterrows():
-        bucket = str(row.get("source_bucket") or "unknown")
-        dialect = str(row.get("dialect") or "default")
-        domain_token = f"<dom_{safe_tag_value(bucket)}>"
-        dialect_token = f"<dialect_{safe_tag_value(dialect)}>"
-        if not token_exists(tokenizer, domain_token):
-            bucket = "unknown"
-            domain_fallback += 1
-        if not token_exists(tokenizer, dialect_token):
-            dialect = "default"
-            dialect_fallback += 1
-        buckets.append(bucket)
-        dialects.append(dialect)
-    output["source_bucket"] = buckets
-    output["dialect"] = dialects
-    return output, {
-        "domain_fallback_rows": domain_fallback,
-        "dialect_fallback_rows": dialect_fallback,
-    }
+    return normalize_control_metadata(
+        evaluation,
+        tokenizer,
+        mode=mode,
+    )
 
 
 @torch.no_grad()
