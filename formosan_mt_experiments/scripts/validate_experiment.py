@@ -77,6 +77,26 @@ def add_validation_keys(
     )
     output["_formosan_skeleton"] = output["formosan_sentence"].map(skeleton)
     output["_target_skeleton"] = output[target_col].map(skeleton)
+    output["_formosan_task_key"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_formosan_key"]
+    )
+    output["_target_task_key"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_target_key"]
+    )
+    output["_formosan_task_skeleton"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_formosan_skeleton"]
+    )
+    output["_target_task_skeleton"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_target_skeleton"]
+    )
     output["_pair_skeleton"] = (
         output["lang_code"].astype(str)
         + "\u241f"
@@ -142,13 +162,14 @@ def one_edit_conflict_count(
                 continue
             exact.add(value)
             deleted.update(deletion_keys(value))
+        reference_neighborhood = exact | deleted
         for index, value in candidate_group[column].astype(str).items():
             if not value:
                 continue
-            if value in exact or value in deleted:
+            if value in reference_neighborhood:
                 conflicts.add(int(index))
                 continue
-            if deletion_keys(value) & (exact | deleted):
+            if not deletion_keys(value).isdisjoint(reference_neighborhood):
                 conflicts.add(int(index))
     return len(conflicts)
 
@@ -249,20 +270,42 @@ def pairwise_leakage(
     right: pd.DataFrame,
     *,
     ngram_threshold: float,
+    formosan_by_language: bool = True,
+    target_by_language: bool = False,
 ) -> dict[str, object]:
+    formosan_key = (
+        "_formosan_task_key"
+        if formosan_by_language
+        else "_formosan_key"
+    )
+    target_key = (
+        "_target_task_key"
+        if target_by_language
+        else "_target_key"
+    )
+    formosan_skeleton = (
+        "_formosan_task_skeleton"
+        if formosan_by_language
+        else "_formosan_skeleton"
+    )
+    target_skeleton = (
+        "_target_task_skeleton"
+        if target_by_language
+        else "_target_skeleton"
+    )
     exact = {
         name: overlap_count(left, right, column)
         for name, column in (
-            ("formosan", "_formosan_key"),
-            ("target", "_target_key"),
+            ("formosan", formosan_key),
+            ("target", target_key),
             ("pair", "_pair_key"),
         )
     }
     skeleton_overlap = {
         name: overlap_count(left, right, column)
         for name, column in (
-            ("formosan", "_formosan_skeleton"),
-            ("target", "_target_skeleton"),
+            ("formosan", formosan_skeleton),
+            ("target", target_skeleton),
             ("pair", "_pair_skeleton"),
         )
     }
@@ -277,7 +320,7 @@ def pairwise_leakage(
             left,
             right,
             "_target_skeleton",
-            by_language=False,
+            by_language=target_by_language,
         ),
     }
     character_ngram = {
@@ -292,7 +335,7 @@ def pairwise_leakage(
             left,
             right,
             "_target_skeleton",
-            by_language=False,
+            by_language=target_by_language,
             threshold=ngram_threshold,
         ),
     }
@@ -302,6 +345,8 @@ def pairwise_leakage(
         "one_edit_conflicting_rows": one_edit,
         "character_ngram_conflicting_rows": character_ngram,
         "document_overlap": overlap_count(left, right, "_document_key"),
+        "formosan_by_language": formosan_by_language,
+        "target_by_language": target_by_language,
         "ok": not any(
             value
             for family in (exact, skeleton_overlap, one_edit, character_ngram)
@@ -431,6 +476,12 @@ def validate_splits(
         test,
         validate,
         ngram_threshold=ngram_threshold,
+        target_by_language=True,
+    )
+    validate_test_cross_language_diagnostic = pairwise_leakage(
+        test,
+        validate,
+        ngram_threshold=ngram_threshold,
     )
     duplicate_pairs = int(keyed["_pair_key"].duplicated().sum())
     ok = (
@@ -452,6 +503,9 @@ def validate_splits(
         "non_sentence_eval_rows": non_sentence_eval_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
+        "validate_test_cross_language_diagnostic": (
+            validate_test_cross_language_diagnostic
+        ),
         "minimum_ratios": {
             "test": min_test_ratio,
             "validate": min_validate_ratio,

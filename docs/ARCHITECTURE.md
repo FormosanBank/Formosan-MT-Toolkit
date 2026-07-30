@@ -102,14 +102,19 @@ pairwise split labels and builds the model-facing split. It:
 
 1. deduplicates canonical source-target pairs;
 2. locks lexical, morpheme, and synthetic rows to training;
-3. forms connected components through normalized and punctuation/spacing
-   skeleton source and target keys;
-4. holds out complete human source documents where enough documents exist;
-5. uses declared human group-level fallbacks for small languages;
+3. prefers clean, non-easy human sentences meeting the configured token floors,
+   expanding to all clean human sentences only where needed to reach the
+   per-language evaluation floor, and computes normalized plus
+   punctuation/spacing-skeleton keys;
+4. holds out complete source documents with an exact subset allocator that
+   reserves both per-language evaluation floors;
+5. keeps coarse documents intact and permits evaluation-size overshoot for
+   languages where exact 90/2.5/7.5 proportions are impossible;
 6. removes one-edit and character 4-gram Jaccard conflicts on both sides across
-   train/test, train/validation, and test/validation; conflicting training rows
-   are excluded after the human benchmark is selected, rather than shrinking
-   the evaluation set;
+   train/test and train/validation globally; test/validation separation is
+   target-language-task conditioned, with stricter cross-language reuse retained
+   as a diagnostic; conflicting training rows are excluded after the human
+   benchmark is selected, rather than shrinking the evaluation set;
 7. fails if any language has less than 7.5% test or 2.5% validation against the
    complete deduplicated corpus denominator.
 

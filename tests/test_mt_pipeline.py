@@ -21,7 +21,9 @@ from audit_corpus_exposure import (  # noqa: E402
     gate_errors,
 )
 from build_experiment_splits import (  # noqa: E402
+    GroupCandidate,
     build_hard_split,
+    choose_groups,
     one_edit_conflicts,
     split_targets,
 )
@@ -56,6 +58,51 @@ class DeepLKeyDiscoveryTests(unittest.TestCase):
 
 
 class LeakageTests(unittest.TestCase):
+    def test_group_selection_reserves_the_other_evaluation_split(self) -> None:
+        candidates = [
+            GroupCandidate(
+                group_id=group_id,
+                eligible_rows=rows,
+                total_rows=rows,
+                non_eval_rows=0,
+                easy_fraction=0,
+                average_tokens=10,
+            )
+            for group_id, rows in enumerate((104, 86, 16, 4))
+        ]
+        validation = choose_groups(
+            candidates,
+            33,
+            reserve_rows=98,
+            seed=42,
+            attempts=20,
+        )
+        validation_rows = sum(
+            candidate.eligible_rows
+            for candidate in candidates
+            if candidate.group_id in validation
+        )
+        remaining = [
+            candidate
+            for candidate in candidates
+            if candidate.group_id not in validation
+        ]
+        test = choose_groups(
+            remaining,
+            98,
+            reserve_rows=0,
+            seed=43,
+            attempts=20,
+        )
+        test_rows = sum(
+            candidate.eligible_rows
+            for candidate in remaining
+            if candidate.group_id in test
+        )
+
+        self.assertGreaterEqual(validation_rows, 33)
+        self.assertGreaterEqual(test_rows, 98)
+
     def test_one_character_variants_conflict_with_evaluation(self) -> None:
         evaluation = pd.DataFrame(
             {"lang_code": ["ami"], "text": ["malikoda"]}, index=[100]
@@ -317,6 +364,77 @@ class LeakageTests(unittest.TestCase):
         self.assertGreater(
             validation["train_evaluation"]["document_overlap"],
             0,
+        )
+
+    def test_validate_test_target_overlap_is_task_conditioned(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "row_id": "ami-train",
+                    "lang_code": "ami",
+                    "formosan_sentence": "ami training phrase qzx",
+                    "english_sentence": "unique training target alpha",
+                    "source": "repo/ami-train.xml",
+                    "dialect": "A",
+                    "row_type": "sentence",
+                    "pivot_origin": "original",
+                    "split": "train",
+                },
+                {
+                    "row_id": "bnn-train",
+                    "lang_code": "bnn",
+                    "formosan_sentence": "bnn training phrase vjk",
+                    "english_sentence": "unique training target beta",
+                    "source": "repo/bnn-train.xml",
+                    "dialect": "B",
+                    "row_type": "sentence",
+                    "pivot_origin": "original",
+                    "split": "train",
+                },
+                {
+                    "row_id": "ami-test",
+                    "lang_code": "ami",
+                    "formosan_sentence": "ami heldout phrase mnp",
+                    "english_sentence": "shared multilingual template",
+                    "source": "repo/ami-test.xml",
+                    "dialect": "A",
+                    "row_type": "sentence",
+                    "pivot_origin": "original",
+                    "split": "test",
+                },
+                {
+                    "row_id": "bnn-validate",
+                    "lang_code": "bnn",
+                    "formosan_sentence": "bnn heldout phrase rst",
+                    "english_sentence": "shared multilingual template",
+                    "source": "repo/bnn-validate.xml",
+                    "dialect": "B",
+                    "row_type": "sentence",
+                    "pivot_origin": "original",
+                    "split": "validate",
+                },
+            ]
+        )
+        validation = validate_splits(
+            frame,
+            target_col="english_sentence",
+            min_test_ratio=0,
+            min_validate_ratio=0,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.82,
+        )
+
+        self.assertTrue(validation["ok"], validation)
+        self.assertEqual(
+            validation["validate_test"]["exact_overlap"]["target"],
+            0,
+        )
+        self.assertEqual(
+            validation[
+                "validate_test_cross_language_diagnostic"
+            ]["exact_overlap"]["target"],
+            1,
         )
 
 
