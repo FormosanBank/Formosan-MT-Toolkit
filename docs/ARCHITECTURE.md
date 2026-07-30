@@ -107,7 +107,9 @@ pairwise split labels and builds the model-facing split. It:
 4. holds out complete human source documents where enough documents exist;
 5. uses declared human group-level fallbacks for small languages;
 6. removes one-edit and character 4-gram Jaccard conflicts on both sides across
-   train/test, train/validation, and test/validation;
+   train/test, train/validation, and test/validation; conflicting training rows
+   are excluded after the human benchmark is selected, rather than shrinking
+   the evaluation set;
 7. fails if any language has less than 7.5% test or 2.5% validation against the
    complete deduplicated corpus denominator.
 

@@ -512,7 +512,7 @@ def fill_assignments(
             current = group_ids.map(assignments)
 
 
-def remove_near_conflicting_groups(
+def remove_validate_test_conflicting_groups(
     frame: pd.DataFrame,
     group_ids: pd.Series,
     split: pd.Series,
@@ -521,29 +521,24 @@ def remove_near_conflicting_groups(
     *,
     ngram_threshold: float,
 ) -> dict[str, int]:
-    train = frame[split.eq("train")]
-    evaluation = frame[split.isin({"test", "validate"})]
-    conflicts = near_candidate_conflicts(
-        train,
-        evaluation,
-        ngram_threshold=ngram_threshold,
-    )
     test = frame[split.eq("test")]
     validate = frame[split.eq("validate")]
-    dev_test_conflicts = near_candidate_conflicts(
+    conflicts = near_candidate_conflicts(
         test,
         validate,
         ngram_threshold=ngram_threshold,
     )
-    conflicts |= dev_test_conflicts
-    bad_groups = {int(group_ids.loc[index]) for index in conflicts}
+    bad_groups = {
+        int(group_ids.loc[index])
+        for index in conflicts
+    }
     for group in bad_groups:
         assignments.pop(group, None)
         blocked.add(group)
     return {
         "conflicting_eval_rows": len(conflicts),
         "conflicting_groups": len(bad_groups),
-        "validate_test_conflicting_rows": len(dev_test_conflicts),
+        "validate_test_conflicting_rows": len(conflicts),
     }
 
 
@@ -659,7 +654,7 @@ def build_hard_split(
             attempts=attempts,
         )
         split = materialize_splits(frame, group_ids, candidate_mask, assignments)
-        iteration = remove_near_conflicting_groups(
+        iteration = remove_validate_test_conflicting_groups(
             frame,
             group_ids,
             split,
@@ -674,6 +669,15 @@ def build_hard_split(
         raise SystemExit("Near-duplicate split stabilization did not converge")
 
     split = materialize_splits(frame, group_ids, candidate_mask, assignments)
+    heldout_document_non_eval = split.eq("excluded")
+    evaluation = frame[split.isin({"test", "validate"})]
+    training = frame[split.eq("train")]
+    near_train_indexes = near_candidate_conflicts(
+        evaluation,
+        training,
+        ngram_threshold=ngram_threshold,
+    )
+    split.loc[list(near_train_indexes)] = "excluded"
     frame["split"] = split
     frame["eval_tier"] = TIER
     frame["source_bucket"] = frame["_source_bucket"]
@@ -682,8 +686,17 @@ def build_hard_split(
     frame["short_entry"] = frame["_short_entry"].astype(bool)
     frame["document_id"] = frame["_document_key"]
 
+    exclusion_reason = pd.Series("", index=frame.index, dtype="object")
+    exclusion_reason.loc[
+        heldout_document_non_eval
+    ] = "heldout_document_non_evaluation_row"
+    exclusion_reason.loc[
+        list(near_train_indexes)
+    ] = "near_duplicate_of_evaluation"
     excluded = frame[split.eq("excluded")].copy()
-    excluded["exclusion_reason"] = "heldout_document_non_evaluation_row"
+    excluded["exclusion_reason"] = exclusion_reason.loc[
+        excluded.index
+    ]
     output = frame[split.isin({"train", "validate", "test"})].copy()
     train = output[output["split"].eq("train")]
     evaluation = output[output["split"].isin({"validate", "test"})]
@@ -760,7 +773,13 @@ def build_hard_split(
         "deduplicated_input_rows": len(frame),
         "duplicate_rows_removed": len(duplicate_rows),
         "output_rows": len(output),
-        "excluded_document_rows": len(excluded),
+        "excluded_rows": len(excluded),
+        "excluded_document_rows": int(
+            heldout_document_non_eval.sum()
+        ),
+        "excluded_near_duplicate_train_rows": len(
+            near_train_indexes
+        ),
         "synthetic_eval_rows": int(
             (
                 output.get("pivot_origin", pd.Series("original", index=output.index))

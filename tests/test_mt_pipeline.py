@@ -215,6 +215,90 @@ class LeakageTests(unittest.TestCase):
         second_map = dict(zip(second["row_id"], second["split"], strict=True))
         self.assertEqual(first_map, second_map)
 
+    def test_near_synthetic_training_rows_are_excluded_not_eval(self) -> None:
+        raw = self.hard_split_fixture()
+        near_synthetic = []
+        human = raw[
+            raw["pivot_origin"].eq("original")
+            & raw["row_type"].eq("sentence")
+        ]
+        for _, row in human.iterrows():
+            near_synthetic.append(
+                {
+                    **row.to_dict(),
+                    "row_id": f"near-{row['row_id']}",
+                    "source_record_id": (
+                        f"near-{row['source_record_id']}"
+                    ),
+                    "formosan_sentence": (
+                        f"{row['formosan_sentence']}x"
+                    ),
+                    "english_sentence": (
+                        f"{row['english_sentence']}x"
+                    ),
+                    "source": (
+                        "FormosanBank/Corpora/Pivot/XML/"
+                        f"near-{row['row_id']}.xml"
+                    ),
+                    "xml_path": (
+                        "Corpora/Pivot/XML/"
+                        f"near-{row['row_id']}.xml"
+                    ),
+                    "xml_id": f"near-{row['xml_id']}",
+                    "pivot_origin": "synthetic",
+                }
+            )
+        raw = pd.concat(
+            [raw, pd.DataFrame(near_synthetic)],
+            ignore_index=True,
+        )
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        output, excluded, _, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+
+        self.assertTrue(report["complete"])
+        self.assertGreater(
+            report["excluded_near_duplicate_train_rows"],
+            0,
+        )
+        self.assertTrue(
+            excluded["exclusion_reason"]
+            .eq("near_duplicate_of_evaluation")
+            .any()
+        )
+        evaluation = output[
+            output["split"].isin({"test", "validate"})
+        ]
+        self.assertFalse(
+            evaluation["pivot_origin"].eq("synthetic").any()
+        )
+        self.assertGreaterEqual(
+            len(output[output["split"].eq("test")])
+            / len(output),
+            0.075,
+        )
+        self.assertGreaterEqual(
+            len(output[output["split"].eq("validate")])
+            / len(output),
+            0.025,
+        )
+
     def test_independent_validator_rejects_synthetic_same_document_eval(self) -> None:
         frame = self.hard_split_fixture().iloc[:3].copy()
         frame["split"] = ["train", "test", "validate"]
