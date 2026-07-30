@@ -102,6 +102,12 @@ Production builds require a clean Git checkout. They fail if acquisition,
 parsing, QC, row conservation, pivot completion, split validation, exposure
 auditing, or provenance packaging is incomplete.
 
+DeepL responses that fail target-script, identity, markup, or fertility checks
+are excluded from training and recorded in a checksummed per-direction
+quarantine ledger. They are processed outcomes, not unresolved translations.
+Missing cache entries, provider errors, exhausted quota, or deferred requests
+still fail the build and prevent pivot outputs from being promoted.
+
 Fetches resolve repository heads once per named build, record the immutable
 commit set in `source_repository_snapshot.json`, and reuse it for every
 language. Private repositories are traversed only under `Final_XML`; public

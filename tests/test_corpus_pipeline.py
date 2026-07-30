@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
@@ -19,6 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
+from build_mt_corpus import (  # noqa: E402
+    BuildPaths,
+    package_training_provenance,
+)
 from clean_xml import (  # noqa: E402
     audit_standard_tiers,
     classify_translation_version_repairs,
@@ -52,6 +57,7 @@ from pivot import (  # noqa: E402
     load_cache,
     make_cache_key,
     synthetic_row,
+    write_pivot_output,
 )
 from qc_change_audit import (  # noqa: E402
     classify_cleaner_field_changes,
@@ -1079,6 +1085,190 @@ class PivotContractTests(unittest.TestCase):
         )
         self.assertIsNone(row)
         self.assertEqual(reason, "pivot_quality:english_target_script_mismatch")
+
+    def test_quality_quarantine_is_accounted_without_becoming_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "zh.csv"
+            original_path = root / "en.csv"
+            output_dir = root / "pivot"
+
+            source = self.source_row()
+            pd.DataFrame([source.to_dict()]).to_csv(
+                source_path,
+                index=False,
+            )
+            original = source.copy()
+            original["row_id"] = "original-row"
+            original["source_record_id"] = "original-source"
+            original["formosan_sentence"] = "misa."
+            original["english_sentence"] = "Go."
+            original = original.drop(labels=["chinese_sentence"])
+            pd.DataFrame([original.to_dict()]).to_csv(
+                original_path,
+                index=False,
+            )
+
+            direction = self.direction()
+            direction.source_path = source_path
+            direction.original_target_path = original_path
+            key = make_cache_key(
+                provider="deepl",
+                source_lang="ZH",
+                target_lang="EN-US",
+                text="很好。",
+                split_sentences="0",
+                preserve_formatting=True,
+                model_type="prefer_quality_optimized",
+            )
+            result = write_pivot_output(
+                direction,
+                args=SimpleNamespace(
+                    out_dir=output_dir,
+                    quiet=True,
+                    dedupe=True,
+                    skip_target_overlaps=True,
+                    split_sentences="0",
+                    preserve_formatting=True,
+                    model_type="prefer_quality_optimized",
+                ),
+                cache={
+                    key: {
+                        "translation": "這是錯的。",
+                        "text": "很好。",
+                        "detected_source_language": "ZH",
+                    }
+                },
+            )
+
+            self.assertEqual(result.synthetic_rows_missing, 0)
+            self.assertEqual(result.synthetic_rows_quarantined, 1)
+            self.assertIsNone(result.incomplete_path)
+            self.assertTrue(
+                (output_dir / "big_corpus_en_pivot.csv").is_file()
+            )
+            self.assertTrue(Path(result.quarantine_path or "").is_file())
+            self.assertTrue(result.quarantine_sha256)
+
+    def test_missing_pivot_cache_entry_remains_a_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "zh.csv"
+            original_path = root / "en.csv"
+            output_dir = root / "pivot"
+
+            source = self.source_row()
+            pd.DataFrame([source.to_dict()]).to_csv(
+                source_path,
+                index=False,
+            )
+            original = source.copy()
+            original["row_id"] = "original-row"
+            original["source_record_id"] = "original-source"
+            original["formosan_sentence"] = "misa."
+            original["english_sentence"] = "Go."
+            original = original.drop(labels=["chinese_sentence"])
+            pd.DataFrame([original.to_dict()]).to_csv(
+                original_path,
+                index=False,
+            )
+
+            direction = self.direction()
+            direction.source_path = source_path
+            direction.original_target_path = original_path
+            result = write_pivot_output(
+                direction,
+                args=SimpleNamespace(
+                    out_dir=output_dir,
+                    quiet=True,
+                    dedupe=True,
+                    skip_target_overlaps=True,
+                    split_sentences="0",
+                    preserve_formatting=True,
+                    model_type="prefer_quality_optimized",
+                ),
+                cache={},
+            )
+
+            self.assertEqual(result.synthetic_rows_missing, 1)
+            self.assertEqual(result.synthetic_rows_quarantined, 0)
+            self.assertTrue(Path(result.incomplete_path or "").is_file())
+            self.assertFalse(
+                (output_dir / "big_corpus_en_pivot.csv").exists()
+            )
+
+    def test_training_bundle_includes_hashed_pivot_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            processed = root / "processed"
+            final = root / "final"
+            splits = root / "splits"
+            pivot_dir = processed / "pivot"
+            pivot_dir.mkdir(parents=True)
+            final.mkdir()
+
+            quarantine = pivot_dir / "pivot_rejections_zh2en.csv"
+            quarantine.write_text(
+                "direction,reason\nzh2en,target_script\n",
+                encoding="utf-8",
+            )
+            quarantine_hash = hashlib.sha256(
+                quarantine.read_bytes()
+            ).hexdigest()
+            (pivot_dir / "pivot_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "stats": [
+                            {
+                                "direction": "zh2en",
+                                "quarantine_path": str(quarantine),
+                                "quarantine_sha256": quarantine_hash,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = root / "mt_build_manifest.json"
+            snapshot = root / "source_repository_snapshot.json"
+            manifest.write_text(
+                json.dumps({"corpus_name": "fixture"}),
+                encoding="utf-8",
+            )
+            snapshot.write_text("{}", encoding="utf-8")
+            (final / "aggregate_manifest.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            for language in ("en", "zh"):
+                split_dir = splits / f"splits_{language}_v1"
+                split_dir.mkdir(parents=True)
+                for prefix in ("report", "validation", "exposure"):
+                    (
+                        split_dir
+                        / f"{prefix}_in_domain_hard.json"
+                    ).write_text("{}", encoding="utf-8")
+
+            paths = BuildPaths(
+                root=root,
+                raw_dir=root / "raw",
+                processed_dir=processed,
+                final_dir=final,
+                split_root=splits,
+                manifest_path=manifest,
+                source_snapshot_path=snapshot,
+            )
+            bundle_path = package_training_provenance(paths, final)
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+            copied = final / "provenance" / quarantine.name
+            self.assertTrue(copied.is_file())
+            self.assertEqual(
+                bundle["artifacts"][quarantine.name]["sha256"],
+                quarantine_hash,
+            )
 
     def test_malformed_cache_is_a_hard_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

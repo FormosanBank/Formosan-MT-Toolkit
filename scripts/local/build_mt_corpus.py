@@ -354,6 +354,31 @@ def package_training_provenance(
     )
     if pivot_manifest.is_file():
         sources["pivot_manifest.json"] = pivot_manifest
+        pivot_payload = json.loads(
+            pivot_manifest.read_text(encoding="utf-8")
+        )
+        for stats in pivot_payload.get("stats", []):
+            quarantine_value = str(
+                stats.get("quarantine_path") or ""
+            ).strip()
+            if not quarantine_value:
+                continue
+            quarantine_path = Path(quarantine_value)
+            expected_hash = str(
+                stats.get("quarantine_sha256") or ""
+            ).strip()
+            if not quarantine_path.is_file():
+                raise SystemExit(
+                    "Cannot package training provenance; missing pivot "
+                    f"quarantine ledger {quarantine_path}"
+                )
+            actual_hash = sha256_file(quarantine_path)
+            if not expected_hash or actual_hash != expected_hash:
+                raise SystemExit(
+                    "Cannot package training provenance; pivot quarantine "
+                    f"hash mismatch for {quarantine_path}"
+                )
+            sources[quarantine_path.name] = quarantine_path
     missing = [
         name
         for name, source in sources.items()

@@ -52,7 +52,11 @@ The pipeline excludes exactly
 `FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`, discovers all configured
 DeepL keys in numeric order, reuses response caches by content key, preserves
 `pivot_origin`/`pivot_direction`, and requires zero missing eligible synthetic
-rows before these artifacts are considered complete.
+rows before these artifacts are considered complete. Responses that fail
+synthetic target-script, identity, markup, or fertility checks are excluded and
+written to checksummed `pivot_rejections_<direction>.csv` quarantine ledgers.
+They do not count as missing because the provider response was received and
+audited; absent cache entries and provider errors remain release-blocking.
 
 Each public/private build records one immutable
 `source_repository_snapshot.json`. Every language fetch reuses those exact

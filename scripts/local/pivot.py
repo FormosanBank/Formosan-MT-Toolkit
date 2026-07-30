@@ -116,6 +116,7 @@ class DirectionStats:
     stopped_reason: Optional[str] = None
     synthetic_rows_available: int = 0
     synthetic_rows_missing: int = 0
+    synthetic_rows_quarantined: int = 0
     synthetic_rows_written: int = 0
     duplicate_rows_skipped: int = 0
     split_overrides: int = 0
@@ -124,6 +125,8 @@ class DirectionStats:
     cache_path: Optional[str] = None
     read_cache_paths: Optional[list[str]] = None
     output_path: Optional[str] = None
+    quarantine_path: Optional[str] = None
+    quarantine_sha256: Optional[str] = None
 
 
 @dataclass
@@ -150,13 +153,15 @@ class OutputBuildResult:
     original_rows: int = 0
     synthetic_rows_available: int = 0
     synthetic_rows_missing: int = 0
+    synthetic_rows_quarantined: int = 0
     synthetic_rows_written: int = 0
     target_overlap_rows_skipped: int = 0
     duplicate_rows_skipped: int = 0
     split_overrides: int = 0
     output_rows: int = 0
-    rejected_rows: int = 0
     incomplete_path: Optional[str] = None
+    quarantine_path: Optional[str] = None
+    quarantine_sha256: Optional[str] = None
 
 
 @dataclass
@@ -1007,8 +1012,7 @@ def write_pivot_output(
                 key,
             )
             if out_row is None:
-                result.synthetic_rows_missing += 1
-                result.rejected_rows += 1
+                result.synthetic_rows_quarantined += 1
                 rejections.append(
                     {
                         "direction": direction.name,
@@ -1041,10 +1045,12 @@ def write_pivot_output(
             writer = csv.DictWriter(handle, fieldnames=list(rejections[0]))
             writer.writeheader()
             writer.writerows(rejections)
+        result.quarantine_path = str(rejection_path)
+        result.quarantine_sha256 = sha256_file(rejection_path)
     else:
         rejection_path.unlink(missing_ok=True)
 
-    if result.synthetic_rows_missing or result.rejected_rows:
+    if result.synthetic_rows_missing:
         output_path.unlink(missing_ok=True)
         incomplete_path.unlink(missing_ok=True)
         os.replace(tmp_path, incomplete_path)
@@ -1356,6 +1362,9 @@ def main() -> None:
             stats.original_rows = result.original_rows
             stats.synthetic_rows_available = result.synthetic_rows_available
             stats.synthetic_rows_missing = result.synthetic_rows_missing
+            stats.synthetic_rows_quarantined = (
+                result.synthetic_rows_quarantined
+            )
             stats.synthetic_rows_written = result.synthetic_rows_written
             stats.target_overlap_rows_skipped = max(
                 stats.target_overlap_rows_skipped,
@@ -1364,8 +1373,9 @@ def main() -> None:
             stats.duplicate_rows_skipped = result.duplicate_rows_skipped
             stats.split_overrides = result.split_overrides
             stats.output_rows = result.output_rows
-            stats.errors += result.rejected_rows
             stats.output_path = result.incomplete_path or str(args.out_dir / direction.output_filename)
+            stats.quarantine_path = result.quarantine_path
+            stats.quarantine_sha256 = result.quarantine_sha256
 
     manifest: Optional[Path] = None
     if not args.dry_run:
@@ -1385,7 +1395,9 @@ def main() -> None:
             f"{stats.direction}: translated {stats.translated_unique:,} unique texts "
             f"({stats.translated_chars:,} chars); target-overlap rows skipped "
             f"{stats.target_overlap_rows_skipped:,}; synthetic rows written "
-            f"{stats.synthetic_rows_written:,}; output rows {stats.output_rows:,}"
+            f"{stats.synthetic_rows_written:,}; quality-quarantined "
+            f"{stats.synthetic_rows_quarantined:,}; output rows "
+            f"{stats.output_rows:,}"
         )
         if stats.stopped_reason:
             print(f"{stats.direction}: stopped early: {stats.stopped_reason}")
