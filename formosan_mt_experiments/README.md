@@ -1,9 +1,9 @@
 # Formosan MT Experiments
 
-The supported training stack for the 2026 Formosan MT experiments. It consumes
-the final `in_domain_hard` corpus artifacts, validates them independently,
-extends NLLB-200 with an 8k Formosan-aware SentencePiece model, trains one model
-per direction, and evaluates both final and best checkpoints.
+The supported NLLB-200 and MADLAD-400 3B training stack for the 2026 Formosan
+MT experiments. It consumes final `in_domain_hard` artifacts, validates them
+independently, prepares a family-specific tokenizer/model, trains one model per
+direction, and evaluates both final and best checkpoints.
 
 ## Production Experiment
 
@@ -71,24 +71,32 @@ On Andromeda, `slurm/validate_corpus.sl` runs the same code in separate CPU
 jobs. Tokenizer setup uses `afterok` on those validators, so invalid remote data
 cannot start GPU training.
 
-The tokenizer setup wrapper invokes the versioned implementation at
-`scripts/setup_formosan_nllb200.py`. `setup_spm_sweep.sl` checksum-pins that
-file, so an untracked or stale helper cannot silently alter a flight.
+NLLB setup invokes `scripts/setup_formosan_nllb200.py`; the generic submitter
+hashes that implementation and `setup_spm_sweep.sl` verifies it. MADLAD setup
+runs `scripts/setup_formosan_madlad400.py` on a CPU compute node, uses both
+training corpora to establish one shared vocabulary contract, and records
+every input and output hash.
 
 ## Input Tags
 
 Training and inference prefix each source with control tags:
 
 ```text
+# NLLB
 <to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra to demak nira.
 <to_ami> <src_zh> <dom_unknown> <dialect_default> 他回家了。
+
+# MADLAD
+<2en> <to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra to demak nira.
+<2ami> <to_ami> <src_zh> <dom_unknown> <dialect_default> 他回家了。
 ```
 
-The tokenizer setup adds direction, source-language, source-domain, and dialect
-tags as special tokens. Metadata normalization and weighted sampling live in
-`scripts/mt_common.py`.
+MADLAD’s first token selects the target language. `<2en>` and `<2zh_Hant>` are
+native; the 15 `<2iso>` Formosan selectors and metadata controls are added and
+their input/output rows are initialized deterministically. Metadata
+normalization and weighted sampling live in `scripts/mt_common.py`.
 
-## Current Recipe
+## Supported Recipes
 
 The canonical configuration is `configs/default_experiment.json`:
 
@@ -121,6 +129,23 @@ contract hash. A Slurm rerun refuses mismatched data/code/setup and otherwise
 resumes the latest complete checkpoint. Successful completion retains
 deployable `best/` and `final/` directories.
 
+`configs/madlad400_3b_native.json` is the matched 3B recipe:
+
+| Setting | Value |
+|---|---:|
+| Base model | `google/madlad400-3b-mt@fa184c675da0b5c9e1c8694fccd4e12e2d422094` |
+| Tokenizer | Native 256k SentencePiece plus target/control tokens |
+| Updates | 50,000 maximum |
+| Microbatch / accumulation | 1 / 32 |
+| Maximum length | 384 |
+| Learning rate | `1e-5` |
+| Precision / load dtype | bf16 / bf16 |
+| Gradient checkpointing | enabled |
+| Selection metric | chrF2 |
+
+MADLAD does not use the NLLB SPM8k merge, `src_lang`, forced BOS, or EOS
+decoder-start override. The shared backend module enforces those differences.
+
 ## Andromeda Layout
 
 The tracked jobs use the canonical cluster layout:
@@ -149,30 +174,38 @@ fresh runtime reports before tokenizer setup can start.
 Submit each complete flight:
 
 ```bash
+# NLLB
 CORPUS_NAME=public_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  slurm/submit_v1_spm8k_directional.sh
+  slurm/submit_directional_experiment.sh
 CORPUS_NAME=private_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  slurm/submit_v1_spm8k_directional.sh
+  slurm/submit_directional_experiment.sh
+
+# MADLAD
+CORPUS_NAME=private_no_bible \
+PROFILE="$PWD/configs/madlad400_3b_native.json" \
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  slurm/submit_directional_experiment.sh
 ```
 
 The launcher intentionally refuses an unnamed corpus. For each corpus it
-queues two validators, two tokenizer setups, four trainers, and eight
-evaluations. A fixed `RUN_STAMP` is idempotent: pending, running, or completed
-jobs are reused; terminal failed jobs are resubmitted. Evaluations depend on
+queues two validators, family-specific setup, four trainers, and eight
+evaluations. NLLB has two target-specific SPM setups; MADLAD has one shared
+setup. A fixed `RUN_STAMP` is idempotent: pending, running, or completed jobs
+are reused; terminal failed jobs are resubmitted. Evaluations depend on
 successful training and target both `final/` and `best/`.
 
-Operational defaults use `medium`/48h trainers on one
-40GB-or-larger GPU, `short` CPU setup/validation, and `medium`/24h evaluation.
-All resources remain overridable through the launcher's environment variables.
+NLLB defaults to one 40GB-or-larger GPU. MADLAD defaults to one
+80GB-or-larger GPU, bf16 loading, microbatch 1, and gradient checkpointing.
+Setup and validation run on CPU compute nodes. All resources remain
+overridable through launcher environment variables.
 
 ## Hugging Face Publication
 
-`scripts/publish_huggingface_models.py` builds the four standalone Hub packages
-from validation-selected `private_no_bible` best checkpoints and their matching
-hard-test reports. It requires an explicit artifact root, metrics root, tracked
-flight manifest, and output root. `--publish` replaces each existing Hub repo in
-one commit, deletes stale files, and records every published commit and file
-SHA-256 in `release_manifest.json`.
+`scripts/publish_huggingface_models.py` builds four standalone Hub packages
+from a matched profile, flight manifest, best/final checkpoints, and hard-test
+reports. It accepts single-file or sharded safetensors and emits NLLB- or
+MADLAD-correct inference examples. `--publish` replaces stale Hub files and
+records every published commit and file SHA-256.
 
 The production publication is recorded in
 [`manifests/huggingface_private_no_bible_20260716.json`](manifests/huggingface_private_no_bible_20260716.json).
@@ -188,12 +221,14 @@ per-language metrics, BLEU tokenization, and reference provenance.
 | `audit_corpus_exposure.py` | Exact TAME-MT exposure reports and release gates. |
 | `setup_formosan_nllb200.py` | Formosan SentencePiece extension and NLLB embedding initialization. |
 | `setup_tokenizer_sweep.py` | SPM extension, NLLB resize, token audit, smoke generation. |
-| `train_directional_nllb.py` | Sampling, optimization, validation metrics, checkpointing, resume. |
+| `setup_formosan_madlad400.py` | Native MADLAD controls, untied embedding/head resize, train-only audits. |
+| `model_backends.py` | Family-specific prompting, tokenizer state, and generation contract. |
+| `train_directional.py` | Shared sampling, optimization, validation metrics, checkpointing, resume. |
 | `evaluate_directional.py` | Default-tag headline and oracle-metadata diagnostic evaluation. |
 | `mt_metrics.py` | BLEU/chrF2/TER, signatures, diagnostics, and bootstrap intervals. |
 | `training_code_inventory.py` | Required production-code inventory and SHA-256 provenance. |
 | `publish_huggingface_models.py` | Builds audited Hub packages and atomically replaces the four production model repos. |
-| `slurm/submit_v1_spm8k_directional.sh` | Idempotent production DAG submission and manifest emission. |
+| `slurm/submit_directional_experiment.sh` | Profile-driven idempotent DAG submission and manifest emission. |
 
 ## NLLB Invariants
 
@@ -201,6 +236,16 @@ per-language metrics, BLEU tokenization, and reference provenance.
 - target language selection uses `forced_bos_token_id`.
 - every custom Formosan code and control tag must be a tokenizer special token.
 - final and best models each include the tokenizer needed for standalone use.
+
+## MADLAD Invariants
+
+- source text starts with `<2en>`, `<2zh_Hant>`, or a learned Formosan
+  `<2iso>` target selector;
+- decoder start, pad, and EOS remain model IDs 0, 1, and 2;
+- generation never sets `forced_bos_token_id`;
+- input embeddings and the untied output head are both resized by token
+  identity, with existing rows unchanged;
+- native SentencePiece is retained; SPM8k merging is not part of this recipe.
 
 ## Verification
 

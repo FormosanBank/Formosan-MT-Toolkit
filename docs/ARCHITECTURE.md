@@ -147,7 +147,7 @@ SentencePiece ID shift, initialize new pieces from old subpieces, seed new
 Formosan language IDs, add train-derived metadata tags, and hash every setup
 artifact.
 
-`train_directional_nllb.py` verifies the corpus, independent validation, setup,
+`train_directional.py` verifies the corpus, independent validation, setup,
 profile, and file hashes before training. It trains one direction per
 checkpoint with source-bucket weighting and language-temperature sampling,
 performs fixed human per-language generation validation, selects best by

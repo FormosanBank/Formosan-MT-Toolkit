@@ -6,7 +6,10 @@ Expected generated layout:
 
 - `splits_en_v1/` and `splits_zh_v1/`: the sole supported
   `in_domain_hard` split plus independent validation and exposure reports.
-- `tokenizer_sweep_spm8192/`, `tokenizer_sweep_en_spm8192/`, `tokenizer_sweep_zh_spm8192/`: generated v1 SPM8k tokenizer/model setup outputs and tokenizer audits.
+- `tokenizer_sweep_en_spm8192/` and `tokenizer_sweep_zh_spm8192/`:
+  generated NLLB SPM8k tokenizer/model outputs and train-only audits.
+- `madlad400_3b_native_directional_v1/setup/`: generated shared MADLAD
+  tokenizer/model with Formosan target/control tokens and train-only audits.
 - `runs/`: optional local training outputs. On Andromeda, put runs under `/scratch/$USER/projects/mt/formosan_mt_experiments/runs/`.
 
 Current public/private no-Bible corpora live in ignored named build directories

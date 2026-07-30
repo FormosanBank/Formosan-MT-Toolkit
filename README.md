@@ -1,11 +1,10 @@
 # Formosan-MT-Toolkit
 
-Reproducible corpus construction and NLLB-200 training for multilingual
-Formosan machine translation. The current production workflow builds separate
-public and private/all-repository corpora, excludes the exact Taiwan Bible
-Society repository, completes English/Chinese coverage with cached DeepL
-pivots, creates leakage-resistant evaluation splits, and trains four
-unidirectional SPM8k models per corpus variant.
+Reproducible corpus construction and directional NLLB-200 or MADLAD-400 3B
+training for multilingual Formosan machine translation. The workflow builds
+separate public and private/all-repository corpora, excludes the exact Taiwan
+Bible Society repository, completes English/Chinese coverage with cached
+DeepL pivots, and creates leakage-resistant evaluation splits.
 
 Corpus pipeline v2 is the first supported release path. July 2026 v1 manifests
 remain in `formosan_mt_experiments/manifests/` as historical experiment
@@ -25,7 +24,7 @@ FormosanBank Final_XML
   -> independent corpus validation
   -> exact TAME-MT exposure audit
   -> checksummed training bundle
-  -> SPM8k NLLB setup
+  -> NLLB SPM8k or MADLAD native-tokenizer setup
   -> f2en / en2f / f2zh / zh2f training
   -> final and best-checkpoint evaluation
 ```
@@ -42,7 +41,7 @@ documents the superseded July v1 flight.
 | `build_corpora.sh` | Stable wrapper for the end-to-end corpus builder. |
 | `scripts/local/` | Fetch, QC, XML extraction, pair filtering, aggregation, and orchestration. |
 | `scripts/local/pivot.py` | DeepL key rotation, caching, and pivot provenance. |
-| `formosan_mt_experiments/` | Current split, validation, SPM8k training, evaluation, and Slurm stack. |
+| `formosan_mt_experiments/` | Current split, validation, NLLB/MADLAD training, evaluation, and Slurm stack. |
 | `corpus_builds/<name>/` | Ignored self-contained public/private generated builds. |
 | `protected_corpora/` | Ignored paid-pivot snapshots plus tracked checksums; not the current build namespace. |
 
@@ -167,17 +166,26 @@ Transfer each final build directory, including its packaged provenance, sync
 `formosan_mt_experiments/`, then submit one flight per corpus:
 
 ```bash
+# Proven NLLB-200 SPM8k recipe
 CORPUS_NAME=public_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh
+  formosan_mt_experiments/slurm/submit_directional_experiment.sh
 CORPUS_NAME=private_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh
+  formosan_mt_experiments/slurm/submit_directional_experiment.sh
+
+# MADLAD-400 3B
+CORPUS_NAME=private_no_bible \
+PROFILE=/home/$USER/workspace/projects/mt/formosan_mt_experiments/configs/madlad400_3b_native.json \
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  formosan_mt_experiments/slurm/submit_directional_experiment.sh
 ```
 
 The submitter requires a named corpus, validates EN and ZH on CPU, creates or
-reuses the SPM8k tokenizer/model, trains all four directions, and queues final
-and best evaluations with `afterok` dependencies. Submission state is
-idempotent for a fixed run stamp, and the launcher writes a machine-readable
-manifest after Slurm accepts the graph.
+reuses the profile-specific tokenizer/model, trains all four directions, and
+queues final and best evaluations with `afterok` dependencies. MADLAD setup is
+a CPU Slurm job; training defaults to one 80GB-or-larger GPU, microbatch 1, and
+gradient checkpointing. Submission state is idempotent for a fixed run stamp,
+and the launcher writes a machine-readable manifest after Slurm accepts the
+graph.
 
 See [`formosan_mt_experiments/README.md`](formosan_mt_experiments/README.md) for
 the training contract and metrics.
