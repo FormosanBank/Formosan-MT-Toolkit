@@ -145,7 +145,7 @@ again on Andromeda before any GPU dependency can start:
 - reject character 4-gram Jaccard conflicts at or above 0.82 across all split
   boundaries;
 - require exact TAME-MT source/target/pair overlap and exposure at 0.95 to be
-  zero in both translation directions;
+  zero in both translation directions within every `lang_code` task;
 - keep connected one-to-many and many-to-one equivalence groups in one split;
 - report every fallback, removed conflict, count, and checksum.
 

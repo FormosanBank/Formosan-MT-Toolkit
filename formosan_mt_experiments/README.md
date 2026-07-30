@@ -54,7 +54,8 @@ final corpus denominator. It also requires:
 
 The splitter uses only human sentence references for evaluation. Synthetic,
 lexical, and morpheme rows remain training-only. TAME-MT exact exposure audits
-run as part of the local corpus release before transfer to Andromeda.
+run per `lang_code` task, matching the model's language-control tag, as part of
+the local corpus release before transfer to Andromeda.
 
 Run the gate locally with:
 

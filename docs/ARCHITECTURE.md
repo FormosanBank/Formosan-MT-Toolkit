@@ -131,9 +131,12 @@ evaluation and standard-tier provenance.
 `audit_corpus_exposure.py` then runs TAME-MT 0.2.2 with exact native retrieval
 in both MT directions. It reports SourceExposure, TargetExposure,
 PairLeakTopK, exact overlap, and translation-memory baselines by split and
-language. Exact overlap and exposure at 0.95 must be zero; 0.70 and 0.85 remain
-diagnostics. Exposure is evidence of similarity risk, not proof of
-memorization.
+language. Retrieval is conditioned on `lang_code`, matching the explicit
+language-control tag used by each multilingual model. It therefore rejects
+within-language exposure; cross-language reuse remains a separate diagnostic
+in independent split validation. Exact overlap and exposure at 0.95 must be
+zero; 0.70 and 0.85 remain diagnostics. Exposure is evidence of similarity
+risk, not proof of memorization.
 
 ### 8. NLLB Training
 

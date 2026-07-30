@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pandas as pd
 from experiment_config import sha256_file
 from mt_common import normalize_target_language, target_col_for, write_json
-from tame_mt import TameScorer
+from tame_mt import CachedSegmentScorer, TameScorer
 from tame_mt.config import (
     BinConfig,
     IndexConfig,
@@ -40,7 +40,7 @@ def read_corpus(path: Path, *, target_col: str) -> pd.DataFrame:
         "split",
         "kindOf",
         "row_type",
-        "is_synthetic",
+        "pivot_origin",
     }
     missing = sorted(required - set(frame.columns))
     if missing:
@@ -55,7 +55,7 @@ def read_corpus(path: Path, *, target_col: str) -> pd.DataFrame:
     if not {"train", *EVAL_SPLITS}.issubset(splits):
         raise SystemExit(f"Exposure audit requires train/test/validate splits, found {sorted(splits)}")
     evaluation = frame[frame["split"].str.casefold().isin(EVAL_SPLITS)]
-    synthetic = evaluation["is_synthetic"].str.casefold().isin({"1", "true", "yes"})
+    synthetic = evaluation["pivot_origin"].str.casefold().eq("synthetic")
     lexical = ~evaluation["row_type"].str.casefold().eq("sentence")
     if synthetic.any() or lexical.any():
         raise SystemExit(
@@ -159,12 +159,82 @@ def audit_direction(
         frame["split"].str.casefold().isin(EVAL_SPLITS)
     ].reset_index(drop=True)
     source_col, reference_col = direction_columns(direction, target_col)
-    result = TameScorer(config).evaluate_corpus(
-        train_src=train[source_col].tolist(),
-        train_tgt=train[reference_col].tolist(),
-        test_src=evaluation[source_col].tolist(),
+    exposures = [None] * len(evaluation)
+    tm_results = [None] * len(evaluation)
+    language_reports: dict[str, object] = {}
+    scorer = TameScorer(config)
+    for language in sorted(evaluation["lang_code"].unique()):
+        train_indexes = [
+            index
+            for index, value in enumerate(train["lang_code"])
+            if value == language
+        ]
+        evaluation_indexes = [
+            index
+            for index, value in enumerate(evaluation["lang_code"])
+            if value == language
+        ]
+        if not train_indexes:
+            raise SystemExit(
+                f"Exposure audit has evaluation rows but no training rows for {language}"
+            )
+        language_train = train.iloc[train_indexes].reset_index(drop=True)
+        language_evaluation = evaluation.iloc[evaluation_indexes].reset_index(drop=True)
+        result = scorer.evaluate_corpus(
+            train_src=language_train[source_col].tolist(),
+            train_tgt=language_train[reference_col].tolist(),
+            test_src=language_evaluation[source_col].tolist(),
+            refs=[language_evaluation[reference_col].tolist()],
+            hyp=None,
+        )
+        language_reports[str(language)] = result.report.to_dict()
+        for local_index, global_index in enumerate(evaluation_indexes):
+            segment = result.exposures[local_index]
+            exposures[global_index] = replace(
+                segment,
+                index=global_index,
+                source_nn_index=(
+                    train_indexes[segment.source_nn_index]
+                    if segment.source_nn_index is not None
+                    else None
+                ),
+                target_nn_index=(
+                    train_indexes[segment.target_nn_index]
+                    if segment.target_nn_index is not None
+                    else None
+                ),
+                pair_nn_index=(
+                    train_indexes[segment.pair_nn_index]
+                    if segment.pair_nn_index is not None
+                    else None
+                ),
+            )
+            tm_result = result.tm_results[local_index]
+            tm_results[global_index] = replace(
+                tm_result,
+                index=global_index,
+                tm_source_index=(
+                    train_indexes[tm_result.tm_source_index]
+                    if tm_result.tm_source_index is not None
+                    else None
+                ),
+            )
+    if any(segment is None for segment in exposures):
+        raise RuntimeError("Exposure audit did not score every evaluation row")
+    if any(result is None for result in tm_results):
+        raise RuntimeError("Exposure audit did not create every TM result")
+    complete_exposures = [segment for segment in exposures if segment is not None]
+    complete_tm_results = [result for result in tm_results if result is not None]
+    cached = CachedSegmentScorer(
+        config=config,
+        exposures=complete_exposures,
+        tm_results=complete_tm_results,
         refs=[evaluation[reference_col].tolist()],
-        hyp=None,
+        num_train=len(train),
+        artifact_backend={
+            "name": "task_conditioned",
+            "conditioning_column": "lang_code",
+        },
     )
     by_split: dict[str, dict[str, object]] = {}
     for split in EVAL_SPLITS:
@@ -173,7 +243,7 @@ def audit_direction(
             for index, value in enumerate(evaluation["split"].str.casefold())
             if value == split
         ]
-        segments = [result.exposures[index] for index in indexes]
+        segments = [complete_exposures[index] for index in indexes]
         split_frame = evaluation.iloc[indexes].reset_index(drop=True)
         by_split[split] = {
             "rows": len(indexes),
@@ -185,7 +255,25 @@ def audit_direction(
         "reference_column": reference_col,
         "train_rows": len(train),
         "evaluation_rows": len(evaluation),
-        "combined_evaluation": result.report.to_dict(),
+        "combined_evaluation": {
+            "task_conditioning": "lang_code",
+            "data": {
+                "num_train": len(train),
+                "num_test": len(evaluation),
+                "num_refs": 1,
+            },
+            "quality": {
+                "system": {
+                    metric: None for metric in cached.tm_scores
+                },
+                "tm": cached.tm_scores,
+                "delta_tm": {
+                    metric: None for metric in cached.tm_scores
+                },
+            },
+            "exposure": asdict(cached.exposure_summary),
+            "by_language": language_reports,
+        },
         "by_split": by_split,
     }
 
@@ -243,7 +331,7 @@ def main() -> None:
         max_high_exposure_rate=args.max_high_exposure_rate,
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "tool": "tame-mt",
         "tool_version": version,
         "input": {
@@ -255,6 +343,7 @@ def main() -> None:
         },
         "configuration": {
             "retrieval": "exact",
+            "task_conditioning": "lang_code",
             "normalization": "NFKC case-insensitive",
             "character_ngram_orders": [3, 4, 5],
             "pair_k": args.pair_k,

@@ -92,7 +92,7 @@ Read them from the build and bundle manifests.
 - Character 4-gram Jaccard conflicts at or above 0.82: zero across all split
   boundaries.
 - TAME-MT exact source/target/pair overlap and exposure at 0.95: zero in both
-  translation directions.
+  translation directions within every `lang_code` task.
 
 The builder expands the human sentence candidate pool when the strict hard pool
 cannot meet those final-corpus percentages, with a declared small-language
