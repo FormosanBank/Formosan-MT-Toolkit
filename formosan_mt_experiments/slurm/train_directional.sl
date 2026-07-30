@@ -72,7 +72,7 @@ mkdir -p "${OUT_DIR}"
 nvidia-smi || true
 
 train_command=(
-  python -u "${EXP_DIR}/scripts/train_directional_nllb.py"
+  python -u "${EXP_DIR}/scripts/train_directional.py"
   --input "${INPUT}" \
   --tokenizer "${TOKENIZER}" \
   --model "${MODEL}" \
@@ -114,5 +114,21 @@ add_override EARLY_STOPPING_MIN_DELTA --early-stopping-min-delta
 add_override EARLY_STOPPING_START_STEP --early-stopping-start-step
 add_override RESUME_FROM --resume-from
 add_override PRECISION --precision
+add_override LOAD_DTYPE --load-dtype
+
+if [[ -n "${GRADIENT_CHECKPOINTING:-}" ]]; then
+  case "${GRADIENT_CHECKPOINTING}" in
+    1|true|TRUE|yes|YES)
+      train_command+=(--gradient-checkpointing)
+      ;;
+    0|false|FALSE|no|NO)
+      train_command+=(--no-gradient-checkpointing)
+      ;;
+    *)
+      echo "Invalid GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING}" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 srun --cpu-bind=cores "${train_command[@]}"

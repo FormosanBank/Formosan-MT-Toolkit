@@ -18,11 +18,16 @@ from experiment_config import (
     sha256_file,
     stable_hash,
 )
+from model_backends import (
+    ModelBackend,
+    TaskSpec,
+    ensure_source_prefix_tokens,
+    get_backend,
+)
 from mt_common import (
     FORMOSAN_CODES,
     cjk_token_count,
     direction_choices,
-    get_lid,
     is_formosan_to_target,
     normalize_target_language,
     read_parallel_csv,
@@ -30,7 +35,6 @@ from mt_common import (
     source_bucket,
     target_col_for,
     target_language_from_direction,
-    target_lid_for,
     token_count,
     with_tagged_columns,
     write_json,
@@ -40,8 +44,13 @@ from mt_metrics import (
     score_translations,
 )
 from tqdm.auto import tqdm
-from train_directional_nllb import ensure_control_tags, ensure_lang_token
-from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
+from transformers import AutoModelForSeq2SeqLM
+
+LOAD_DTYPES = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
 
 
 def read_complete_manifest(path: Path, label: str) -> dict:
@@ -84,6 +93,8 @@ def validate_evaluation_contract(
     if (
         run_contract.get("input", {}).get("sha256") != input_hash
         or run_contract.get("recipe_id") != profile["recipe_id"]
+        or str(run_contract.get("model_family") or "nllb")
+        != profile["model_family"]
         or run_contract.get("profile", {}).get("sha256")
         != profile_record(args.profile)["sha256"]
     ):
@@ -189,7 +200,7 @@ def word_oov_rates(
 
 
 def formosan_fragmentation(
-    tokenizer: NllbTokenizer,
+    tokenizer,
     evaluation: pd.DataFrame,
 ) -> pd.Series:
     values = []
@@ -203,7 +214,7 @@ def formosan_fragmentation(
     return pd.Series(values, index=evaluation.index)
 
 
-def token_exists(tokenizer: NllbTokenizer, token: str) -> bool:
+def token_exists(tokenizer, token: str) -> bool:
     token_id = tokenizer.convert_tokens_to_ids(token)
     return (
         token_id != tokenizer.unk_token_id
@@ -213,7 +224,7 @@ def token_exists(tokenizer: NllbTokenizer, token: str) -> bool:
 
 def metadata_frame(
     evaluation: pd.DataFrame,
-    tokenizer: NllbTokenizer,
+    tokenizer,
     *,
     mode: str,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -252,17 +263,16 @@ def metadata_frame(
 
 @torch.no_grad()
 def generate(
-    tokenizer: NllbTokenizer,
+    tokenizer,
     model,
     texts: list[str],
     *,
-    src_lid: str,
-    tgt_lid: str,
+    backend: ModelBackend,
+    task: TaskSpec,
     device: torch.device,
     args: argparse.Namespace,
     description: str,
 ) -> list[str]:
-    forced_id = ensure_lang_token(tokenizer, tgt_lid)
     order = np.argsort([-len(text) for text in texts])
     restore = np.argsort(order)
     sorted_texts = [texts[index] for index in order]
@@ -275,7 +285,7 @@ def generate(
     )
     for start in range(0, len(sorted_texts), args.batch_size):
         batch = sorted_texts[start : start + args.batch_size]
-        tokenizer.src_lang = src_lid
+        backend.prepare_source(tokenizer, task)
         encoded = tokenizer(
             batch,
             return_tensors="pt",
@@ -296,10 +306,7 @@ def generate(
             no_repeat_ngram_size=args.no_repeat_ngram_size,
             repetition_penalty=args.repetition_penalty,
             length_penalty=args.length_penalty,
-            forced_bos_token_id=forced_id,
-            decoder_start_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
+            **backend.generation_kwargs(tokenizer, model, task),
         )
         outputs.extend(
             tokenizer.batch_decode(
@@ -314,9 +321,10 @@ def generate(
 
 def generate_mode(
     evaluation: pd.DataFrame,
-    tokenizer: NllbTokenizer,
+    tokenizer,
     model,
     *,
+    backend: ModelBackend,
     mode: str,
     device: torch.device,
     args: argparse.Namespace,
@@ -326,12 +334,14 @@ def generate_mode(
         tokenizer,
         mode=mode,
     )
-    if args.use_tags and args.validate_tags:
-        ensure_control_tags(
+    if args.validate_tags:
+        ensure_source_prefix_tokens(
+            backend,
             tokenizer,
             metadata,
             args.direction,
             target_lang=args.target_lang,
+            use_tags=args.use_tags,
         )
     tagged = with_tagged_columns(
         metadata,
@@ -339,6 +349,12 @@ def generate_mode(
         target_col=args.target_col,
         target_lang=args.target_lang,
         use_tags=args.use_tags,
+        prefix_builder=lambda row: backend.source_prefix(
+            row,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        ),
     )
     hypotheses = pd.Series("", index=evaluation.index, dtype="object")
     for language, subset in tagged.groupby(
@@ -347,18 +363,22 @@ def generate_mode(
     ):
         if language not in FORMOSAN_CODES:
             continue
+        task = backend.task_spec(
+            language,
+            args.direction,
+            target_lang=args.target_lang,
+        )
+        backend.validate_task(tokenizer, task)
         if is_formosan_to_target(args.direction):
-            src_lid, tgt_lid = get_lid(language), args.target_lid
             source = subset["formosan_sentence"].astype(str).tolist()
         else:
-            src_lid, tgt_lid = args.target_lid, get_lid(language)
             source = subset[args.target_col].astype(str).tolist()
         hypotheses.loc[subset.index] = generate(
             tokenizer,
             model,
             source,
-            src_lid=src_lid,
-            tgt_lid=tgt_lid,
+            backend=backend,
+            task=task,
             device=device,
             args=args,
             description=f"{language} {args.direction} {mode}",
@@ -492,6 +512,14 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
         default="auto",
         choices=["auto", "cuda", "cpu"],
     )
+    parser.add_argument(
+        "--load-dtype",
+        choices=sorted(LOAD_DTYPES),
+        default=profile["training_defaults"].get(
+            "load_dtype",
+            "fp32",
+        ),
+    )
     args = parser.parse_args()
     args.profile = known.profile
     return args, profile
@@ -506,7 +534,6 @@ def main() -> None:
     args.target_col = args.target_col or target_col_for(
         args.target_lang
     )
-    args.target_lid = target_lid_for(args.target_lang)
     if (
         target_language_from_direction(
             args.direction,
@@ -575,12 +602,18 @@ def main() -> None:
             ]
         ).sort_index()
 
-    tokenizer = NllbTokenizer.from_pretrained(args.tokenizer)
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model)
-    model.config.decoder_start_token_id = tokenizer.eos_token_id
-    if getattr(model, "generation_config", None) is not None:
-        model.generation_config.decoder_start_token_id = (
-            tokenizer.eos_token_id
+    backend = get_backend(profile)
+    tokenizer = backend.load_tokenizer(args.tokenizer)
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        args.model,
+        torch_dtype=LOAD_DTYPES[args.load_dtype],
+        low_cpu_mem_usage=True,
+    )
+    backend.configure_model(model, tokenizer)
+    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
+        raise SystemExit(
+            "Tokenizer and model vocabulary sizes differ; "
+            "load matching checkpoint artifacts."
         )
     device_name = (
         "cuda"
@@ -609,6 +642,7 @@ def main() -> None:
             evaluation,
             tokenizer,
             model,
+            backend=backend,
             mode=mode,
             device=device,
             args=args,
@@ -697,6 +731,7 @@ def main() -> None:
         "schema_version": 2,
         "complete": True,
         "profile": profile_record(args.profile),
+        "model_family": backend.family,
         "contract": contract,
         "input": str(args.input),
         "model": str(args.model),

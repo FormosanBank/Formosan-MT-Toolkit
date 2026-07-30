@@ -51,7 +51,7 @@ fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
 OUT_DIR="${OUT_DIR:-${DEFAULT_OUT}}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
-SETUP_SCRIPT_SHA256="${SETUP_SCRIPT_SHA256:-c0626e187bf33043effb2bdf6f0af9f55b99eb0a0e8763f1805fedb0a7a7f4a3}"
+: "${SETUP_SCRIPT_SHA256:?SETUP_SCRIPT_SHA256 is required}"
 
 [[ -r "${SETUP_SCRIPT}" ]] || { echo "Missing NLLB setup implementation: ${SETUP_SCRIPT}" >&2; exit 1; }
 actual_setup_sha256="$(sha256sum "${SETUP_SCRIPT}" | awk '{print $1}')"

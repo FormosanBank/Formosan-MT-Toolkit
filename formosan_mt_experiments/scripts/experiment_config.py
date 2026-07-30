@@ -39,16 +39,43 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         raise SystemExit(f"Cannot load experiment profile {path}: {exc}") from exc
     if profile.get("schema_version") != 2:
         raise SystemExit(f"Unsupported experiment profile schema: {path}")
-    if profile.get("tokenizer", {}).get("default_spm_vocab") != 8192:
-        raise SystemExit("The supported recipe requires an 8192-piece auxiliary SPM")
+    model_family = str(profile.get("model_family") or "nllb").strip().lower()
+    profile["model_family"] = model_family
+    tokenizer = profile.get("tokenizer", {})
+    if model_family == "nllb":
+        if tokenizer.get("mode") != "spm":
+            raise SystemExit("The NLLB recipe requires tokenizer.mode=spm")
+        if tokenizer.get("default_spm_vocab") != 8192:
+            raise SystemExit(
+                "The supported NLLB recipe requires an 8192-piece auxiliary SPM"
+            )
+    elif model_family == "madlad400":
+        if tokenizer.get("mode") != "native":
+            raise SystemExit(
+                "The MADLAD-400 recipe requires tokenizer.mode=native"
+            )
+        expected_prefixes = {
+            "english": "<2en>",
+            "chinese": "<2zh_Hant>",
+        }
+        if tokenizer.get("target_prefixes") != expected_prefixes:
+            raise SystemExit(
+                "MADLAD target prefixes must be <2en> and <2zh_Hant>"
+            )
+        if tokenizer.get("formosan_target_template") != "<2{lang_code}>":
+            raise SystemExit(
+                "MADLAD Formosan target template must be <2{lang_code}>"
+            )
+    else:
+        raise SystemExit(f"Unsupported model family in {path}: {model_family}")
     revision = str(profile.get("base_model", {}).get("revision") or "")
     if len(revision) != 40:
         raise SystemExit("Experiment profile must pin a full base-model revision")
     if profile.get("splits", {}).get("tiers") != ["in_domain_hard"]:
         raise SystemExit("Experiment profile must use only the in_domain_hard tier")
-    if profile.get("tokenizer", {}).get("setup_splits") != ["train"]:
+    if tokenizer.get("setup_splits") != ["train"]:
         raise SystemExit("Tokenizer setup must use training rows only")
-    if profile.get("tokenizer", {}).get("training_columns") != [
+    if tokenizer.get("training_columns") != [
         "formosan_sentence"
     ]:
         raise SystemExit(

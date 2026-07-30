@@ -337,6 +337,7 @@ def main() -> None:
         "complete": False,
         "stage": "base_spm_ready",
         "recipe_id": profile["recipe_id"],
+        "model_family": profile["model_family"],
         "profile": profile_record(args.profile),
         "repository": git_record(),
         "runtime_dependencies": dependency_versions(),

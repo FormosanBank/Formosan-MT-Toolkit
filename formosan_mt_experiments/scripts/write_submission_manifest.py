@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write a reproducible manifest for an accepted V1 SPM8k Slurm graph."""
+"""Write a reproducible manifest for a directional MT Slurm graph."""
 
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ def read_job_ids(state_dir: Path) -> dict[str, int]:
     return jobs
 
 
-def build_job_graph(job_ids: dict[str, int]) -> dict[str, Any]:
+def build_job_graph(
+    job_ids: dict[str, int],
+    model_family: str = "nllb",
+) -> dict[str, Any]:
     required = {"validate_en", "validate_zh"}
     for direction in DIRECTIONS:
         required.update(
@@ -41,9 +44,14 @@ def build_job_graph(job_ids: dict[str, int]) -> dict[str, Any]:
     graph: dict[str, Any] = {
         "validate_en": job_ids["validate_en"],
         "validate_zh": job_ids["validate_zh"],
-        "setup_en": job_ids.get("setup_en_spm8192"),
-        "setup_zh": job_ids.get("setup_zh_spm8192"),
     }
+    if model_family == "madlad400":
+        graph["setup_shared"] = job_ids.get("setup_madlad400")
+    elif model_family == "nllb":
+        graph["setup_en"] = job_ids.get("setup_en_spm8192")
+        graph["setup_zh"] = job_ids.get("setup_zh_spm8192")
+    else:
+        raise ValueError(f"Unsupported model family: {model_family}")
     for direction in DIRECTIONS:
         graph[direction] = [
             job_ids[f"train_{direction}"],
@@ -87,13 +95,21 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
 def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     corpus_dir = args.project_data / args.corpus_name
     profile = json.loads(args.profile.read_text(encoding="utf-8"))
+    model_family = str(
+        profile.get("model_family") or "nllb"
+    ).strip().lower()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "experiment_id": f"v1_spm8k_{args.corpus_name}_{args.run_stamp}",
+        "experiment_id": (
+            f"{profile['recipe_id']}_{args.corpus_name}_{args.run_stamp}"
+        ),
         "status": "submitted",
         "run_stamp": args.run_stamp,
         "corpus_name": args.corpus_name,
+        "recipe_id": profile["recipe_id"],
+        "model_family": model_family,
+        "base_model": profile["base_model"],
         "source_git_commit": args.git_commit,
         "code": build_code_inventory(
             experiment_root=args.experiment_root,
@@ -105,7 +121,10 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "split_policy": profile["splits"],
         "training": profile["training_defaults"],
         "generation": profile["generation_defaults"],
-        "jobs": build_job_graph(read_job_ids(args.state_dir)),
+        "jobs": build_job_graph(
+            read_job_ids(args.state_dir),
+            model_family=model_family,
+        ),
     }
 
 

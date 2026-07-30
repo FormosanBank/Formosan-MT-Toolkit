@@ -8,7 +8,7 @@ import math
 import re
 import unicodedata
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 import pandas as pd
 
@@ -399,17 +399,32 @@ def with_tagged_columns(
     target_col: str = "english_sentence",
     target_lang: str | None = None,
     use_tags: bool = True,
+    prefix_builder: Callable[[Mapping], str] | None = None,
 ) -> pd.DataFrame:
     out = df.copy()
-    if not use_tags:
+    if not use_tags and prefix_builder is None:
         return out
     if "source_bucket" not in out.columns:
         out["source_bucket"] = out["source"].map(source_bucket)
-    prefixes = out.apply(lambda row: build_prefix(row, direction, target_lang=target_lang), axis=1)
+    if prefix_builder is None:
+        prefixes = out.apply(
+            lambda row: build_prefix(
+                row,
+                direction,
+                target_lang=target_lang,
+            ),
+            axis=1,
+        )
+    else:
+        prefixes = out.apply(prefix_builder, axis=1)
     if is_formosan_to_target(direction):
-        out["formosan_sentence"] = prefixes + " " + out["formosan_sentence"].fillna("").astype(str)
+        out["formosan_sentence"] = (
+            prefixes + " " + out["formosan_sentence"].fillna("").astype(str)
+        ).str.strip()
     elif is_target_to_formosan(direction):
-        out[target_col] = prefixes + " " + out[target_col].fillna("").astype(str)
+        out[target_col] = (
+            prefixes + " " + out[target_col].fillna("").astype(str)
+        ).str.strip()
     else:
         raise ValueError(f"Unsupported direction: {direction}")
     return out

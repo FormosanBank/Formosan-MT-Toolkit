@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Directional multilingual NLLB fine-tuning for Formosan↔target-language experiments."""
+"""Directional multilingual fine-tuning for supported Formosan MT backends."""
 
 from __future__ import annotations
 
@@ -26,12 +26,16 @@ from experiment_config import (
     sha256_file,
     stable_hash,
 )
+from model_backends import (
+    ModelBackend,
+    TaskSpec,
+    ensure_source_prefix_tokens,
+    get_backend,
+)
 from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
-    build_prefix,
     direction_choices,
-    get_lid,
     is_formosan_to_target,
     language_sampling_probs,
     normalize_target_language,
@@ -39,7 +43,6 @@ from mt_common import (
     source_bucket,
     target_col_for,
     target_language_from_direction,
-    target_lid_for,
     with_tagged_columns,
     write_json,
 )
@@ -49,36 +52,21 @@ from tqdm.auto import trange
 from transformers import (
     Adafactor,
     AutoModelForSeq2SeqLM,
-    NllbTokenizer,
     get_constant_schedule_with_warmup,
 )
 
-
-def ensure_lang_token(tokenizer: NllbTokenizer, code: str) -> int:
-    tid = tokenizer.convert_tokens_to_ids(code)
-    if tid == tokenizer.unk_token_id:
-        raise SystemExit(f"Language token {code} maps to <unk>; rebuild/load the matching tokenizer.")
-    return int(tid)
-
-
-def ensure_control_tags(tokenizer: NllbTokenizer, df: pd.DataFrame, direction: str, target_lang: str = "english") -> None:
-    needed = set()
-    for _, row in df.iterrows():
-        needed.update(build_prefix(row, direction, target_lang=target_lang).split())
-    bad = []
-    for token in sorted(needed):
-        tid = tokenizer.convert_tokens_to_ids(token)
-        if tid == tokenizer.unk_token_id or tokenizer.convert_ids_to_tokens(tid) != token:
-            bad.append(token)
-    if bad:
-        raise SystemExit(
-            "Control tags are not single tokenizer tokens. "
-            f"First missing/broken tags: {bad[:30]}. "
-            "Run setup_tokenizer_sweep.py or disable --use-tags."
-        )
+LOAD_DTYPES = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
 
 
-def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
+def prepare_data(
+    args,
+    tokenizer,
+    backend: ModelBackend,
+) -> tuple[dict, dict, dict]:
     df = read_parallel_csv(args.input, target_col=args.target_col)
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
@@ -102,13 +90,26 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
         raise SystemExit(f"Training CSV has unknown splits: {unknown_splits}")
 
     if args.use_tags and args.validate_tags:
-        ensure_control_tags(tokenizer, df, args.direction, target_lang=args.target_lang)
+        ensure_source_prefix_tokens(
+            backend,
+            tokenizer,
+            df,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        )
     df = with_tagged_columns(
         df,
         args.direction,
         target_col=args.target_col,
         target_lang=args.target_lang,
         use_tags=args.use_tags,
+        prefix_builder=lambda row: backend.source_prefix(
+            row,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        ),
     )
 
     train = df[df["split"].eq("train")].copy()
@@ -138,23 +139,25 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
             train_sub["tgt_text"] = train_sub[args.target_col].astype(str)
             val_sub["src_text"] = val_sub["formosan_sentence"].astype(str)
             val_sub["tgt_text"] = val_sub[args.target_col].astype(str)
-            src_lid, tgt_lid = get_lid(lang), args.target_lid
         else:
             train_sub["src_text"] = train_sub[args.target_col].astype(str)
             train_sub["tgt_text"] = train_sub["formosan_sentence"].astype(str)
             val_sub["src_text"] = val_sub[args.target_col].astype(str)
             val_sub["tgt_text"] = val_sub["formosan_sentence"].astype(str)
-            src_lid, tgt_lid = args.target_lid, get_lid(lang)
+        task = backend.task_spec(
+            lang,
+            args.direction,
+            target_lang=args.target_lang,
+        )
+        backend.validate_task(tokenizer, task)
         train_by_lang[lang] = {
             "df": train_sub.reset_index(drop=True),
-            "src_lid": src_lid,
-            "tgt_lid": tgt_lid,
+            "task": task,
         }
         if not val_sub.empty:
             val_by_lang[lang] = {
                 "df": val_sub.reset_index(drop=True),
-                "src_lid": src_lid,
-                "tgt_lid": tgt_lid,
+                "task": task,
             }
 
     if not train_by_lang:
@@ -164,6 +167,7 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
         "train_rows": int(len(train)),
         "validate_rows": int(len(val)),
         "direction": args.direction,
+        "model_family": backend.family,
         "target_lang": args.target_lang,
         "target_col": args.target_col,
         "use_tags": bool(args.use_tags),
@@ -183,8 +187,16 @@ def prepare_data(args, tokenizer: NllbTokenizer) -> tuple[dict, dict, dict]:
     }
 
 
-def encode_batch(tokenizer, src_texts, tgt_texts, src_lid, tgt_lid, max_length, device):
-    tokenizer.src_lang = src_lid
+def encode_batch(
+    backend: ModelBackend,
+    tokenizer,
+    src_texts,
+    tgt_texts,
+    task: TaskSpec,
+    max_length,
+    device,
+):
+    backend.prepare_source(tokenizer, task)
     enc = tokenizer(
         list(src_texts),
         return_tensors="pt",
@@ -194,7 +206,7 @@ def encode_batch(tokenizer, src_texts, tgt_texts, src_lid, tgt_lid, max_length, 
         return_attention_mask=True,
         return_token_type_ids=False,
     )
-    tokenizer.tgt_lang = tgt_lid
+    backend.prepare_target(tokenizer, task)
     labels = tokenizer(
         text_target=list(tgt_texts),
         return_tensors="pt",
@@ -218,7 +230,14 @@ def row_probabilities(df: pd.DataFrame, easy_source_weight: float) -> np.ndarray
 
 
 @torch.no_grad()
-def evaluate_loss(model, tokenizer, val_by_lang, args, device) -> dict:
+def evaluate_loss(
+    model,
+    tokenizer,
+    backend: ModelBackend,
+    val_by_lang,
+    args,
+    device,
+) -> dict:
     model.eval()
     lang_losses = {}
     total_loss = 0.0
@@ -230,11 +249,11 @@ def evaluate_loss(model, tokenizer, val_by_lang, args, device) -> dict:
         for start in range(0, len(df), args.eval_batch_size):
             batch = df.iloc[start : start + args.eval_batch_size]
             enc, labels = encode_batch(
+                backend,
                 tokenizer,
                 batch["src_text"].tolist(),
                 batch["tgt_text"].tolist(),
-                info["src_lid"],
-                info["tgt_lid"],
+                info["task"],
                 args.max_length,
                 device,
             )
@@ -283,7 +302,17 @@ def validation_sample_manifest(val_by_lang: dict, args) -> dict:
 
 
 @torch.no_grad()
-def evaluate_generation(model, tokenizer, val_by_lang, args, device) -> dict:
+def evaluate_generation(
+    model,
+    tokenizer,
+    backend: ModelBackend,
+    val_by_lang,
+    args,
+    device,
+) -> dict:
+    training_use_cache = getattr(model.config, "use_cache", None)
+    if training_use_cache is not None:
+        model.config.use_cache = True
     model.eval()
     hypotheses: list[str] = []
     references: list[str] = []
@@ -293,10 +322,10 @@ def evaluate_generation(model, tokenizer, val_by_lang, args, device) -> dict:
         df = validation_subset(info["df"], lang, args)
         lang_hypotheses: list[str] = []
         lang_references = df["tgt_text"].astype(str).tolist()
-        forced_bos_token_id = ensure_lang_token(tokenizer, info["tgt_lid"])
+        task = info["task"]
         for start in range(0, len(df), args.generation_batch_size):
             batch = df.iloc[start : start + args.generation_batch_size]
-            tokenizer.src_lang = info["src_lid"]
+            backend.prepare_source(tokenizer, task)
             enc = tokenizer(
                 batch["src_text"].astype(str).tolist(),
                 return_tensors="pt",
@@ -310,10 +339,7 @@ def evaluate_generation(model, tokenizer, val_by_lang, args, device) -> dict:
                 **enc,
                 num_beams=args.validation_beam,
                 max_new_tokens=args.validation_max_new_tokens,
-                forced_bos_token_id=forced_bos_token_id,
-                decoder_start_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
+                **backend.generation_kwargs(tokenizer, model, task),
             )
             lang_hypotheses.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
         by_language[lang] = {"samples": len(df)} | score_translations(
@@ -323,6 +349,8 @@ def evaluate_generation(model, tokenizer, val_by_lang, args, device) -> dict:
         )
         hypotheses.extend(lang_hypotheses)
         references.extend(lang_references)
+    if training_use_cache is not None:
+        model.config.use_cache = training_use_cache
     model.train()
     return {
         "samples": len(hypotheses),
@@ -348,7 +376,16 @@ def metric_improved(current: float, best: float | None, name: str, min_delta: fl
 
 def save_checkpoint(model, tokenizer, path: Path, metadata: dict) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(path)
+    training_use_cache = getattr(model.config, "use_cache", None)
+    if training_use_cache is not None:
+        model.config.use_cache = True
+    model.save_pretrained(
+        path,
+        safe_serialization=True,
+        max_shard_size="5GB",
+    )
+    if training_use_cache is not None:
+        model.config.use_cache = training_use_cache
     tokenizer.save_pretrained(path)
     write_json(path / "experiment_metadata.json", metadata)
 
@@ -450,17 +487,29 @@ def build_run_contract(args, profile: dict) -> dict:
         )
     setup = read_complete_manifest(
         args.setup_manifest,
-        "tokenizer setup manifest",
+        "model setup manifest",
     )
     expected_profile = profile_record(args.profile)
+    setup_inputs = setup.get("inputs")
+    if not isinstance(setup_inputs, list):
+        setup_inputs = [setup.get("input", {})]
+    setup_has_input = any(
+        record.get("sha256") == input_hash
+        for record in setup_inputs
+        if isinstance(record, dict)
+    )
+    setup_family = str(
+        setup.get("model_family") or "nllb"
+    ).strip().lower()
     if (
         setup.get("recipe_id") != profile["recipe_id"]
+        or setup_family != profile["model_family"]
         or setup.get("profile", {}).get("sha256")
         != expected_profile["sha256"]
-        or setup.get("input", {}).get("sha256") != input_hash
+        or not setup_has_input
     ):
         raise SystemExit(
-            "Tokenizer setup manifest does not match corpus/profile"
+            "Model setup manifest does not match corpus/profile/family"
         )
     verify_setup_artifacts(
         setup,
@@ -484,6 +533,7 @@ def build_run_contract(args, profile: dict) -> dict:
         "schema_version": 2,
         "complete": True,
         "recipe_id": profile["recipe_id"],
+        "model_family": profile["model_family"],
         "profile": expected_profile,
         "input": {
             "path": str(args.input.resolve()),
@@ -562,6 +612,16 @@ def main() -> None:
     parser.add_argument("--easy-source-weight", type=float, default=None)
     parser.add_argument("--label-smoothing", type=float, default=defaults["label_smoothing"])
     parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default=defaults["precision"])
+    parser.add_argument(
+        "--load-dtype",
+        choices=sorted(LOAD_DTYPES),
+        default=defaults.get("load_dtype", "fp32"),
+    )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("gradient_checkpointing", False)),
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--save-interval", type=int, default=defaults["save_interval"], help="Checkpoint interval. Use 0 to keep only best/final.")
     parser.add_argument("--eval-interval", type=int, default=defaults["generation_eval_interval"])
@@ -586,7 +646,6 @@ def main() -> None:
     args.profile = known.profile
     args.target_lang = normalize_target_language(args.target_lang, args.target_col)
     args.target_col = args.target_col or target_col_for(args.target_lang)
-    args.target_lid = target_lid_for(args.target_lang)
     direction_target = target_language_from_direction(args.direction, args.target_lang)
     if direction_target != args.target_lang:
         raise SystemExit(
@@ -604,7 +663,6 @@ def main() -> None:
         raise SystemExit("--eval-samples must be positive; use a bounded, fixed validation sample per language.")
     if args.early_stopping_patience < 0:
         raise SystemExit("--early-stopping-patience cannot be negative.")
-
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -614,6 +672,9 @@ def main() -> None:
     device_name = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device_name == "auto":
         device_name = "cpu"
+    if args.precision == "bf16" and device_name == "cuda":
+        if not torch.cuda.is_bf16_supported():
+            raise SystemExit("This GPU does not support bf16 training")
     device = torch.device(device_name)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -631,20 +692,31 @@ def main() -> None:
     if resume_arg == "none" or not resume_exists:
         resume_path = None
     load_path = resume_path or args.model
-    tokenizer = NllbTokenizer.from_pretrained(resume_path or args.tokenizer)
-    model = AutoModelForSeq2SeqLM.from_pretrained(load_path)
-    model.config.decoder_start_token_id = tokenizer.eos_token_id
-    if getattr(model, "generation_config", None) is not None:
-        model.generation_config.decoder_start_token_id = tokenizer.eos_token_id
+    backend = get_backend(profile)
+    tokenizer = backend.load_tokenizer(resume_path or args.tokenizer)
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        load_path,
+        torch_dtype=LOAD_DTYPES[args.load_dtype],
+        low_cpu_mem_usage=True,
+    )
+    backend.configure_model(model, tokenizer)
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        if len(tokenizer) > model.get_input_embeddings().num_embeddings:
-            model.resize_token_embeddings(len(tokenizer))
-        else:
-            raise SystemExit("Tokenizer is smaller than model embeddings; load matching artifacts.")
-    for lid in sorted(set(get_lid(c) for c in FORMOSAN_CODES) | {args.target_lid}):
-        ensure_lang_token(tokenizer, lid)
+        raise SystemExit(
+            "Tokenizer and model vocabulary sizes differ; "
+            "load matching setup artifacts."
+        )
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
 
-    train_by_lang, val_by_lang, data_report = prepare_data(args, tokenizer)
+    train_by_lang, val_by_lang, data_report = prepare_data(
+        args,
+        tokenizer,
+        backend,
+    )
     write_json(args.output_dir / "data_report.json", data_report)
     write_json(args.output_dir / "validation_sample_manifest.json", validation_sample_manifest(val_by_lang, args))
     serializable_args = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
@@ -653,7 +725,13 @@ def main() -> None:
         serializable_args
         | {
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model_family": backend.family,
             "run_contract_sha256": contract_sha256,
+            "trainable_parameters": sum(
+                parameter.numel()
+                for parameter in model.parameters()
+                if parameter.requires_grad
+            ),
         },
     )
 
@@ -718,11 +796,11 @@ def main() -> None:
             sampled = np.random.choice(len(df), size=args.batch_size, replace=True, p=row_probs[lang])
             batch = df.iloc[sampled]
             enc, labels = encode_batch(
+                backend,
                 tokenizer,
                 batch["src_text"].tolist(),
                 batch["tgt_text"].tolist(),
-                info["src_lid"],
-                info["tgt_lid"],
+                info["task"],
                 args.max_length,
                 device,
             )
@@ -786,8 +864,22 @@ def main() -> None:
                 torch.cuda.reset_peak_memory_stats()
 
         if val_by_lang and step % args.eval_interval == 0:
-            metrics = evaluate_loss(model, tokenizer, val_by_lang, args, device)
-            metrics["generation"] = evaluate_generation(model, tokenizer, val_by_lang, args, device)
+            metrics = evaluate_loss(
+                model,
+                tokenizer,
+                backend,
+                val_by_lang,
+                args,
+                device,
+            )
+            metrics["generation"] = evaluate_generation(
+                model,
+                tokenizer,
+                backend,
+                val_by_lang,
+                args,
+                device,
+            )
             metrics["step"] = step
             current_value = metric_value(metrics, args.best_metric)
             improved = metric_improved(current_value, best_value, args.best_metric, args.early_stopping_min_delta)

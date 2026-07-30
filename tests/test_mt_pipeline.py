@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import torch
@@ -28,12 +28,16 @@ from build_experiment_splits import (  # noqa: E402
     split_targets,
 )
 from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
+from model_backends import get_backend  # noqa: E402
 from mt_common import add_normalized_columns  # noqa: E402
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
+from publish_huggingface_models import validate_checkpoint  # noqa: E402
+from setup_formosan_madlad400 import resize_and_initialize  # noqa: E402
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
-from train_directional_nllb import metric_improved  # noqa: E402
+from train_directional import metric_improved  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
+from transformers import T5Config, T5ForConditionalGeneration  # noqa: E402
 from validate_experiment import validate_provenance, validate_splits  # noqa: E402
 from verify_experiment_manifest import manifest_errors  # noqa: E402
 from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
@@ -55,6 +59,173 @@ class DeepLKeyDiscoveryTests(unittest.TestCase):
 
     def test_explicit_key_list_remains_supported(self) -> None:
         self.assertEqual(parse_api_key_envs("SECOND,FIRST,SECOND"), ["SECOND", "FIRST"])
+
+
+class FakeTokenizer:
+    def __init__(self) -> None:
+        values = [
+            "<s>",
+            "<pad>",
+            "</s>",
+            "<unk>",
+            "<2mi>",
+            "<2ms>",
+            "<2id>",
+            "<2haw>",
+            "<2sm>",
+            "<2to>",
+            "<2ami>",
+            "<to_eng>",
+        ]
+        self.vocab = {token: index for index, token in enumerate(values)}
+        self.unk_token_id = self.vocab["<unk>"]
+        self.pad_token_id = self.vocab["<pad>"]
+        self.eos_token_id = self.vocab["</s>"]
+
+    def __len__(self) -> int:
+        return len(self.vocab)
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self.vocab)
+
+    def convert_tokens_to_ids(self, value):
+        if isinstance(value, list):
+            return [self.convert_tokens_to_ids(token) for token in value]
+        return self.vocab.get(value, self.unk_token_id)
+
+    def convert_ids_to_tokens(self, value: int) -> str:
+        return next(
+            token
+            for token, token_id in self.vocab.items()
+            if token_id == value
+        )
+
+    def __call__(self, *_args, **_kwargs) -> dict[str, list[int]]:
+        return {"input_ids": [self.vocab["<2mi>"]]}
+
+
+class ModelBackendTests(unittest.TestCase):
+    def test_nllb_generation_contract_is_unchanged(self) -> None:
+        class NllbTokenizer:
+            eos_token_id = 2
+            pad_token_id = 1
+            unk_token_id = 3
+            vocab = {
+                "ami_Latn": 10,
+                "eng_Latn": 11,
+            }
+
+            def convert_tokens_to_ids(self, token):
+                return self.vocab.get(token, self.unk_token_id)
+
+            def convert_ids_to_tokens(self, token_id):
+                return next(
+                    token
+                    for token, value in self.vocab.items()
+                    if value == token_id
+                )
+
+        backend = get_backend("nllb")
+        tokenizer = NllbTokenizer()
+        model = SimpleNamespace(
+            config=SimpleNamespace(decoder_start_token_id=None),
+            generation_config=SimpleNamespace(
+                decoder_start_token_id=None
+            ),
+        )
+        backend.configure_model(model, tokenizer)
+        task = backend.task_spec(
+            "ami",
+            "f2en",
+            target_lang="english",
+        )
+        self.assertEqual(
+            backend.generation_kwargs(tokenizer, model, task),
+            {
+                "forced_bos_token_id": 11,
+                "decoder_start_token_id": 2,
+                "eos_token_id": 2,
+                "pad_token_id": 1,
+            },
+        )
+
+    def test_madlad_prefixes_cover_all_directions(self) -> None:
+        backend = get_backend("madlad400")
+        row = {
+            "lang_code": "ami",
+            "source_bucket": "ntu",
+            "dialect": "Coastal",
+        }
+        expected = {
+            ("f2en", "english"): "<2en> <to_eng> <src_ami> <dom_ntu> <dialect_coastal>",
+            ("en2f", "english"): "<2ami> <to_ami> <src_eng> <dom_ntu> <dialect_coastal>",
+            ("f2zh", "chinese"): "<2zh_Hant> <to_zh> <src_ami> <dom_ntu> <dialect_coastal>",
+            ("zh2f", "chinese"): "<2ami> <to_ami> <src_zh> <dom_ntu> <dialect_coastal>",
+        }
+        for (direction, target_lang), prefix in expected.items():
+            self.assertEqual(
+                backend.source_prefix(
+                    row,
+                    direction,
+                    target_lang=target_lang,
+                    use_tags=True,
+                ),
+                prefix,
+            )
+
+    def test_madlad_generation_never_forces_nllb_bos(self) -> None:
+        backend = get_backend("madlad400")
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                decoder_start_token_id=0,
+                pad_token_id=1,
+                eos_token_id=2,
+            ),
+            generation_config=SimpleNamespace(),
+        )
+        tokenizer = FakeTokenizer()
+        backend.configure_model(model, tokenizer)
+        task = backend.task_spec(
+            "ami",
+            "en2f",
+            target_lang="english",
+        )
+        kwargs = backend.generation_kwargs(tokenizer, model, task)
+        self.assertEqual(
+            kwargs,
+            {
+                "decoder_start_token_id": 0,
+                "eos_token_id": 2,
+                "pad_token_id": 1,
+            },
+        )
+        self.assertNotIn("forced_bos_token_id", kwargs)
+
+    def test_madlad_resize_updates_untied_input_and_output_vocab(self) -> None:
+        tokenizer = FakeTokenizer()
+        model = T5ForConditionalGeneration(
+            T5Config(
+                vocab_size=10,
+                d_model=8,
+                d_ff=16,
+                num_layers=1,
+                num_decoder_layers=1,
+                num_heads=2,
+                decoder_start_token_id=0,
+                pad_token_id=1,
+                eos_token_id=2,
+                tie_word_embeddings=False,
+            )
+        )
+        report = resize_and_initialize(
+            model,
+            tokenizer,
+            ["<2ami>", "<to_eng>"],
+            old_size=10,
+        )
+        self.assertEqual(report["new_vocab_size"], 12)
+        self.assertEqual(model.get_input_embeddings().num_embeddings, 12)
+        self.assertEqual(model.get_output_embeddings().out_features, 12)
 
 
 class LeakageTests(unittest.TestCase):
@@ -481,6 +652,16 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["splits"]["tiers"], ["in_domain_hard"])
         self.assertEqual(len(profile["base_model"]["revision"]), 40)
 
+    def test_madlad_profile_uses_native_train_only_tokenizer(self) -> None:
+        profile = load_profile(
+            ROOT
+            / "formosan_mt_experiments/configs/madlad400_3b_native.json"
+        )
+        self.assertEqual(profile["model_family"], "madlad400")
+        self.assertEqual(profile["tokenizer"]["mode"], "native")
+        self.assertEqual(profile["tokenizer"]["setup_splits"], ["train"])
+        self.assertTrue(profile["training_defaults"]["gradient_checkpointing"])
+
     def test_embedding_realignment_uses_token_identity(self) -> None:
         class Tokenizer:
             unk_token_id = 0
@@ -666,10 +847,27 @@ class ExposureAuditTests(unittest.TestCase):
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_publication_accepts_sharded_safetensors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary)
+            for name in (
+                "config.json",
+                "experiment_metadata.json",
+                "generation_config.json",
+                "tokenizer_config.json",
+                "spiece.model",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+            ):
+                (checkpoint / name).write_text("{}", encoding="utf-8")
+            files = validate_checkpoint(checkpoint)
+            self.assertEqual(len(files), 8)
+
     def test_submitter_uses_scratch_logs_and_handles_completed_trainers(self) -> None:
         submitter = (
             ROOT
-            / "formosan_mt_experiments/slurm/submit_v1_spm8k_directional.sh"
+            / "formosan_mt_experiments/slurm/submit_directional_experiment.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
             'LOGS_DIR="${LOGS_DIR:-${SCRATCH}/formosan_mt_experiments/logs/${RUN_STAMP}}"',
@@ -678,20 +876,25 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn('--output="${LOGS_DIR}/%x-%j.out"', submitter)
         self.assertIn('--error="${LOGS_DIR}/%x-%j.err"', submitter)
         self.assertIn("COMPLETED*)", submitter)
-        self.assertIn('eval_dependency+=(--dependency="afterok:${train_id}")', submitter)
+        self.assertIn('eval_dependency="--dependency=afterok:${train_id}"', submitter)
 
-    def test_setup_script_checksum_pins_match_source(self) -> None:
-        setup = ROOT / "formosan_mt_experiments/scripts/setup_formosan_nllb200.py"
-        expected = hashlib.sha256(setup.read_bytes()).hexdigest()
-        launchers = {
-            "setup_spm_sweep.sl": "SETUP_SCRIPT_SHA256",
-            "submit_v1_spm8k_directional.sh": "SETUP_IMPLEMENTATION_SHA256",
-        }
-        for filename, variable in launchers.items():
-            path = ROOT / "formosan_mt_experiments/slurm" / filename
-            match = re.search(rf'{variable}="\$\{{{variable}:-([0-9a-f]{{64}})\}}"', path.read_text())
-            self.assertIsNotNone(match, filename)
-            self.assertEqual(match.group(1), expected, filename)
+    def test_nllb_setup_checksum_is_computed_then_enforced(self) -> None:
+        submitter = (
+            ROOT
+            / "formosan_mt_experiments/slurm/submit_directional_experiment.sh"
+        ).read_text(encoding="utf-8")
+        setup = (
+            ROOT
+            / "formosan_mt_experiments/slurm/setup_spm_sweep.sl"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'setup_sha="$(sha256sum "${NLLB_SETUP_IMPLEMENTATION}"',
+            submitter,
+        )
+        self.assertIn(
+            ': "${SETUP_SCRIPT_SHA256:?SETUP_SCRIPT_SHA256 is required}"',
+            setup,
+        )
 
     def test_active_training_code_inventory_is_complete(self) -> None:
         inventory = build_code_inventory(
@@ -704,7 +907,7 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
-            "formosan_mt_experiments/scripts/train_directional_nllb.py",
+            "formosan_mt_experiments/scripts/train_directional.py",
             repository_paths,
         )
         self.assertIn(
@@ -733,6 +936,25 @@ class ExperimentManifestTests(unittest.TestCase):
         graph = build_job_graph(job_ids)
         self.assertEqual(graph["f2en"], [5, 6, 7])
         self.assertEqual(len({job for chain in graph.values() for job in (chain if isinstance(chain, list) else [chain])}), 16)
+
+    def test_madlad_submission_graph_uses_one_shared_setup(self) -> None:
+        job_ids = {
+            "validate_en": 1,
+            "validate_zh": 2,
+            "setup_madlad400": 3,
+        }
+        next_id = 4
+        for direction in ("f2en", "en2f", "f2zh", "zh2f"):
+            for label in (
+                f"train_{direction}",
+                f"eval_{direction}_final",
+                f"eval_{direction}_best",
+            ):
+                job_ids[label] = next_id
+                next_id += 1
+        graph = build_job_graph(job_ids, model_family="madlad400")
+        self.assertEqual(graph["setup_shared"], 3)
+        self.assertNotIn("setup_en", graph)
 
     def test_submission_state_rejects_non_numeric_job_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

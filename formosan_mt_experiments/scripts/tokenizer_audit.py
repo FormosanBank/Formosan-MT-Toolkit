@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit Formosan tokenization fragmentation for an NLLB tokenizer."""
+"""Audit Formosan tokenization fragmentation for a seq2seq tokenizer."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from mt_common import (
     target_col_for,
     write_json,
 )
-from transformers import NllbTokenizer
+from transformers import AutoTokenizer
 
 
 def audit_tokenizer(
@@ -24,9 +24,16 @@ def audit_tokenizer(
     output_csv: Path | None,
     max_rows_per_lang: int,
     target_col: str = "english_sentence",
+    split: str | None = None,
 ) -> dict:
-    tok = NllbTokenizer.from_pretrained(tokenizer_dir)
+    tok = AutoTokenizer.from_pretrained(tokenizer_dir, use_fast=False)
     df = read_parallel_csv(input_csv, target_col=target_col)
+    if split is not None:
+        if "split" not in df:
+            raise SystemExit(f"Tokenizer audit input has no split column: {input_csv}")
+        df = df[
+            df["split"].astype(str).str.strip().str.lower().eq(split)
+        ].copy()
     rows: list[dict] = []
 
     for lang in FORMOSAN_CODES:
@@ -73,6 +80,7 @@ def audit_tokenizer(
         "tokenizer": str(tokenizer_dir),
         "input": str(input_csv),
         "max_rows_per_lang": max_rows_per_lang,
+        "split": split,
         "languages": rows,
         "macro_avg_pieces_per_word": float(table["pieces_per_word"].mean()),
         "macro_avg_pct_words_ge_5_pieces": float(table["pct_words_ge_5_pieces"].mean()),
@@ -99,6 +107,11 @@ def main() -> None:
         default=20000,
         help="Use 0 for all rows. Sampling keeps audits fast during sweeps.",
     )
+    parser.add_argument(
+        "--split",
+        choices=["train", "validate", "test"],
+        default=None,
+    )
     args = parser.parse_args()
     target_lang = normalize_target_language(args.target_lang, args.target_col)
     target_col = args.target_col or target_col_for(target_lang)
@@ -110,6 +123,7 @@ def main() -> None:
         output_csv=args.output_csv,
         max_rows_per_lang=args.max_rows_per_lang,
         target_col=target_col,
+        split=args.split,
     )
     print(f"macro pieces/word: {summary['macro_avg_pieces_per_word']:.3f}")
     print(f"report: {args.output_json}")
