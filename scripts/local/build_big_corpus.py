@@ -11,6 +11,9 @@ import pandas as pd
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
 PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
+PIVOT_QUARANTINE_RE = re.compile(
+    r"^pivot_rejections_(?:en2zh|zh2en)\.csv$"
+)
 OUTPUT_NAMES = {
     "big_corpus_en.csv",
     "big_corpus_zh.csv",
@@ -158,7 +161,9 @@ def discover_inputs(directory: Path, output_names: set[str]) -> list[Path]:
     files = [
         path
         for path in sorted(directory.glob("*.csv"))
-        if path.name not in output_names and path.name != "summary_stats.csv"
+        if path.name not in output_names
+        and path.name != "summary_stats.csv"
+        and not PIVOT_QUARANTINE_RE.fullmatch(path.name)
     ]
     if not files:
         raise SystemExit(f"No input corpus CSVs found in {directory}")

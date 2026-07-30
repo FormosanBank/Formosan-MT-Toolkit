@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
+from build_big_corpus import discover_inputs  # noqa: E402
 from build_mt_corpus import (  # noqa: E402
     BuildPaths,
     package_training_provenance,
@@ -1268,6 +1269,26 @@ class PivotContractTests(unittest.TestCase):
             self.assertEqual(
                 bundle["artifacts"][quarantine.name]["sha256"],
                 quarantine_hash,
+            )
+
+    def test_aggregate_discovery_ignores_only_pivot_quarantine_ledgers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pivot = root / "big_corpus_en_pivot.csv"
+            pivot.write_text("row_id\nfixture\n", encoding="utf-8")
+            (
+                root / "pivot_rejections_zh2en.csv"
+            ).write_text("reason\nfixture\n", encoding="utf-8")
+
+            self.assertEqual(discover_inputs(root, set()), [pivot])
+
+            unexpected = root / "unexpected.csv"
+            unexpected.write_text("column\nvalue\n", encoding="utf-8")
+            self.assertEqual(
+                discover_inputs(root, set()),
+                [pivot, unexpected],
             )
 
     def test_malformed_cache_is_a_hard_error(self) -> None:
