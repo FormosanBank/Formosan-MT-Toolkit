@@ -1,237 +1,181 @@
-# Formosan-MT-Toolkit
+# Formosan MT Toolkit
 
-Reproducible corpus construction and directional NLLB-200 or MADLAD-400 3B
-training for multilingual Formosan machine translation. The workflow builds
-separate public and private/all-repository corpora, excludes the exact Taiwan
-Bible Society repository, completes English/Chinese coverage with cached
-DeepL pivots, and creates leakage-resistant evaluation splits.
+Formosan MT Toolkit builds leakage-controlled Formosan-English and
+Formosan-Traditional Chinese corpora from the public
+[FormosanBank](https://github.com/FormosanBank/FormosanBank) XML collection.
+It also contains reproducible directional training and evaluation code for
+NLLB-200 and MADLAD-400 3B.
 
-Corpus pipeline v3 is the supported release path. July 2026 v1 manifests
-remain in `formosan_mt_experiments/manifests/` as historical experiment
-records; their corpora must not be reused as v3 training inputs.
+The supported workflow is corpus pipeline v3. It keeps the supplied XML
+`kindOf="standard"` tier, derives a separate model-facing standardization,
+records every transformation, keeps synthetic and lexical rows in training,
+and creates hard human-reference evaluation splits.
 
-## Current Production Path
-
-```text
-FormosanBank Final_XML
-  -> immutable repository/commit/blob inventory
-  -> derived XML copy + pinned structural QC
-  -> source tier selection: supplied standard, else original, else untyped
-  -> versioned toolkit MT standardization + complete unit ledger
-  -> extract formosan_mt_standard with element-level provenance
-  -> conservative NFC cleaning + rejection ledger
-  -> multilingual EN/ZH aggregates
-  -> validated, transactional DeepL pivot completion
-  -> one document/group-aware hard split
-  -> independent corpus validation
-  -> exact TAME-MT exposure audit
-  -> checksummed training bundle
-  -> NLLB SPM8k or MADLAD native-tokenizer setup
-  -> f2en / en2f / f2zh / zh2f training
-  -> final and best-checkpoint evaluation
-```
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component ownership and
-[`docs/NO_BIBLE_CORPUS_REBUILD.md`](docs/NO_BIBLE_CORPUS_REBUILD.md) for the
-release procedure. [`docs/CURRENT_EXPERIMENT.md`](docs/CURRENT_EXPERIMENT.md)
-documents the superseded July v1 flight.
-
-## Repository Layout
-
-| Path | Role |
-|---|---|
-| `build_corpora.sh` | Stable wrapper for the end-to-end corpus builder. |
-| `scripts/local/` | Fetch, source selection, MT standardization, extraction, filtering, aggregation, and orchestration. |
-| `scripts/local/pivot.py` | DeepL key rotation, caching, and pivot provenance. |
-| `formosan_mt_experiments/` | Current split, validation, NLLB/MADLAD training, evaluation, and Slurm stack. |
-| `corpus_builds/<name>/` | Ignored self-contained public/private generated builds. |
-| `protected_corpora/` | Ignored paid-pivot snapshots plus tracked checksums; not the current build namespace. |
-
-## Setup
+## Quick Start
 
 ```bash
+git clone https://github.com/FormosanBank/Formosan-MT-Toolkit.git
+cd Formosan-MT-Toolkit
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-For repository development and linting, use `requirements-dev.txt` instead.
+A GitHub token is optional for public data but raises the API rate limit. Add
+it to the ignored `.env` file:
 
-For XML fetching, configure `GITHUB_TOKEN`. For new pivot translations,
-configure `DEEPL_API_KEY` and any numbered `DEEPL_API_KEY_N` variables. The
-scripts load an ignored root `.env`, discover numbered keys in numeric order,
-and never print key values.
-
-The builder accepts a sibling `../FormosanBank` checkout only when its clean
-HEAD exactly matches the pinned QC commit. Otherwise it downloads and verifies
-the pinned QC tree.
-
-## Build Corpora
-
-Build both isolated public/private variants with complete pivoting while
-excluding exactly `FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`:
-
-```bash
-./build_corpora.sh --build-public-private --with-pivot --exclude-bible
+```text
+GITHUB_TOKEN=your_token
 ```
 
-The wrapper requires an explicit named build or `--build-public-private`; it
-will not recreate obsolete top-level output directories.
-
-Reuse downloaded XML and paid translation caches without making DeepL calls:
+Build the public corpus without paid pivot translation:
 
 ```bash
-./build_corpora.sh --build-public-private --with-pivot --exclude-bible \
-  --skip-fetch --pivot-skip-translation
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --exclude-bible
 ```
 
-Regenerate only the final hard splits and manifests after split-policy changes:
+Build the complete public English and Chinese corpora with DeepL pivoting:
 
 ```bash
-python scripts/local/build_mt_corpus.py --corpus-name public_no_bible \
-  --public --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
-python scripts/local/build_mt_corpus.py --corpus-name private_no_bible \
-  --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible
 ```
 
-Named builds do not overwrite one another. Full builds refresh repository heads
-and verify a content-addressed stage cache before reusing language or release
-artifacts. Paid pivot caches are preserved. Use `--no-stage-cache` for a cold
-rebuild or `--language-workers 1` to disable the default three-language
-preparation pool. Do not combine `--skip-fetch` with a first-time Bible
-exclusion because stale fetched XML could remain.
+Set `DEEPL_API_KEY` and optional numbered keys such as `DEEPL_API_KEY_2` in
+`.env`. Keys are rotated in numeric order and their values are never printed.
 
-Normal orchestration output is intentionally concise: one language progress
-bar, stage timings, row totals, and rule-level cleaning summaries. Full child
-commands and raw output are written to `corpus_builds/<name>/logs/`, with one
-log per global stage and language. Add `--verbose` only for live debugging;
-verbose mode streams raw output and prepares languages serially so messages do
-not interleave.
-
-Production builds require a clean Git checkout. They fail if acquisition,
-parsing, source selection, standardization, row conservation, pivot completion,
-split validation, exposure auditing, or provenance packaging is incomplete.
-
-DeepL responses that fail target-script, identity, markup, or fertility checks
-are excluded from training and recorded in a checksummed per-direction
-quarantine ledger. They are processed outcomes, not unresolved translations.
-Missing cache entries, provider errors, exhausted quota, or deferred requests
-still fail the build and prevent pivot outputs from being promoted.
-
-DeepL may return different valid translations for an identical request over
-time. Layered caches are loaded in increasing priority order, with the writable
-build cache last. The selected translation and every shadowed alternative are
-recorded in a checksummed cache-conflict ledger included with corpus provenance.
-
-Fetches batch repository-head resolution, record the immutable commit set in
-`source_repository_snapshot.json`, and parse each XML blob once before routing
-it to per-language inventories. Private repositories are traversed only under
-`Final_XML`; public data is traversed only under `Corpora`. Raw downloads use
-bounded concurrency, retries, exponential backoff, and Git-blob caching. If
-GitHub rate-limits a run, resume with existing files and lower concurrency:
+To rebuild from downloaded XML and existing paid response caches without any
+DeepL network calls:
 
 ```bash
-./build_corpora.sh --build-public-private --with-pivot --exclude-bible \
-  --fetch-workers 2 --keep-downloaded
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible \
+  --skip-fetch \
+  --pivot-skip-translation
 ```
 
-Detailed rebuild and storage instructions are in
-[`docs/NO_BIBLE_CORPUS_REBUILD.md`](docs/NO_BIBLE_CORPUS_REBUILD.md).
+The last command fails if a required cache entry is missing. It never silently
+publishes partial pivot output.
 
-## Split Contract
+## Outputs
 
-The model-facing artifact is
-`big_corpus_<en|zh>_in_domain_hard.csv`. Its contract is enforced locally and
-again on Andromeda before any GPU dependency can start:
+Each named build is isolated under `corpus_builds/<name>/`. The model-facing
+files are:
 
-- preserve `formosan_original_raw` and `formosan_source_standard`, then train on
-  the separate `formosan_mt_standard` namespace;
-- retain the XML locator, source commit, QC commit, standard origin, profile
-  hash, ordered transformations, confidence, and before/after hashes;
-- permit only unchanged or safely transformed human sentences in evaluation;
-- route ambiguous normalizations, unresolved notation, synthetic rows,
-  lexemes, and morphemes to training or quarantine as appropriate;
-- route XML lexemes and morphemes to training only;
-- reserve at least 7.5% test and 2.5% validation for every language, measured
-  against all final rows;
-- keep every DeepL-generated row in training and every evaluation reference
-  human;
-- hold out source documents where a language has enough eligible documents;
-- keep exact normalized and punctuation/spacing skeleton source, target, and
-  pair overlap at zero across train/evaluation;
-- remove train rows one insertion, deletion, or substitution away from an
-  evaluation source or target;
-- reject character 4-gram Jaccard conflicts at or above 0.82 across all split
-  boundaries;
-- require exact TAME-MT source/target/pair overlap and exposure at 0.95 to be
-  zero in both translation directions within every `lang_code` task;
-- keep connected one-to-many and many-to-one equivalence groups in one split;
-- report every fallback, removed conflict, count, and checksum.
-
-Validate a built corpus directly:
-
-```bash
-python formosan_mt_experiments/scripts/validate_experiment.py \
-  --input corpus_builds/public_no_bible/pivot_corpora_final/big_corpus_en_in_domain_hard.csv \
-  --target-lang english --min-test-ratio 0.075 --min-validate-ratio 0.025
+```text
+corpus_builds/public_no_bible/pivot_corpora_final/
+  big_corpus_en_in_domain_hard.csv
+  big_corpus_zh_in_domain_hard.csv
+  provenance/
 ```
 
-Each completed build writes `mt_build_manifest.json` and a portable
-`pivot_corpora_final/provenance/` bundle containing the build, pivot, split,
-validation, exposure, and configuration manifests.
+The provenance bundle contains source repository commits, blob hashes, the
+pinned FormosanBank QC revision, cleaning and rejection ledgers, pivot status,
+split diagnostics, TAME-MT exposure reports, configurations, and final artifact
+checksums.
 
-Large hard corpora also have ignored Parquet companions for internal validation
-and TAME-MT reads. They are checksum-bound to the canonical CSV and include the
-splitter's normalized leakage features; CSV remains the release contract.
+The pipeline excludes exactly
+`FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`. It does not use fuzzy
+matching for repositories whose names happen to contain `bible`.
 
-## Train On Andromeda
+## Data Contract
 
-Transfer each final build directory, including its packaged provenance, sync
-`formosan_mt_experiments/`, then submit one flight per corpus:
+Production builds fail unless all of these conditions hold:
+
+- every fetched repository, XML file, and extracted row is accounted for;
+- existing nonempty `kindOf="standard"` tiers are preserved;
+- model text comes from the separate, versioned `formosan-mt` namespace;
+- malformed, missing, rejected, quarantined, and deduplicated rows are logged;
+- DeepL completion is explicit and every provider response is validated;
+- lexemes, morphemes, and synthetic rows are training-only;
+- every language has at least 7.5% test and 2.5% validation rows;
+- evaluation references are human and sentence-level;
+- exact, punctuation-skeleton, one-edit, and high character n-gram leakage
+  checks pass across split boundaries;
+- exact TAME-MT source, target, and pair exposure at 0.95 is zero;
+- final files and their build environment are checksummed.
+
+See [Pipeline Architecture](docs/ARCHITECTURE.md) for stage ownership and
+[Public Corpus Rebuild](docs/NO_BIBLE_CORPUS_REBUILD.md) for rebuild and cache
+details.
+
+## Training
+
+The `formosan_mt_experiments/` package trains four unidirectional models:
+
+| Direction | Input | Output |
+|---|---|---|
+| `f2en` | tagged Formosan | English |
+| `en2f` | tagged English | Formosan |
+| `f2zh` | tagged Formosan | Traditional Chinese |
+| `zh2f` | tagged Traditional Chinese | Formosan |
+
+The NLLB profile uses the established 8k Formosan SentencePiece extension.
+The MADLAD profile retains its native tokenizer and adds target and metadata
+control tokens. Both use the same corpus validation, balanced sampling,
+metrics, run contracts, checkpointing, and evaluation code.
+
+On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
+shared data root and submit from `formosan_mt_experiments/`:
 
 ```bash
-# Proven NLLB-200 SPM8k recipe
-CORPUS_NAME=public_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  formosan_mt_experiments/slurm/submit_directional_experiment.sh
-CORPUS_NAME=private_no_bible RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  formosan_mt_experiments/slurm/submit_directional_experiment.sh
+export EXP_DIR="$PWD"
+export PROJECT_DATA=/shared/formosan_parallel_corpora
+export SCRATCH=/scratch/$USER/formosan_mt
 
-# MADLAD-400 3B
-CORPUS_NAME=private_no_bible \
-PROFILE=/home/$USER/workspace/projects/mt/formosan_mt_experiments/configs/madlad400_3b_native.json \
+CORPUS_NAME=public_no_bible \
 RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  formosan_mt_experiments/slurm/submit_directional_experiment.sh
+  slurm/submit_directional_experiment.sh
 ```
 
-The submitter requires a named corpus, validates EN and ZH on CPU, creates or
-reuses the profile-specific tokenizer/model, trains all four directions, and
-queues final and best evaluations with `afterok` dependencies. MADLAD setup is
-a CPU Slurm job; training defaults to one 80GB-or-larger GPU, microbatch 1, and
-gradient checkpointing. Submission state is idempotent for a fixed run stamp,
-and the launcher writes a machine-readable manifest after Slurm accepts the
-graph.
+Cluster partitions, constraints, memory, time, and paths are environment
+overrides. The tracked Slurm files contain no personal account or filesystem
+defaults. See [Experiment Training](formosan_mt_experiments/README.md).
 
-See [`formosan_mt_experiments/README.md`](formosan_mt_experiments/README.md) for
-the training contract and metrics.
+## Repository Layout
 
-## Quality Checks
+| Path | Purpose |
+|---|---|
+| `build_corpora.sh` | Stable public entrypoint. |
+| `config/` | Versioned MT standardization policy. |
+| `scripts/local/` | Acquisition, QC, extraction, filtering, pivoting, and release orchestration. |
+| `formosan_mt_experiments/` | Split validation, NLLB/MADLAD setup, training, evaluation, and Slurm launchers. |
+| `tests/` | Corpus, training, inference, and provenance contract tests. |
+
+Corpus rows, downloaded XML, credentials, paid caches, private repository
+inventories, model files, and run outputs are intentionally not versioned.
+Run `python scripts/check_public_release.py` before publishing. The full policy
+is in [Public Data Policy](docs/DATA_POLICY.md).
+
+## Development
 
 ```bash
-python -m unittest discover -s tests -v
-ruff check scripts/local/*.py \
-  formosan_mt_experiments/scripts tests
-python -m compileall -q scripts/local formosan_mt_experiments/scripts tests
+pip install -r requirements-dev.txt
+python scripts/check_public_release.py
+pytest -q
+ruff check scripts formosan_mt_experiments/scripts tests
+python -m compileall -q scripts formosan_mt_experiments/scripts tests
 bash -n build_corpora.sh formosan_mt_experiments/slurm/*.sh \
   formosan_mt_experiments/slurm/*.sl
 ```
 
-Generated XML, corpora, caches, models, prediction files, and Slurm logs are
-ignored. Commit source, documentation, small manifests, checksums, and released
-historical corpora only. Paid DeepL caches need an off-machine backup; a second
-directory on the same workstation is not disaster recovery.
+## Data Rights And Citation
 
-## Citation
+This toolkit does not grant rights to upstream corpus material or DeepL
+outputs. Check the FormosanBank terms, each source corpus's metadata, and all
+required citations before using or redistributing a generated dataset. See the
+[license notice](LICENSE.md).
 
-This repository accompanies **FormosanMT: A Multilingual Parallel Corpus of the
-Formosan Language Family** ([COMPUTEL 2025](https://aclanthology.org/2025.computel-main.19/)).
-Check each upstream corpus's metadata and permissions before redistribution.
+This repository accompanies **FormosanMT: A Multilingual Parallel Corpus of
+the Formosan Language Family**
+([COMPUTEL 2025](https://aclanthology.org/2025.computel-main.19/)).

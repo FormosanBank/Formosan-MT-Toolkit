@@ -1,144 +1,136 @@
-# No-Bible Corpus Rebuild
+# Public No-Bible Corpus Rebuild
 
-This is the canonical corpus pipeline v3 release procedure. Generated CSVs and
-paid DeepL caches are intentionally ignored by git. A completed build is
-self-describing through its checksummed manifests and portable provenance
-bundle.
+This procedure builds the public corpus pipeline v3 release. Generated XML,
+CSVs, paid DeepL caches, and provenance manifests stay under the ignored
+`corpus_builds/` directory.
 
-## Rebuild
-
-Prerequisites:
-
-- a clean checkout of this repository;
-- `GITHUB_TOKEN` in `.env` for private repositories;
-- `DEEPL_API_KEY` plus any numbered `DEEPL_API_KEY_N` variables.
-
-A sibling `../FormosanBank` checkout is optional. It is accepted only when its
-clean HEAD equals the pinned QC commit.
-
-Run the normal content-addressed build. Repository heads are refreshed, changed
-languages rerun, and valid unchanged stages are reused:
+## Prerequisites
 
 ```bash
-./build_corpora.sh --build-public-private --with-pivot --exclude-bible
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Force every corpus stage to rerun while still reusing paid DeepL responses by
-content key:
+`GITHUB_TOKEN` is optional for public data and recommended to avoid the low
+anonymous API limit. `DEEPL_API_KEY` is required only when `--with-pivot` needs
+translations that are not already cached.
+
+The builder accepts a sibling `../FormosanBank` checkout only when its clean
+HEAD exactly matches the pinned QC commit. Otherwise it downloads and verifies
+the pinned QC source.
+
+## Full Build
 
 ```bash
-./build_corpora.sh --build-public-private --with-pivot \
-  --exclude-bible --no-stage-cache
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible
 ```
 
-Rebuild without any DeepL network calls, failing if the caches do not cover
-every eligible row:
+This refreshes repository heads, reuses valid content-addressed stages, reuses
+DeepL responses by content key, and reruns every downstream stage affected by
+changed XML or code.
+
+Force corpus stages to rerun while still reusing paid DeepL responses:
 
 ```bash
-./build_corpora.sh --build-public-private --with-pivot \
-  --pivot-skip-translation --exclude-bible
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible \
+  --no-stage-cache
 ```
 
-Regenerate only the final leakage-controlled splits and checksummed manifests,
-without downloading XML, rerunning cleaning, or calling DeepL:
+Use existing downloads and caches without GitHub or DeepL calls:
 
 ```bash
-python scripts/local/build_mt_corpus.py --corpus-name public_no_bible \
-  --public --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
-python scripts/local/build_mt_corpus.py --corpus-name private_no_bible \
-  --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible \
+  --skip-fetch \
+  --pivot-skip-translation
 ```
 
-The pipeline excludes exactly
-`FormosanBank/Formosan-Taiwan-Bible-Society-Bibles`, discovers all configured
-DeepL keys in numeric order, reuses response caches by content key, preserves
-`pivot_origin`/`pivot_direction`, and requires zero missing eligible synthetic
-rows before these artifacts are considered complete. Responses that fail
-synthetic target-script, identity, markup, or fertility checks are excluded and
-written to checksummed `pivot_rejections_<direction>.csv` quarantine ledgers.
-They do not count as missing because the provider response was received and
-audited; absent cache entries and provider errors remain release-blocking.
+Do not use `--skip-fetch` when changing acquisition or exclusion policy. It is
+appropriate only when the existing build has the intended immutable source
+snapshot.
 
-Each public/private build records one immutable
-`source_repository_snapshot.json`. Every language fetch reuses those exact
-repository commits, and private tree discovery is limited to `Final_XML`.
-Each XML blob is downloaded and parsed once, then routed into the independent
-language inventories. This keeps one build internally consistent without
-traversing every organization repository once per language.
+## Split-Only Rebuild
 
-Three language preparation pipelines run concurrently by default. Stage keys
-include all input, script, profile, configuration, runtime, and dependency
-hashes, and cached outputs are rehashed before reuse. Use
-`--language-workers 1` for serial debugging.
+After a split-policy change, rebuild final splits without fetching XML,
+rerunning cleaning, or calling DeepL:
 
-The parent process owns normal terminal output. It prints one progress bar,
-compact stage timings, and manifest-backed rule summaries after language
-preparation. Raw subprocess output and full commands are retained under each
-build's `logs/` directory. Use `--verbose` to stream those details live; this
-also disables language concurrency to keep diagnostic output readable.
+```bash
+python scripts/local/build_mt_corpus.py \
+  --corpus-name public_no_bible \
+  --public \
+  --exclude-bible \
+  --with-pivot \
+  --resplit-only \
+  --tiers in_domain_hard
+```
 
-Aggregation checks available disk space before loading large CSVs and writes
-through `.incomplete` files that are removed on failure. Final hard-split CSVs
-share storage with their validated split artifacts through hard links when
-possible. DeepL cache files are never removed by these safeguards.
+The source aggregate and pivot manifests must already be complete.
+
+## Performance And Logs
+
+Three language preparation pipelines run concurrently by default. Use
+`--language-workers 1` for serial debugging. Normal output contains one
+progress display plus stage timing and rule summaries. Full child commands and
+raw output are written under `corpus_builds/public_no_bible/logs/`. Add
+`--verbose` only when live subprocess output is needed.
+
+Raw XML is cached by verified Git blob ID. A full build resolves each public
+repository snapshot once and parses each XML blob once before routing it by
+language. Large internal tables use checksummed Parquet companions while CSV
+remains the release format.
+
+If GitHub rate limits a run, resume with the existing partial cache and lower
+download concurrency:
+
+```bash
+./build_corpora.sh \
+  --corpus-name public_no_bible \
+  --public \
+  --with-pivot \
+  --exclude-bible \
+  --fetch-workers 2 \
+  --keep-downloaded
+```
 
 ## Release Outputs
 
-Each named build produces:
+```text
+corpus_builds/public_no_bible/
+  mt_build_manifest.json
+  pivot_corpora_final/
+    big_corpus_en_in_domain_hard.csv
+    big_corpus_zh_in_domain_hard.csv
+    provenance/
+      bundle_manifest.json
+      mt_build_manifest.json
+```
 
-- `pivot_corpora_final/big_corpus_en_in_domain_hard.csv`;
-- `pivot_corpora_final/big_corpus_zh_in_domain_hard.csv`;
-- `mt_build_manifest.json`;
-- `pivot_corpora_final/provenance/bundle_manifest.json`;
-- split, independent validation, and TAME-MT exposure reports.
+The provenance directory also contains split validation, TAME-MT exposure,
+pivot, source snapshot, standardization, and configuration records. Row counts
+and hashes belong in these generated manifests, not in source documentation.
 
-Each language build retains `downloaded_<lang>` as the immutable fetched
-snapshot and writes a separate `prepared_<lang>` tree. The prepared tree has
-`_qc_transform_inventory.jsonl`, `_mt_standard_inventory.jsonl`, and their
-checksummed manifests. `config/mt_standardization.json` is copied into the
-final provenance bundle. A changed profile hash invalidates downstream corpus,
-tokenizer, resume, and evaluation contracts, but it does not invalidate DeepL
-cache entries because those are keyed by the English/Chinese pivot text and
-provider settings.
+The build fails when acquisition is incomplete, row accounting does not
+conserve inputs, unresolved pivots remain, evaluation contains synthetic or
+lexical rows, split floors are missed, leakage gates fail, or release hashes
+cannot be written.
 
-Rows and hashes are release outputs, not constants in source documentation.
-Read them from the build and bundle manifests.
+## Authorized Nonpublic Sources
 
-## Evaluation Policy
-
-- XML lexemes/morphemes: training only.
-- DeepL/synthetic rows: training only.
-- Evaluation: human sentence references only.
-- Evaluation normalization: unchanged or safe only; ambiguous and unresolved
-  Formosan notation is train-only or quarantined.
-- Final per-language split minimum: 7.5% test and 2.5% validation, measured
-  against every emitted row including synthetic training rows.
-- Small-language desired floors: 500 test and 150 validation rows.
-- Exact normalized Formosan, target, and pair overlap: zero.
-- Punctuation/spacing skeleton overlap: zero.
-- One-character insertion/deletion/substitution train/eval overlap: removed on
-  both Formosan and target sides.
-- Character 4-gram Jaccard conflicts at or above 0.82: zero across all split
-  boundaries.
-- TAME-MT exact source/target/pair overlap and exposure at 0.95: zero in both
-  translation directions within every `lang_code` task.
-
-The builder expands the human sentence candidate pool when the strict hard pool
-cannot meet those final-corpus percentages, with a declared small-language
-fallback. It fails rather than silently emitting an undersized or synthetic
-evaluation split.
-
-## Historical Warning
-
-`formosan_mt_experiments/manifests/no_bible_v1_20260712.json` and the July 2026
-row counts describe the superseded v1 experiment. They predate the standard-tier
-and provenance repairs and are retained only to reproduce the published model
-history. Do not train new models from those CSVs.
-
-## Storage
-
-Do not delete paid caches under
-`corpus_builds/*/processed_corpora/pivot/cache/`, final inputs under
-`corpus_builds/*/pivot_corpora_final/`, or build/split manifests. Ignored
-`.github_metadata_cache` and `.github_raw_xml_cache` directories are disposable
-after a successful checksummed build.
+The orchestrator can ingest repositories visible to an authorized GitHub
+token. Those source snapshots, inventories, corpora, manifests, metrics, and
+models must remain outside this repository. Use a separate named build and
+external access-controlled storage. Never commit or attach them to a public
+pull request.

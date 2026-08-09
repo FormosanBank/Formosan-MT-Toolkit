@@ -1,37 +1,46 @@
-.venv
-.env
-downloaded_*
+# Local environments and credentials
 .venv/
-scripts/.formosan_qc_repo/
-bash/
-artifacts/
-runs/
-logs/
-corpus_rebuild_*.log
-hf_space_*/
+.env*
+!.env.example
+
+# Corpus inputs, outputs, paid caches, and fetched XML
+Corpora/
 corpus_builds/
+downloaded_*
+processed_corpora/
+protected_corpora/
+pivot_corpora_final/
+raw_corpora/
+scripts/.formosan_qc_repo/
 
-# Python/runtime clutter
-__pycache__/
-*.py[cod]
-.DS_Store
-
-# Generated DeepL pivot corpora and caches. These are expensive to rebuild, so
-# keep protected local copies under protected_corpora/ and mirror them off-box.
-# Protected local corpus payloads are intentionally not versioned. Keep the
-# manifest/checksums in git so clones know what should exist locally.
-protected_corpora/*
-!protected_corpora/README.md
-!protected_corpora/deepl_pivots/
-protected_corpora/deepl_pivots/*
-!protected_corpora/deepl_pivots/README.md
-!protected_corpora/deepl_pivots/MANIFEST.json
-!protected_corpora/deepl_pivots/SHA256SUMS
-
-# Experiment outputs are generated artifacts, not source.
+# Generated experiment artifacts
+artifacts/
+bash/
 formosan_mt_experiments/data/*
 !formosan_mt_experiments/data/.gitkeep
 !formosan_mt_experiments/data/README.md
+formosan_mt_experiments/manifests/
 formosan_mt_experiments/reports/*
 !formosan_mt_experiments/reports/.gitkeep
 !formosan_mt_experiments/reports/README.md
+hf_space_*/
+logs/
+runs/
+corpus_rebuild_*.log
+slurm-*.out
+slurm-*.err
+
+# Models and columnar caches
+*.arrow
+*.ckpt
+*.model
+*.parquet
+*.pt
+*.pth
+*.safetensors
+*.spm
+
+# Python and operating-system clutter
+__pycache__/
+*.py[cod]
+.DS_Store

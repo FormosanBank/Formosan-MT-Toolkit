@@ -60,7 +60,6 @@ from validate_experiment import (  # noqa: E402
     validate_splits,
     validate_tags,
 )
-from verify_experiment_manifest import manifest_errors  # noqa: E402
 from write_submission_manifest import (  # noqa: E402
     build_job_graph,
     corpus_record,
@@ -1184,31 +1183,6 @@ class ExperimentManifestTests(unittest.TestCase):
             (state / "validate_zh.id").write_text("not-a-job\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 read_job_ids(state)
-
-    def test_tracked_current_manifest_is_arithmetically_complete(self) -> None:
-        path = ROOT / "formosan_mt_experiments/manifests/no_bible_v1_20260712.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest_errors(manifest), [])
-        self.assertEqual(set(manifest["corpora"]), {
-            "public_no_bible_en",
-            "public_no_bible_zh",
-            "private_no_bible_en",
-            "private_no_bible_zh",
-        })
-        for corpus in manifest["corpora"].values():
-            self.assertEqual(sum(corpus["splits"].values()), corpus["rows"])
-            self.assertGreaterEqual(corpus["splits"]["test"] / corpus["rows"], 0.075)
-            self.assertGreaterEqual(corpus["splits"]["validate"] / corpus["rows"], 0.025)
-            self.assertTrue(all(value == 0 for value in corpus["validation"].values()))
-
-        jobs = manifest["jobs"]
-        all_ids: list[int] = []
-        for scope in jobs.values():
-            for value in scope.values():
-                all_ids.extend(value if isinstance(value, list) else [value])
-        self.assertEqual(len(all_ids), 32)
-        self.assertEqual(len(set(all_ids)), 32)
-
 
 if __name__ == "__main__":
     unittest.main()

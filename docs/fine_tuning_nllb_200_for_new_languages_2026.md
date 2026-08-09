@@ -10,7 +10,6 @@ A practical successor to David Dale's NLLB tutorial, updated for current `transf
 
 **Author:** Hunter Scheppat, Boston College  
 **Project:** AI4CommSci Lab / FormosanBank  
-**Associated notebook:** `NLLB_200_MT.ipynb`
 
 NLLB-200 is still one of the most useful open baselines for low-resource machine translation. The model already knows 200 language varieties, but many languages are missing, underrepresented, or poorly tokenized. This post shows how to adapt NLLB-200 to a new language pair with modern Hugging Face tooling.
 
