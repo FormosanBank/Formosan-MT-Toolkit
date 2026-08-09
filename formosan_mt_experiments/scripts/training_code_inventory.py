@@ -11,6 +11,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
     "configs/madlad400_3b_native.json",
     "scripts/build_experiment_splits.py",
+    "scripts/columnar_cache.py",
     "scripts/evaluate_directional.py",
     "scripts/experiment_config.py",
     "scripts/formosan_mt_inference.py",

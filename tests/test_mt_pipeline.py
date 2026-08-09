@@ -1103,6 +1103,10 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
+            "formosan_mt_experiments/scripts/columnar_cache.py",
+            repository_paths,
+        )
+        self.assertIn(
             "formosan_mt_experiments/scripts/evaluate_directional.py",
             repository_paths,
         )
