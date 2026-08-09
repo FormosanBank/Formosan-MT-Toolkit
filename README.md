@@ -109,6 +109,11 @@ quarantine ledger. They are processed outcomes, not unresolved translations.
 Missing cache entries, provider errors, exhausted quota, or deferred requests
 still fail the build and prevent pivot outputs from being promoted.
 
+DeepL may return different valid translations for an identical request over
+time. Layered caches are loaded in increasing priority order, with the writable
+build cache last. The selected translation and every shadowed alternative are
+recorded in a checksummed cache-conflict ledger included with corpus provenance.
+
 Fetches resolve repository heads once per named build, record the immutable
 commit set in `source_repository_snapshot.json`, and reuse it for every
 language. Private repositories are traversed only under `Final_XML`; public

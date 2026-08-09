@@ -130,6 +130,9 @@ class DirectionStats:
     errors: int = 0
     cache_path: Optional[str] = None
     read_cache_paths: Optional[list[str]] = None
+    cache_conflicts: int = 0
+    cache_conflict_path: Optional[str] = None
+    cache_conflict_sha256: Optional[str] = None
     output_path: Optional[str] = None
     quarantine_path: Optional[str] = None
     quarantine_sha256: Optional[str] = None
@@ -512,16 +515,44 @@ def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
     return cache
 
 
-def load_cache_chain(cache_paths: Iterable[Path]) -> dict[str, dict[str, Any]]:
-    """Load cache files in order and reject conflicting records."""
+def load_cache_chain(
+    cache_paths: Iterable[Path],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Load cache layers in increasing priority order and audit conflicts."""
     merged: dict[str, dict[str, Any]] = {}
+    selected_paths: dict[str, Path] = {}
+    conflicts: list[dict[str, Any]] = []
     for cache_path in cache_paths:
         for key, record in load_cache(cache_path).items():
             existing = merged.get(key)
             if existing is not None and existing.get("translation") != record.get("translation"):
-                raise RuntimeError(f"Conflicting DeepL translations for cache key {key} across cache chain")
+                conflicts.append(
+                    {
+                        "cache_key": key,
+                        "text": str(record.get("text") or existing.get("text") or ""),
+                        "lower_priority_cache": str(selected_paths[key]),
+                        "lower_priority_created_at": str(existing.get("created_at") or ""),
+                        "lower_priority_translation": str(existing.get("translation") or ""),
+                        "higher_priority_cache": str(cache_path),
+                        "higher_priority_created_at": str(record.get("created_at") or ""),
+                        "selected_translation": str(record.get("translation") or ""),
+                        "selection_policy": "later_cache_wins",
+                    }
+                )
             merged[key] = record
-    return merged
+            selected_paths[key] = cache_path
+    return merged, conflicts
+
+
+def write_jsonl_atomic(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -689,10 +720,23 @@ def translate_direction(
     read_cache_paths = [cache_dir / direction.cache_filename for cache_dir in getattr(args, "read_cache_dir", [])]
     cache_path = args.cache_dir / direction.cache_filename
     error_path = args.cache_dir / direction.cache_filename.replace(".jsonl", ".errors.jsonl")
-    cache = load_cache_chain([*read_cache_paths, cache_path])
+    cache, cache_conflicts = load_cache_chain([*read_cache_paths, cache_path])
     stats.cache_path = str(cache_path)
     stats.read_cache_paths = [str(path) for path in read_cache_paths]
     stats.cached_unique_before = len(cache)
+    stats.cache_conflicts = len(cache_conflicts)
+    conflict_path = args.out_dir / f"pivot_cache_conflicts_{direction.name}.jsonl"
+    if cache_conflicts:
+        print(
+            f"{direction.name}: {len(cache_conflicts):,} cache conflicts; "
+            f"using the later, higher-priority cache layer"
+        )
+        if not args.dry_run:
+            write_jsonl_atomic(conflict_path, cache_conflicts)
+            stats.cache_conflict_path = str(conflict_path)
+            stats.cache_conflict_sha256 = sha256_file(conflict_path)
+    elif not args.dry_run:
+        conflict_path.unlink(missing_ok=True)
 
     jobs = candidate_jobs(
         source_df,

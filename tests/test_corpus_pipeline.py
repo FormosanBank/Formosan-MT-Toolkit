@@ -68,6 +68,7 @@ from pipeline_common import load_pipeline_config  # noqa: E402
 from pivot import (  # noqa: E402
     Direction,
     load_cache,
+    load_cache_chain,
     make_cache_key,
     synthetic_row,
     write_pivot_output,
@@ -1342,6 +1343,52 @@ class PivotContractTests(unittest.TestCase):
             }
         )
 
+    def test_layered_cache_uses_later_record_and_audits_provider_variation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public_cache = root / "public.jsonl"
+            private_cache = root / "private.jsonl"
+            key = make_cache_key(
+                provider="deepl",
+                source_lang="EN",
+                target_lang="ZH-HANT",
+                text="cry",
+                split_sentences="0",
+                preserve_formatting=True,
+                model_type="prefer_quality_optimized",
+            )
+
+            def record(translation: str, created_at: str) -> dict[str, object]:
+                return {
+                    "key": key,
+                    "provider": "deepl",
+                    "source_lang": "EN",
+                    "target_lang": "ZH-HANT",
+                    "text": "cry",
+                    "translation": translation,
+                    "split_sentences": "0",
+                    "preserve_formatting": True,
+                    "model_type_requested": "prefer_quality_optimized",
+                    "created_at": created_at,
+                }
+
+            public_cache.write_text(
+                json.dumps(record("哭", "2026-08-09T04:30:43Z"), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            private_cache.write_text(
+                json.dumps(record("哭泣", "2026-07-12T22:36:04Z"), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            cache, conflicts = load_cache_chain([public_cache, private_cache])
+
+            self.assertEqual(cache[key]["translation"], "哭泣")
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0]["lower_priority_translation"], "哭")
+            self.assertEqual(conflicts[0]["selected_translation"], "哭泣")
+            self.assertEqual(conflicts[0]["selection_policy"], "later_cache_wins")
+
     def test_synthetic_output_is_train_only_and_retains_source_provenance(self) -> None:
         row, reason = synthetic_row(
             self.source_row(),
@@ -1491,7 +1538,7 @@ class PivotContractTests(unittest.TestCase):
                 (output_dir / "big_corpus_en_pivot.csv").exists()
             )
 
-    def test_training_bundle_includes_hashed_pivot_quarantine(self) -> None:
+    def test_training_bundle_includes_hashed_pivot_ledgers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             processed = root / "processed"
@@ -1509,6 +1556,12 @@ class PivotContractTests(unittest.TestCase):
             quarantine_hash = hashlib.sha256(
                 quarantine.read_bytes()
             ).hexdigest()
+            conflicts = pivot_dir / "pivot_cache_conflicts_zh2en.jsonl"
+            conflicts.write_text(
+                '{"cache_key":"fixture","selection_policy":"later_cache_wins"}\n',
+                encoding="utf-8",
+            )
+            conflicts_hash = hashlib.sha256(conflicts.read_bytes()).hexdigest()
             (pivot_dir / "pivot_manifest.json").write_text(
                 json.dumps(
                     {
@@ -1518,6 +1571,8 @@ class PivotContractTests(unittest.TestCase):
                                 "direction": "zh2en",
                                 "quarantine_path": str(quarantine),
                                 "quarantine_sha256": quarantine_hash,
+                                "cache_conflict_path": str(conflicts),
+                                "cache_conflict_sha256": conflicts_hash,
                             }
                         ],
                     }
@@ -1562,6 +1617,12 @@ class PivotContractTests(unittest.TestCase):
             self.assertEqual(
                 bundle["artifacts"][quarantine.name]["sha256"],
                 quarantine_hash,
+            )
+            copied_conflicts = final / "provenance" / conflicts.name
+            self.assertTrue(copied_conflicts.is_file())
+            self.assertEqual(
+                bundle["artifacts"][conflicts.name]["sha256"],
+                conflicts_hash,
             )
 
     def test_aggregate_discovery_ignores_only_pivot_quarantine_ledgers(
