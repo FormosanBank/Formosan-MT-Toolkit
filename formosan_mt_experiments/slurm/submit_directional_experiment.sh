@@ -58,6 +58,22 @@ CORPUS_MANIFEST="${PROJECT_DATA}/${CORPUS_NAME}/provenance/mt_build_manifest.jso
 }
 [[ -r "${PROFILE}" ]] || { echo "Missing profile: ${PROFILE}" >&2; exit 1; }
 
+job_state() {
+  local id="$1"
+  local state=""
+  local attempt
+  for attempt in {1..10}; do
+    state="$(sacct -j "${id}" --starttime 2020-01-01 --noheader \
+      --parsable2 --allocations --format=State 2>/dev/null \
+      | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+    if [[ -n "${state}" ]]; then
+      printf '%s' "${state}"
+      return 0
+    fi
+    sleep 1
+  done
+}
+
 submit_job() {
   local label="$1"
   shift
@@ -65,9 +81,7 @@ submit_job() {
   local out state
   if [[ -s "${record}" ]]; then
     out="$(<"${record}")"
-    state="$(sacct -j "${out}" --starttime 2020-01-01 --noheader \
-      --parsable2 --allocations --format=State 2>/dev/null \
-      | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+    state="$(job_state "${out}")"
     case "${state}" in
       PENDING*|RUNNING*|CONFIGURING*|COMPLETING*|COMPLETED*)
         echo "${label}=${out} (existing state=${state})"
@@ -101,9 +115,7 @@ dependency_for() {
   for label in "$@"; do
     [[ -s "${STATE_DIR}/${label}.id" ]] || continue
     id="$(job_id "${label}")"
-    state="$(sacct -j "${id}" --starttime 2020-01-01 --noheader \
-      --parsable2 --allocations --format=State 2>/dev/null \
-      | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+    state="$(job_state "${id}")"
     case "${state}" in
       COMPLETED*) ;;
       PENDING*|RUNNING*|CONFIGURING*|COMPLETING*) ids+=("${id}") ;;
@@ -315,9 +327,7 @@ submit_direction() {
 
   local train_id train_state
   train_id="$(job_id "train_${direction}")"
-  train_state="$(sacct -j "${train_id}" --starttime 2020-01-01 --noheader \
-    --parsable2 --allocations --format=State 2>/dev/null \
-    | awk -F'|' 'NF && $1 != "" {print $1; exit}')"
+  train_state="$(job_state "${train_id}")"
   local eval_dependency=""
   case "${train_state}" in
     COMPLETED*) ;;
