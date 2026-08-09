@@ -1,13 +1,13 @@
 {
-  "schema_version": 2,
-  "pipeline_version": "formosan-mt-corpus-v2",
+  "schema_version": 3,
+  "pipeline_version": "formosan-mt-corpus-v3",
   "formosanbank": {
     "org": "FormosanBank",
     "repo": "FormosanBank",
     "qc_revision": "c6c1d06010f54e80e08b14ab2aa8099c3e2284eb"
   },
   "cleaning": {
-    "profile": "formosan-mt-v2",
+    "profile": "formosan-mt-v3",
     "unicode_normalization": "NFC",
     "require_standard_form": true,
     "preserve_structural_row_type": true,
@@ -19,6 +19,15 @@
     "trim_form_boundary_whitespace": true,
     "remove_untyped_punctuation_only": true,
     "disambiguate_unreferenced_duplicate_ids": true
+  },
+  "mt_standardization": {
+    "profile": "config/mt_standardization.json",
+    "profile_id": "formosan-mt-standard-v3",
+    "namespace": "formosan-mt",
+    "source_xml_immutable": true,
+    "ambiguous_eval": false,
+    "unclear_eval": false,
+    "formosan_sentence_alias": "formosan_mt_standard"
   },
   "pivot": {
     "require_complete": true,

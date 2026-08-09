@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import pandas as pd
 
@@ -156,7 +156,7 @@ def fertility_reason(
 
 
 def quality_decision(
-    row: pd.Series,
+    row: Mapping[str, object],
     *,
     source_column: str,
     target_column: str,
@@ -170,6 +170,14 @@ def quality_decision(
 
     if str(row.get("kindOf", "standard")).strip().lower() != "standard":
         return QualityDecision("rejected", "non_standard_form")
+    if str(row.get("standard_namespace", "")).strip() != "formosan-mt":
+        return QualityDecision("rejected", "non_mt_standard_namespace")
+    mt_status = str(row.get("mt_normalization_status", "")).strip().lower()
+    if mt_status != "accepted":
+        reason = str(row.get("mt_normalization_reason", "")).strip() or mt_status or "missing"
+        return QualityDecision("quarantine", f"mt_standard:{reason}")
+    if str(row.get("formosan_mt_standard", "")) != source:
+        return QualityDecision("rejected", "mt_standard_alias_mismatch")
     if "456otca" in source.casefold():
         return QualityDecision("rejected", "source_artifact_marker")
     if "*" in source:
@@ -267,9 +275,25 @@ def apply_quality_rules(
     reasons: list[str] = []
     flags: list[str] = []
     counts: Counter[str] = Counter()
-    for _, row in frame.iterrows():
+    decision_columns = list(
+        dict.fromkeys(
+            [
+                source_column,
+                target_column,
+                "row_type",
+                "kindOf",
+                "standard_namespace",
+                "mt_normalization_status",
+                "mt_normalization_reason",
+                "formosan_mt_standard",
+                "contains_unclear",
+            ]
+        )
+    )
+    decision_frame = frame.reindex(columns=decision_columns, fill_value="")
+    for values in decision_frame.itertuples(index=False, name=None):
         decision = quality_decision(
-            row,
+            dict(zip(decision_columns, values)),
             source_column=source_column,
             target_column=target_column,
             target_language=target_language,

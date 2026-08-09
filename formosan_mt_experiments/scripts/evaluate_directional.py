@@ -27,6 +27,7 @@ from model_backends import (
 )
 from mt_common import (
     FORMOSAN_CODES,
+    bool_series,
     cjk_token_count,
     direction_choices,
     is_formosan_to_target,
@@ -97,6 +98,8 @@ def validate_evaluation_contract(
         != profile["model_family"]
         or run_contract.get("profile", {}).get("sha256")
         != profile_record(args.profile)["sha256"]
+        or run_contract.get("mt_standardization")
+        != profile["mt_standardization"]
     ):
         raise SystemExit(
             "Training run contract does not match evaluation inputs"
@@ -554,6 +557,14 @@ def main() -> None:
         raise SystemExit(
             "Evaluation rows must be human sentence pairs"
         )
+    if (
+        not bool_series(
+            evaluation["mt_eval_eligible"],
+            context="evaluation rows:mt_eval_eligible",
+        ).all()
+        or evaluation["mt_normalization_confidence"].astype(str).eq("ambiguous").any()
+    ):
+        raise SystemExit("Evaluation contains MT-ineligible or ambiguous-normalization rows")
     if args.limit_per_lang > 0:
         evaluation = pd.concat(
             [
@@ -694,9 +705,10 @@ def main() -> None:
         bleu_tokenize=bleu_tokenize,
     )
     metrics = {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": True,
         "profile": profile_record(args.profile),
+        "mt_standardization": profile["mt_standardization"],
         "model_family": backend.family,
         "contract": contract,
         "input": str(args.input),

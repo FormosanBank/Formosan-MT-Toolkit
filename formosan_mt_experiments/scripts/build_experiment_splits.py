@@ -13,10 +13,13 @@ from itertools import chain
 from pathlib import Path
 
 import pandas as pd
+from columnar_cache import write_columnar_cache
 from mt_common import (
     EASY_BUCKETS,
     add_normalized_columns,
+    bool_series,
     bucket_counts,
+    mt_standard_contract,
     normalize_target_language,
     read_parallel_csv,
     split_counts,
@@ -286,7 +289,11 @@ def evaluation_masks(
     sentence = frame["row_type"].astype(str).eq("sentence")
     flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
     clean = ~flags.str.contains(r"(?:contains_unclear|unknown_row_type)", regex=True)
-    human_sentence = ~synthetic & sentence & clean
+    mt_eval_eligible = bool_series(
+        frame["mt_eval_eligible"],
+        context="hard-split input:mt_eval_eligible",
+    )
+    human_sentence = ~synthetic & sentence & clean & mt_eval_eligible
     hard = (
         human_sentence
         & ~frame["_source_bucket"].isin(EASY_BUCKETS)
@@ -623,11 +630,13 @@ def build_hard_split(
     min_validate_rows: int,
     ngram_threshold: float,
     registry_in: Path | None,
+    preserve_internal: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     if "row_id" not in frame.columns or frame["row_id"].astype(str).duplicated().any():
         raise SystemExit("Input must contain unique stable row_id values")
     if "kindOf" not in frame.columns or not frame["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Hard splitting requires every row to use kindOf=standard")
+    mt_profile = mt_standard_contract(frame, context="hard-split input")
 
     frame = frame.copy()
     frame["_document_key"] = (
@@ -856,7 +865,7 @@ def build_hard_split(
 
     overlaps = overlap_summary(train, evaluation)
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": not ratio_shortfalls,
         "tier": TIER,
         "input_rows": len(frame) + len(duplicate_rows),
@@ -877,6 +886,21 @@ def build_hard_split(
             (
                 output.get("pivot_origin", pd.Series("original", index=output.index))
                 .eq("synthetic")
+                & output["split"].isin({"test", "validate"})
+            ).sum()
+        ),
+        "mt_ineligible_eval_rows": int(
+            (
+                ~bool_series(
+                    output["mt_eval_eligible"],
+                    context="hard-split output:mt_eval_eligible",
+                )
+                & output["split"].isin({"test", "validate"})
+            ).sum()
+        ),
+        "ambiguous_normalization_eval_rows": int(
+            (
+                output["mt_normalization_confidence"].astype(str).eq("ambiguous")
                 & output["split"].isin({"test", "validate"})
             ).sum()
         ),
@@ -903,6 +927,7 @@ def build_hard_split(
         "split_counts": split_counts(output),
         "split_counts_by_language": split_counts_by_language(output),
         "bucket_counts": bucket_counts(output),
+        "mt_standardization": mt_profile,
         "languages": language_reports,
         "ratio_basis": "all_deduplicated_input_rows",
         "required_ratios": {"test": test_ratio, "validate": val_ratio},
@@ -917,6 +942,8 @@ def build_hard_split(
         )
 
     internal_columns = [column for column in output.columns if column.startswith("_")]
+    if preserve_internal:
+        return output, excluded, duplicate_rows, report
     return (
         output.drop(columns=internal_columns),
         excluded.drop(columns=[column for column in internal_columns if column in excluded]),
@@ -932,6 +959,8 @@ def validate_report(report: dict) -> None:
     for key in (
         "synthetic_eval_rows",
         "lexeme_eval_rows",
+        "mt_ineligible_eval_rows",
+        "ambiguous_normalization_eval_rows",
         "document_overlap_train_eval",
         "document_overlap_validate_test",
         "near_duplicate_train_eval_rows",
@@ -955,10 +984,11 @@ def validate_report(report: dict) -> None:
 def write_registry(path: Path, output: pd.DataFrame, report: dict) -> None:
     evaluation = output[output["split"].isin({"test", "validate"})]
     payload = {
-        "schema_version": 1,
+        "schema_version": 3,
         "complete": True,
         "tier": TIER,
         "ratio_basis": report["ratio_basis"],
+        "mt_standardization": report["mt_standardization"],
         "evaluation_rows": [
             {
                 "row_id": str(row["row_id"]),
@@ -1005,7 +1035,7 @@ def main() -> None:
     args = parse_args()
     requested_tiers = {value.strip() for value in args.tiers.split(",") if value.strip()}
     if requested_tiers != {TIER}:
-        raise SystemExit(f"Corpus pipeline v2 supports only --tiers {TIER}")
+        raise SystemExit(f"Corpus pipeline v3 supports only --tiers {TIER}")
     if abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) > 1e-9:
         raise SystemExit("Split ratios must sum to 1.0")
     if not 0.5 <= args.ngram_jaccard_threshold <= 1.0:
@@ -1037,8 +1067,15 @@ def main() -> None:
         min_validate_rows=args.min_validate_rows,
         ngram_threshold=args.ngram_jaccard_threshold,
         registry_in=args.registry_in,
+        preserve_internal=True,
     )
     validate_report(report)
+
+    internal_columns = [column for column in output.columns if column.startswith("_")]
+    release_output = output.drop(columns=internal_columns)
+    release_excluded = excluded.drop(
+        columns=[column for column in internal_columns if column in excluded]
+    )
 
     full_path = args.output_dir / f"{output_prefix}_{TIER}.csv"
     test_path = args.output_dir / f"{output_prefix}_{TIER}_test.csv"
@@ -1046,12 +1083,13 @@ def main() -> None:
     excluded_path = args.output_dir / f"{output_prefix}_{TIER}_excluded.csv"
     duplicate_path = args.output_dir / f"{output_prefix}_{TIER}_duplicates.csv"
     registry_path = args.output_dir / "benchmark_registry.json"
-    output.to_csv(full_path, index=False)
-    output[output["split"].eq("test")].to_csv(test_path, index=False)
-    output[output["split"].eq("validate")].to_csv(validate_path, index=False)
-    excluded.to_csv(excluded_path, index=False)
+    release_output.to_csv(full_path, index=False)
+    release_output[release_output["split"].eq("test")].to_csv(test_path, index=False)
+    release_output[release_output["split"].eq("validate")].to_csv(validate_path, index=False)
+    release_excluded.to_csv(excluded_path, index=False)
     duplicates.to_csv(duplicate_path, index=False)
-    write_registry(registry_path, output, report)
+    write_registry(registry_path, release_output, report)
+    columnar_path = write_columnar_cache(output, full_path)
     report["files"] = {
         "full": str(full_path),
         "test": str(test_path),
@@ -1059,12 +1097,13 @@ def main() -> None:
         "excluded": str(excluded_path),
         "duplicates": str(duplicate_path),
         "benchmark_registry": str(registry_path),
+        "full_columnar": str(columnar_path),
     }
     write_json(args.output_dir / f"report_{TIER}.json", report)
     write_json(
         args.output_dir / "report_all_tiers.json",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "complete": True,
             "input": str(args.input),
             "target_lang": target_language,

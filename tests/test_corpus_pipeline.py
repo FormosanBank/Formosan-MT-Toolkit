@@ -20,10 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
-from build_big_corpus import discover_inputs  # noqa: E402
+from build_big_corpus import (  # noqa: E402
+    discover_inputs,
+    estimated_output_bytes,
+    write_csv_atomic,
+)
 from build_mt_corpus import (  # noqa: E402
     BuildPaths,
     package_training_provenance,
+    replace_with_hardlink,
 )
 from clean_xml import (  # noqa: E402
     audit_standard_tiers,
@@ -40,10 +45,12 @@ from corpus_quality import (  # noqa: E402
 )
 from fetch_xml import (  # noqa: E402
     classify_xml,
+    download_blob_for_languages,
     get_tree,
     git_blob_sha,
     load_or_create_repository_snapshot,
     repository_selection,
+    resolve_default_repository_refs,
     write_blob_cache,
 )
 from filter_split_corpus import (  # noqa: E402
@@ -51,11 +58,24 @@ from filter_split_corpus import (  # noqa: E402
     print_filter_rule_summary,
     read_csv,
 )
-from make_corpus import extract_file  # noqa: E402
+from make_corpus import extract_file, extract_file_targets  # noqa: E402
+from mt_standardization import (  # noqa: E402
+    DEFAULT_PROFILE_PATH,
+    StandardizationContext,
+    assert_idempotent,
+    standardize_text,
+)
+from mt_standardization import (
+    load_profile as load_mt_standard_profile,
+)
+from mt_standardization import (
+    profile_sha256 as mt_profile_sha256,
+)
 from pipeline_common import load_pipeline_config  # noqa: E402
 from pivot import (  # noqa: E402
     Direction,
     load_cache,
+    load_cache_chain,
     make_cache_key,
     synthetic_row,
     write_pivot_output,
@@ -65,10 +85,243 @@ from qc_change_audit import (  # noqa: E402
 )
 from qc_reporting import (  # noqa: E402
     parse_cleaner_transformation,
+    print_qc_rule_summary,
     run_cleaner_command,
     summarize_validator_findings,
 )
+from stage_cache import cached_stage_valid, record_cached_stage  # noqa: E402
 from xml_repairs import repair_mt_xml_structure  # noqa: E402
+
+MT_PROFILE = load_mt_standard_profile(DEFAULT_PROFILE_PATH)
+MT_PROFILE_HASH = mt_profile_sha256(DEFAULT_PROFILE_PATH)
+
+
+def text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def mt_contract_fields(
+    text: str,
+    *,
+    row_type: str = "sentence",
+    pivot_origin: str = "original",
+    confidence: str = "unchanged",
+) -> dict[str, object]:
+    return {
+        "kindOf": "standard",
+        "standard_namespace": "formosan-mt",
+        "formosan_mt_standard": text,
+        "mt_standard_sha256": text_sha256(text),
+        "mt_normalization_status": "accepted",
+        "mt_normalization_confidence": confidence,
+        "mt_eval_eligible": (
+            pivot_origin == "original"
+            and row_type == "sentence"
+            and confidence in {"unchanged", "safe"}
+        ),
+        "mt_normalization_reason": "",
+        "mt_standard_profile": MT_PROFILE["profile_id"],
+        "mt_standard_profile_sha256": MT_PROFILE_HASH,
+    }
+
+
+def mt_records_for_xml(
+    path: Path,
+    directory: Path,
+    *,
+    language: str = "ami",
+) -> dict[tuple[str, str, int, str], dict[str, object]]:
+    relative = str(path.relative_to(directory))
+    repository = Path(relative).parts[0] if Path(relative).parts else "FixtureRepo"
+    records: dict[tuple[str, str, int, str], dict[str, object]] = {}
+    unit_index = 0
+    for element in ET.parse(path).getroot().iter():
+        if element.tag not in {"S", "W", "M"}:
+            continue
+        element_index = unit_index
+        unit_index += 1
+        xml_id = (element.get("id") or "").strip()
+        standard = element.find("FORM[@kindOf='standard']")
+        original = element.find("FORM[@kindOf='original']")
+        selected = standard if standard is not None else original
+        source_standard = (
+            "" if selected is None else "".join(selected.itertext()).strip()
+        )
+        original_text = (
+            "" if original is None else "".join(original.itertext()).strip()
+        )
+        contains_unclear = (
+            selected is not None
+            and selected.find(".//UNCLEAR") is not None
+        )
+        row_type = {"S": "sentence", "W": "lexeme", "M": "morpheme"}[
+            element.tag
+        ]
+        context = StandardizationContext(
+            language=language,
+            row_type=row_type,
+            repository=repository,
+            xml_path=relative,
+        )
+        result = standardize_text(
+            source_standard,
+            context=context,
+            profile=MT_PROFILE,
+            contains_unclear=contains_unclear,
+        )
+        assert_idempotent(result, context=context, profile=MT_PROFILE)
+        records[(relative, element.tag, element_index, xml_id)] = {
+            "standard_origin": (
+                "provided" if standard is not None else "derived_from_original"
+            ),
+            "formosan_original_raw": original_text,
+            "formosan_source_standard": source_standard,
+            "formosan_mt_standard": result.text,
+            "source_standard_sha256": text_sha256(source_standard),
+            "mt_standard_sha256": text_sha256(result.text),
+            "contains_unclear_source": contains_unclear,
+            "mt_normalization_status": result.status,
+            "mt_normalization_confidence": result.confidence,
+            "mt_eval_eligible": result.eval_eligible,
+            "mt_normalization_reason": result.reason,
+            "mt_transformations": json.dumps(result.transformations),
+            "mt_unresolved_markers": "|".join(result.unresolved_markers),
+            "speaker_label": result.speaker_label,
+            "mt_standard_profile": MT_PROFILE["profile_id"],
+            "mt_standard_profile_sha256": MT_PROFILE_HASH,
+        }
+    return records
+
+
+class MTStandardizationTests(unittest.TestCase):
+    def test_profile_pins_standardizer_implementation(self) -> None:
+        implementation = ROOT / "scripts/local/mt_standardization.py"
+        self.assertEqual(
+            MT_PROFILE["implementation_sha256"],
+            hashlib.sha256(implementation.read_bytes()).hexdigest(),
+        )
+
+    def standardize(
+        self,
+        value: str,
+        *,
+        language: str = "ami",
+        row_type: str = "sentence",
+        profile: dict[str, object] | None = None,
+    ):
+        context = StandardizationContext(
+            language=language,
+            row_type=row_type,
+            repository="FixtureRepo",
+            xml_path="Final_XML/fixture.xml",
+        )
+        result = standardize_text(
+            value,
+            context=context,
+            profile=profile or MT_PROFILE,
+        )
+        assert_idempotent(
+            result,
+            context=context,
+            profile=profile or MT_PROFILE,
+        )
+        return result
+
+    def test_observed_notation_families_are_deterministic(self) -> None:
+        cases = {
+            "ma-ku-ta-mul": ("makutamul", "safe", True),
+            "k<om>aen": ("komaen", "safe", True),
+            "cinim∅kee": ("cinimkee", "safe", True),
+            "lemang(e)da": ("lemangeda", "ambiguous", False),
+            "imatiya/hatini": ("imatiya", "ambiguous", False),
+            "lali:ma": ("lali:ma", "unchanged", True),
+            "== tjevus ==": ("tjevus", "safe", True),
+            "mn_gluw": ("mngluw", "ambiguous", False),
+            "Speaker: malu": (
+                "Speaker: malu",
+                "unchanged",
+                True,
+            ),
+            "a ~ b": ("a", "ambiguous", False),
+            "itaial ~ 'taial ~ taial": ("itaial", "ambiguous", False),
+            "{um}ali": ("umali", "safe", True),
+            "mha oy~~~ binah": ("mha oy binah", "safe", True),
+            "a~ sawni qaniy ga _~ aw yaqu": (
+                "a sawni qaniy ga yaqu",
+                "ambiguous",
+                False,
+            ),
+            "kalin(-na)-lumah=in": (
+                "kalinnalumahin",
+                "ambiguous",
+                False,
+            ),
+            "kali(n(na)luma)hin": (
+                "kalinnalumahin",
+                "ambiguous",
+                False,
+            ),
+            "  Speaker: malu  ": (
+                "Speaker: malu",
+                "safe",
+                True,
+            ),
+            "東壘(turuy)- kn-bong": (
+                "東壘turuy knbong",
+                "ambiguous",
+                False,
+            ),
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                result = self.standardize(source)
+                self.assertEqual(
+                    (result.text, result.confidence, result.eval_eligible),
+                    expected,
+                )
+                self.assertEqual(result.status, "accepted")
+
+    def test_initial_label_is_metadata_not_deleted_text(self) -> None:
+        source = 'Sowal ni Yis: "Ano cima ko Kawas?"'
+        result = self.standardize(source)
+        self.assertEqual(result.text, source)
+        self.assertEqual(result.speaker_label, "Sowal ni Yis")
+        self.assertEqual(result.transformations, ())
+
+    def test_unresolved_or_nonlinguistic_input_is_not_accepted(self) -> None:
+        self.assertEqual(
+            self.standardize("https://example.org/a/b").status,
+            "quarantine",
+        )
+        self.assertEqual(
+            self.standardize("a____b").status,
+            "quarantine",
+        )
+        self.assertEqual(self.standardize("∅").status, "ineligible")
+
+    def test_profile_applies_consistently_to_all_formosan_languages(self) -> None:
+        for language in (
+            "ami", "bnn", "ckv", "dru", "pwn", "pyu", "ssf", "sxr",
+            "szy", "tao", "tay", "trv", "tsu", "xnb", "xsy",
+        ):
+            with self.subTest(language=language):
+                result = self.standardize("ma-ku", language=language)
+                self.assertEqual(result.text, "maku")
+                self.assertTrue(result.eval_eligible)
+
+    def test_reviewed_source_override_can_enable_ambiguous_eval(self) -> None:
+        profile = json.loads(json.dumps(MT_PROFILE))
+        profile["source_overrides"] = [
+            {
+                "repository": "FixtureRepo",
+                "path_regex": "Final_XML/fixture\\.xml$",
+                "reviewed_ambiguous": True,
+                "policy": {},
+            }
+        ]
+        result = self.standardize("lemang(e)da", profile=profile)
+        self.assertEqual(result.confidence, "ambiguous")
+        self.assertTrue(result.eval_eligible)
 
 
 class StandardTierTests(unittest.TestCase):
@@ -221,12 +474,11 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
             self.assertEqual(
-                extraction[
-                    "untranscribed_or_unclear_sentences_skipped"
-                ],
+                extraction["mt_ineligible:empty_source_standard"],
                 1,
             )
 
@@ -269,12 +521,11 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
             self.assertEqual(
-                extraction[
-                    "untranscribed_or_unclear_sentences_skipped"
-                ],
+                extraction["mt_ineligible:contains_unclear"],
                 1,
             )
 
@@ -364,15 +615,19 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"W", "M"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             extracted = {
-                pair.xml_id: pair.formosan_standard for pair in pairs
+                pair.xml_id: pair.formosan_sentence for pair in pairs
             }
-            self.assertEqual(extracted["variant"], "'arup(a)-ara")
-            self.assertEqual(extracted["variant-m"], "usa/bi(n")
+            self.assertEqual(extracted["variant"], "'arupaara")
+            self.assertEqual(extracted["variant-m"], "usa")
             self.assertEqual(extraction["w_units_seen"], 1)
             self.assertEqual(extraction["m_units_seen"], 2)
-            self.assertEqual(extraction["empty_lexical_units_skipped"], 1)
+            self.assertEqual(
+                extraction["mt_ineligible:empty_source_standard"],
+                1,
+            )
             unclear = next(
                 row
                 for row in inventory
@@ -446,6 +701,39 @@ class StandardTierTests(unittest.TestCase):
 
 
 class PipelineReportingTests(unittest.TestCase):
+    def test_v3_qc_summary_does_not_require_legacy_cleaner(self) -> None:
+        result = {
+            "tier_completion": {
+                "standard_copied_from_original": 2,
+            },
+            "repair_inventory": {
+                "path": "_qc_repair_inventory.jsonl",
+                "counts": {"complete_missing_dialect": 3},
+            },
+            "transform_inventory": {
+                "path": "_qc_transform_inventory.jsonl",
+                "records": 10,
+                "retained": 10,
+                "removed_by_cleaner": 0,
+            },
+            "semantic_text_cleaning": {
+                "applied": False,
+                "authority": "formosan-mt-standardization",
+            },
+            "validators": [],
+        }
+        terminal = io.StringIO()
+        with contextlib.redirect_stdout(terminal):
+            print_qc_rule_summary("ami", result)
+        output = terminal.getvalue()
+        self.assertIn("QC rule summary [ami]", output)
+        self.assertIn("standard copied from original: 2", output)
+        self.assertIn("complete missing dialect: 3", output)
+        self.assertIn(
+            "Semantic text cleaning: not applied during XML preparation",
+            output,
+        )
+
     def test_cleaner_filename_chatter_is_logged_not_printed(
         self,
     ) -> None:
@@ -658,6 +946,74 @@ class PipelineReportingTests(unittest.TestCase):
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_multi_language_fetch_parses_and_routes_one_cached_blob(self) -> None:
+        xml_bytes = (
+            b'<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+            b'xml:lang="ami" dialect="Coastal"><S /></TEXT>'
+        )
+        blob = git_blob_sha(xml_bytes)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            cache.mkdir()
+            (cache / f"{blob}.xml").write_bytes(xml_bytes)
+            out_dirs = {"ami": root / "ami", "tay": root / "tay"}
+            for path in out_dirs.values():
+                path.mkdir()
+            with mock.patch.object(fetch_xml, "RAW_XML_CACHE_DIR", cache):
+                result = download_blob_for_languages(
+                    "FormosanBank",
+                    "FixtureRepo",
+                    {"path": "Final_XML/Amis/sample.xml", "sha": blob},
+                    ("ami", "tay"),
+                    None,
+                    "a" * 40,
+                    out_dirs,
+                    None,
+                    download_retries=1,
+                    retry_base_sleep=0,
+                    retry_max_sleep=0,
+                )
+            self.assertEqual(result["ami"].status, "kept")
+            self.assertEqual(result["tay"].status, "source_language_mismatch")
+            self.assertTrue((out_dirs["ami"] / result["ami"].destination).is_file())
+            self.assertFalse(list(out_dirs["tay"].rglob("*.xml")))
+
+    def test_graphql_repository_resolution_preserves_selection_order(self) -> None:
+        response = mock.Mock()
+        response.json.return_value = {
+            "data": {
+                "organization": {
+                    "repositories": {
+                        "nodes": [
+                            {
+                                "name": "RepoA",
+                                "defaultBranchRef": {
+                                    "name": "main",
+                                    "target": {"oid": "a" * 40},
+                                },
+                            },
+                            {
+                                "name": "RepoB",
+                                "defaultBranchRef": {
+                                    "name": "release",
+                                    "target": {"oid": "b" * 40},
+                                },
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        with mock.patch.object(fetch_xml, "api_post", return_value=response):
+            refs = resolve_default_repository_refs(
+                "FormosanBank",
+                ["RepoB", "RepoA"],
+            )
+        self.assertEqual([ref.name for ref in refs], ["RepoB", "RepoA"])
+        self.assertEqual(refs[0].requested_ref, "release")
+
     def test_malformed_xml_is_not_a_language_mismatch(self) -> None:
         status, language, dialect, error = classify_xml(
             b"<TEXT><S>",
@@ -811,6 +1167,55 @@ class AcquisitionTests(unittest.TestCase):
 
 
 class ExtractionAndCleaningTests(unittest.TestCase):
+    def test_combined_extraction_matches_independent_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "sample.xml"
+            path.write_text(
+                '<?xml version="1.0"?>'
+                '<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+                'xml:lang="ami"><S id="s1">'
+                '<FORM kindOf="standard">malu.</FORM>'
+                '<TRANSL xml:lang="eng">Good.</TRANSL>'
+                '<TRANSL xml:lang="zho">很好。</TRANSL>'
+                "</S></TEXT>",
+                encoding="utf-8",
+            )
+            provenance = {
+                "repository": "FixtureRepo",
+                "repository_commit": "a" * 40,
+                "source_path": "sample.xml",
+            }
+            mt_records = mt_records_for_xml(path, directory)
+            combined, combined_stats = extract_file_targets(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                targets={"english": {"eng"}, "chinese": {"zho"}},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            english, english_stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                target_codes={"eng"},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            chinese, chinese_stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                target_codes={"zho"},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            self.assertEqual(combined["english"], english)
+            self.assertEqual(combined["chinese"], chinese)
+            self.assertEqual(combined_stats["english"], english_stats)
+            self.assertEqual(combined_stats["chinese"], chinese_stats)
+
     def test_extraction_uses_standard_and_keeps_original_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -835,6 +1240,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"eng"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(stats["pairs"], 1)
             self.assertEqual(rows[0].formosan_sentence, "maluna.")
@@ -867,6 +1273,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"eng"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(len(rows), 2)
             self.assertEqual(len({row.row_id for row in rows}), 2)
@@ -898,16 +1305,17 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"M"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
-            self.assertEqual(stats["empty_standard"], 1)
-            self.assertEqual(stats["empty_lexical_units_skipped"], 1)
+            self.assertEqual(stats["mt_ineligible:empty_source_standard"], 1)
 
     def test_cleaning_preserves_parentheses_and_structural_sentence_type(self) -> None:
         self.assertEqual(normalize_text("  It is good (today).  ").text, "It is good (today).")
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("hay."),
                     "row_id": "r1",
                     "formosan": "hay.",
                     "english": "Right!",
@@ -940,6 +1348,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("*malu"),
                     "row_id": "asterisk",
                     "ami": "*malu",
                     "english": "bad",
@@ -948,6 +1357,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/a.xml",
                 },
                 {
+                    **mt_contract_fields("456otca"),
                     "row_id": "artifact",
                     "ami": "456otca",
                     "english": "artifact",
@@ -978,6 +1388,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("malu."),
                     "row_id": "r1",
                     "ami": "malu.",
                     "english": "Good.",
@@ -986,6 +1397,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/a.xml",
                 },
                 {
+                    **mt_contract_fields("malu."),
                     "row_id": "r2",
                     "ami": "malu.",
                     "english": "Good.",
@@ -994,6 +1406,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/b.xml",
                 },
                 {
+                    **mt_contract_fields("中文"),
                     "row_id": "r3",
                     "ami": "中文",
                     "english": "Wrong source.",
@@ -1039,6 +1452,7 @@ class PivotContractTests(unittest.TestCase):
     def source_row(self) -> pd.Series:
         return pd.Series(
             {
+                **mt_contract_fields("malu."),
                 "row_id": "human-row",
                 "source_record_id": "source-row",
                 "content_sha256": "old",
@@ -1049,9 +1463,56 @@ class PivotContractTests(unittest.TestCase):
                 "kindOf": "standard",
                 "dialect": "Coastal",
                 "row_type": "sentence",
+                "pivot_origin": "original",
                 "quality_flags": "",
             }
         )
+
+    def test_layered_cache_uses_later_record_and_audits_provider_variation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public_cache = root / "public.jsonl"
+            private_cache = root / "private.jsonl"
+            key = make_cache_key(
+                provider="deepl",
+                source_lang="EN",
+                target_lang="ZH-HANT",
+                text="cry",
+                split_sentences="0",
+                preserve_formatting=True,
+                model_type="prefer_quality_optimized",
+            )
+
+            def record(translation: str, created_at: str) -> dict[str, object]:
+                return {
+                    "key": key,
+                    "provider": "deepl",
+                    "source_lang": "EN",
+                    "target_lang": "ZH-HANT",
+                    "text": "cry",
+                    "translation": translation,
+                    "split_sentences": "0",
+                    "preserve_formatting": True,
+                    "model_type_requested": "prefer_quality_optimized",
+                    "created_at": created_at,
+                }
+
+            public_cache.write_text(
+                json.dumps(record("哭", "2026-08-09T04:30:43Z"), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            private_cache.write_text(
+                json.dumps(record("哭泣", "2026-07-12T22:36:04Z"), ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            cache, conflicts = load_cache_chain([public_cache, private_cache])
+
+            self.assertEqual(cache[key]["translation"], "哭泣")
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0]["lower_priority_translation"], "哭")
+            self.assertEqual(conflicts[0]["selected_translation"], "哭泣")
+            self.assertEqual(conflicts[0]["selection_policy"], "later_cache_wins")
 
     def test_synthetic_output_is_train_only_and_retains_source_provenance(self) -> None:
         row, reason = synthetic_row(
@@ -1103,6 +1564,8 @@ class PivotContractTests(unittest.TestCase):
             original["row_id"] = "original-row"
             original["source_record_id"] = "original-source"
             original["formosan_sentence"] = "misa."
+            original["formosan_mt_standard"] = "misa."
+            original["mt_standard_sha256"] = text_sha256("misa.")
             original["english_sentence"] = "Go."
             original = original.drop(labels=["chinese_sentence"])
             pd.DataFrame([original.to_dict()]).to_csv(
@@ -1167,6 +1630,8 @@ class PivotContractTests(unittest.TestCase):
             original["row_id"] = "original-row"
             original["source_record_id"] = "original-source"
             original["formosan_sentence"] = "misa."
+            original["formosan_mt_standard"] = "misa."
+            original["mt_standard_sha256"] = text_sha256("misa.")
             original["english_sentence"] = "Go."
             original = original.drop(labels=["chinese_sentence"])
             pd.DataFrame([original.to_dict()]).to_csv(
@@ -1198,7 +1663,7 @@ class PivotContractTests(unittest.TestCase):
                 (output_dir / "big_corpus_en_pivot.csv").exists()
             )
 
-    def test_training_bundle_includes_hashed_pivot_quarantine(self) -> None:
+    def test_training_bundle_includes_hashed_pivot_ledgers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             processed = root / "processed"
@@ -1216,6 +1681,12 @@ class PivotContractTests(unittest.TestCase):
             quarantine_hash = hashlib.sha256(
                 quarantine.read_bytes()
             ).hexdigest()
+            conflicts = pivot_dir / "pivot_cache_conflicts_zh2en.jsonl"
+            conflicts.write_text(
+                '{"cache_key":"fixture","selection_policy":"later_cache_wins"}\n',
+                encoding="utf-8",
+            )
+            conflicts_hash = hashlib.sha256(conflicts.read_bytes()).hexdigest()
             (pivot_dir / "pivot_manifest.json").write_text(
                 json.dumps(
                     {
@@ -1225,6 +1696,8 @@ class PivotContractTests(unittest.TestCase):
                                 "direction": "zh2en",
                                 "quarantine_path": str(quarantine),
                                 "quarantine_sha256": quarantine_hash,
+                                "cache_conflict_path": str(conflicts),
+                                "cache_conflict_sha256": conflicts_hash,
                             }
                         ],
                     }
@@ -1270,6 +1743,12 @@ class PivotContractTests(unittest.TestCase):
                 bundle["artifacts"][quarantine.name]["sha256"],
                 quarantine_hash,
             )
+            copied_conflicts = final / "provenance" / conflicts.name
+            self.assertTrue(copied_conflicts.is_file())
+            self.assertEqual(
+                bundle["artifacts"][conflicts.name]["sha256"],
+                conflicts_hash,
+            )
 
     def test_aggregate_discovery_ignores_only_pivot_quarantine_ledgers(
         self,
@@ -1290,6 +1769,36 @@ class PivotContractTests(unittest.TestCase):
                 discover_inputs(root, set()),
                 [pivot, unexpected],
             )
+
+    def test_stage_cache_rejects_modified_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prepared" / "sample.xml"
+            output.parent.mkdir()
+            output.write_text("original", encoding="utf-8")
+            cache_path = root / ".stage_cache" / "ami.json"
+            cache: dict[str, object] = {"schema_version": 1, "stages": {}}
+            paths = BuildPaths(
+                root=root,
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+                final_dir=root / "final",
+                split_root=root / "splits",
+                manifest_path=root / "manifest.json",
+                source_snapshot_path=root / "snapshot.json",
+            )
+            record_cached_stage(
+                paths.root,
+                cache_path,
+                cache,
+                "qc",
+                "stage-key",
+                [output],
+                "ami",
+            )
+            self.assertTrue(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
+            output.write_text("modified", encoding="utf-8")
+            self.assertFalse(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
 
     def test_malformed_cache_is_a_hard_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1453,26 +1962,40 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ensure_standard_tiers(downloaded)
-            qc_records = [
-                {
-                    "transform_id": f"transform-{document}",
-                    "xml_path": str(
-                        Path("FixtureRepo")
-                        / "Final_XML"
-                        / f"doc-{document}.xml"
-                    ),
-                    "element_tag": "S",
-                    "xml_id": f"s-{document}",
-                    "source_element_index": 0,
-                    "final_element_index": 0,
-                    "standard_origin": "provided",
-                    "original_before_qc_sha256": "a" * 64,
-                    "standard_before_qc_sha256": "b" * 64,
-                    "standard_after_qc_sha256": "c" * 64,
-                    "disposition": "retained",
-                }
-                for document in range(20)
-            ]
+            qc_records = []
+            for document in range(20):
+                digest = hashlib.sha256(
+                    f"document-{document}".encode()
+                ).hexdigest()
+                standard = " ".join(
+                    digest[offset : offset + 8]
+                    for offset in range(0, 40, 8)
+                )
+                original = standard.replace(" ", "-")
+                qc_records.append(
+                    {
+                        "transform_id": f"transform-{document}",
+                        "xml_path": str(
+                            Path("FixtureRepo")
+                            / "Final_XML"
+                            / f"doc-{document}.xml"
+                        ),
+                        "element_tag": "S",
+                        "xml_id": f"s-{document}",
+                        "final_xml_id": f"s-{document}",
+                        "source_element_index": 0,
+                        "final_element_index": 0,
+                        "standard_origin": "provided",
+                        "provided_standard_present": True,
+                        "formosan_original_raw": original,
+                        "formosan_source_standard": standard,
+                        "contains_unclear_source": False,
+                        "original_before_qc_sha256": text_sha256(original),
+                        "standard_before_qc_sha256": text_sha256(standard),
+                        "standard_after_qc_sha256": text_sha256(standard),
+                        "disposition": "retained",
+                    }
+                )
             qc_inventory_path = downloaded / "_qc_transform_inventory.jsonl"
             qc_inventory_path.write_text(
                 "".join(
@@ -1484,7 +2007,10 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             (downloaded / "_qc_manifest.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "pipeline_version": "formosan-mt-corpus-v3",
+                        "source_language": "ami",
+                        "source_immutable": True,
                         "formosanbank_qc": {"revision": "d" * 40},
                         "transform_inventory": {
                             "path": qc_inventory_path.name,
@@ -1499,6 +2025,7 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             )
 
             make = ROOT / "scripts/local/make_corpus.py"
+            standardize = ROOT / "scripts/local/standardize_mt_corpus.py"
             clean = ROOT / "scripts/local/filter_split_corpus.py"
             aggregate = ROOT / "scripts/local/build_big_corpus.py"
             pivot_script = ROOT / "scripts/local/pivot.py"
@@ -1509,6 +2036,16 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             validate_script = (
                 ROOT
                 / "formosan_mt_experiments/scripts/validate_experiment.py"
+            )
+
+            self.run_script(
+                standardize,
+                "--xml-dir",
+                downloaded,
+                "--src-lang",
+                "ami",
+                "--profile",
+                DEFAULT_PROFILE_PATH,
             )
 
             for target, short in (("english", "en"), ("chinese", "zh")):
@@ -1666,6 +2203,42 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                         "pivot_origin",
                     ].ne("synthetic").all()
                 )
+
+
+class LargeArtifactSafetyTests(unittest.TestCase):
+    def test_output_estimate_scales_with_input_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.csv"
+            path.write_bytes(b"x" * 1024)
+            self.assertGreater(estimated_output_bytes([path]), path.stat().st_size)
+
+    def test_atomic_csv_write_removes_incomplete_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "corpus.csv"
+            frame = mock.Mock()
+
+            def fail(path: Path, *, index: bool) -> None:
+                Path(path).write_text("partial", encoding="utf-8")
+                raise OSError("disk full")
+
+            frame.to_csv.side_effect = fail
+            with self.assertRaisesRegex(OSError, "disk full"):
+                write_csv_atomic(frame, output)
+
+            self.assertFalse(output.exists())
+            self.assertFalse((output.parent / ".corpus.csv.incomplete").exists())
+
+    def test_final_split_uses_one_physical_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "split.csv"
+            destination = root / "release.csv"
+            source.write_text("a,b\n1,2\n", encoding="utf-8")
+
+            replace_with_hardlink(source, destination)
+
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(destination.stat().st_ino, source.stat().st_ino)
 
 
 if __name__ == "__main__":

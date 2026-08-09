@@ -323,8 +323,6 @@ def print_qc_rule_summary(
         removed_counts["removed_by_pinned_cleaner"] = (
             removed_by_cleaner
         )
-    cleaner = dict(qc_result["cleaner"])
-
     print(f"\nQC rule summary [{src_lang}]")
     print(
         "  XML units: "
@@ -335,53 +333,64 @@ def print_qc_rule_summary(
     _print_counts("Cleaned or repaired", cleaned_counts)
     _print_counts("Removed or quarantined", removed_counts)
 
-    field_changes = dict(cleaner["field_changes"])
-    print(
-        "  Pinned cleaner: "
-        f"{int(cleaner['files_cleaned']):,} files / "
-        f"{int(field_changes['fields_modified']):,} fields modified"
-    )
-    _print_counts(
-        "Pinned cleaner rules",
-        {
-            str(key): int(value)
-            for key, value in dict(
-                field_changes["rule_counts"]
-            ).items()
-        },
-    )
+    cleaner_value = qc_result.get("cleaner")
+    if isinstance(cleaner_value, dict):
+        cleaner = dict(cleaner_value)
+        field_changes = dict(cleaner["field_changes"])
+        print(
+            "  Pinned cleaner: "
+            f"{int(cleaner['files_cleaned']):,} files / "
+            f"{int(field_changes['fields_modified']):,} fields modified"
+        )
+        _print_counts(
+            "Pinned cleaner rules",
+            {
+                str(key): int(value)
+                for key, value in dict(
+                    field_changes["rule_counts"]
+                ).items()
+            },
+        )
 
-    transformations = list(cleaner.get("character_transformations", []))
-    if transformations:
-        print("  Character transformations:")
-        for row in sorted(
-            transformations,
-            key=lambda item: (
-                -int(item["count"]),
-                str(item["input"]),
-                str(item["output"]),
-            ),
-        ):
-            output = (
-                repr(row["output"])
-                if row["output"]
-                else "<deleted>"
-            )
-            print(
-                f"    {row['input']!r} -> {output}: "
-                f"{int(row['count']):,}"
-            )
+        transformations = list(
+            cleaner.get("character_transformations", [])
+        )
+        if transformations:
+            print("  Character transformations:")
+            for row in sorted(
+                transformations,
+                key=lambda item: (
+                    -int(item["count"]),
+                    str(item["input"]),
+                    str(item["output"]),
+                ),
+            ):
+                output = (
+                    repr(row["output"])
+                    if row["output"]
+                    else "<deleted>"
+                )
+                print(
+                    f"    {row['input']!r} -> {output}: "
+                    f"{int(row['count']):,}"
+                )
 
-    _print_counts(
-        "Cleaner warnings",
-        {
-            str(key): int(value)
-            for key, value in dict(
-                cleaner.get("warning_counts", {})
-            ).items()
-        },
-        labels=False,
-    )
+        _print_counts(
+            "Cleaner warnings",
+            {
+                str(key): int(value)
+                for key, value in dict(
+                    cleaner.get("warning_counts", {})
+                ).items()
+            },
+            labels=False,
+        )
+    else:
+        semantic = dict(qc_result["semantic_text_cleaning"])
+        print(
+            "  Semantic text cleaning: not applied during XML preparation "
+            f"({semantic['authority']})"
+        )
 
     validator_rules: Counter[str] = Counter()
     for validator in list(qc_result["validators"]):

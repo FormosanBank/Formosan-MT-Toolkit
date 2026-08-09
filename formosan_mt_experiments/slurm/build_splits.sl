@@ -1,14 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=formosan_mt_splits
-#SBATCH --account=prudlab
 #SBATCH --partition=short
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=/home/scheppat/logs/%x-%j.out
-#SBATCH --error=/home/scheppat/logs/%x-%j.err
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=ALL
 
 set -euo pipefail
@@ -17,7 +16,7 @@ module purge
 module load miniconda
 conda activate formosan_mt
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
+EXP_DIR="${EXP_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 TARGET_LANG="${TARGET_LANG:-english}"
 case "${TARGET_LANG}" in
   english)
@@ -33,7 +32,7 @@ case "${TARGET_LANG}" in
     exit 1
     ;;
 esac
-PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+PROJECT_DATA="${PROJECT_DATA:-${EXP_DIR}/data/corpora}"
 if [[ -n "${CORPUS_NAME:-}" ]]; then
   CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}/${CORPUS_NAME}}"
 else

@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=formosan_mt_train
-#SBATCH --account=prudlab
 #SBATCH --partition=medium
 #SBATCH --time=2-00:00:00
 #SBATCH --nodes=1
@@ -9,8 +8,8 @@
 #SBATCH --mem=96G
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=vr40g|vr80g|vr144g
-#SBATCH --output=/home/scheppat/logs/%x-%j.out
-#SBATCH --error=/home/scheppat/logs/%x-%j.err
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=ALL
 
 set -euo pipefail
@@ -23,9 +22,9 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
-SCRATCH="${SCRATCH:-/scratch/scheppat/projects/mt}"
-export HF_HOME="${HF_HOME:-/scratch/scheppat/.cache/huggingface}"
+EXP_DIR="${EXP_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+SCRATCH="${SCRATCH:-${HOME}/formosan_mt_work}"
+export HF_HOME="${HF_HOME:-${SCRATCH}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}/hub}"
 mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}"
 TIER="${TIER:-in_domain_hard}"
@@ -51,7 +50,7 @@ case "${TARGET_LANG}" in
     ;;
 esac
 DIRECTION="${DIRECTION:-${DEFAULT_DIRECTION}}"
-PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+PROJECT_DATA="${PROJECT_DATA:-${EXP_DIR}/data/corpora}"
 if [[ -n "${CORPUS_NAME:-}" ]]; then
   CORPUS_DIR="${CORPUS_DIR:-${PROJECT_DATA}/${CORPUS_NAME}}"
   DEFAULT_INPUT="${CORPUS_DIR}/big_corpus_${FILE_SHORT}_${TIER}.csv"

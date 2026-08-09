@@ -37,8 +37,18 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         profile = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Cannot load experiment profile {path}: {exc}") from exc
-    if profile.get("schema_version") != 2:
+    if profile.get("schema_version") != 3:
         raise SystemExit(f"Unsupported experiment profile schema: {path}")
+    mt_standard = profile.get("mt_standardization", {})
+    if (
+        mt_standard.get("id") != "formosan-mt-standard-v3"
+        or mt_standard.get("namespace") != "formosan-mt"
+        or not isinstance(mt_standard.get("sha256"), str)
+        or len(mt_standard["sha256"]) != 64
+    ):
+        raise SystemExit("Experiment profile has an invalid MT-standard contract")
+    if profile.get("corpus_pipeline_version") != "formosan-mt-corpus-v3":
+        raise SystemExit("Experiment profile must use corpus pipeline V3")
     model_family = str(profile.get("model_family") or "nllb").strip().lower()
     profile["model_family"] = model_family
     tokenizer = profile.get("tokenizer", {})

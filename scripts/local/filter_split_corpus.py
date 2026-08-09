@@ -34,6 +34,7 @@ RESERVED_COLUMNS = {
     "qc_final_xml_id",
     "xml_element_index",
     "kindOf",
+    "standard_namespace",
     "standard_origin",
     "original_before_qc_sha256",
     "standard_before_qc_sha256",
@@ -44,6 +45,20 @@ RESERVED_COLUMNS = {
     "row_type",
     "formosan_original",
     "formosan_standard",
+    "formosan_original_raw",
+    "formosan_source_standard",
+    "formosan_mt_standard",
+    "source_standard_sha256",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_normalization_confidence",
+    "mt_eval_eligible",
+    "mt_normalization_reason",
+    "mt_transformations",
+    "mt_unresolved_markers",
+    "speaker_label",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "target_lang",
     "translation_index",
     "translation_kind",
@@ -123,6 +138,7 @@ def validate_extraction_contract(input_path: Path, frame: pd.DataFrame) -> dict:
         "qc_final_xml_id",
         "xml_element_index",
         "kindOf",
+        "standard_namespace",
         "standard_origin",
         "standard_after_qc_sha256",
         "qc_transform_id",
@@ -131,6 +147,15 @@ def validate_extraction_contract(input_path: Path, frame: pd.DataFrame) -> dict:
         "row_type",
         "formosan_original",
         "formosan_standard",
+        "formosan_original_raw",
+        "formosan_source_standard",
+        "formosan_mt_standard",
+        "mt_standard_sha256",
+        "mt_normalization_status",
+        "mt_normalization_confidence",
+        "mt_eval_eligible",
+        "mt_standard_profile",
+        "mt_standard_profile_sha256",
         "target_lang",
     }
     missing = sorted(required - set(frame.columns))
@@ -138,6 +163,21 @@ def validate_extraction_contract(input_path: Path, frame: pd.DataFrame) -> dict:
         raise SystemExit(f"Extracted corpus is missing required provenance columns: {missing}")
     if frame["row_id"].astype(str).duplicated().any():
         raise SystemExit("Extracted row_id values are not unique")
+    if not frame["standard_namespace"].astype(str).eq("formosan-mt").all():
+        raise SystemExit("Extracted rows do not use the Formosan MT standard namespace")
+    if not frame["formosan_sentence"].astype(str).eq(
+        frame["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit("formosan_sentence is not an exact alias of formosan_mt_standard")
+    profiles = frame["mt_standard_profile"].astype(str).str.strip().unique()
+    profile_hashes = frame["mt_standard_profile_sha256"].astype(str).str.strip().unique()
+    if len(profiles) != 1 or not profiles[0] or len(profile_hashes) != 1 or len(profile_hashes[0]) != 64:
+        raise SystemExit("Extracted rows do not have one complete MT standard profile contract")
+    report["validated_mt_standardization"] = {
+        "id": profiles[0],
+        "sha256": profile_hashes[0],
+        "namespace": "formosan-mt",
+    }
     return report
 
 
@@ -271,6 +311,8 @@ def main() -> None:
         )
     if not accepted["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Non-standard rows survived cleaning")
+    if accepted.empty:
+        raise SystemExit("All extracted rows were rejected or quarantined")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     accepted.to_csv(args.output, index=False)
@@ -281,9 +323,12 @@ def main() -> None:
     disposition_counts = Counter(rejected.get("disposition", pd.Series(dtype=str)).astype(str))
     per_rule_counts = filter_rule_counts(rejected)
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "pipeline_version": config["pipeline_version"],
         "cleaning_profile": config["cleaning"]["profile"],
+        "mt_standardization": extraction_report[
+            "validated_mt_standardization"
+        ],
         "created_at": utc_now(),
         "input": str(args.input),
         "output": str(args.output),

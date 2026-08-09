@@ -56,6 +56,12 @@ BASE_COLUMNS = [
     "source_record_id",
     "lang_code",
     "formosan_sentence",
+    "formosan_mt_standard",
+    "standard_namespace",
+    "mt_normalization_status",
+    "mt_eval_eligible",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "source",
     "dialect",
     "row_type",
@@ -124,6 +130,9 @@ class DirectionStats:
     errors: int = 0
     cache_path: Optional[str] = None
     read_cache_paths: Optional[list[str]] = None
+    cache_conflicts: int = 0
+    cache_conflict_path: Optional[str] = None
+    cache_conflict_sha256: Optional[str] = None
     output_path: Optional[str] = None
     quarantine_path: Optional[str] = None
     quarantine_sha256: Optional[str] = None
@@ -346,6 +355,29 @@ def validate_columns(df: pd.DataFrame, path: Path, columns: Iterable[str]) -> No
         raise SystemExit(f"{path} is missing required column(s): {missing}")
 
 
+def validate_mt_standard_contract(df: pd.DataFrame, path: Path) -> dict[str, str]:
+    validate_columns(df, path, BASE_COLUMNS)
+    if not df["standard_namespace"].astype(str).eq("formosan-mt").all():
+        raise SystemExit(f"{path} contains rows outside the Formosan MT namespace")
+    if not df["mt_normalization_status"].astype(str).eq("accepted").all():
+        raise SystemExit(f"{path} contains non-accepted MT standardization rows")
+    if not df["formosan_sentence"].astype(str).eq(
+        df["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit(f"{path} violates the Formosan MT-standard alias contract")
+    profile_ids = set(df["mt_standard_profile"].astype(str).str.strip())
+    profile_hashes = set(df["mt_standard_profile_sha256"].astype(str).str.strip())
+    if len(profile_ids) != 1 or not next(iter(profile_ids), ""):
+        raise SystemExit(f"{path} does not identify one MT standardization profile")
+    profile_hash = next(iter(profile_hashes), "")
+    if len(profile_hashes) != 1 or len(profile_hash) != 64:
+        raise SystemExit(f"{path} does not identify one valid MT standardization profile hash")
+    return {
+        "id": next(iter(profile_ids)),
+        "sha256": profile_hash,
+    }
+
+
 def normalize_key_text(value: Any) -> str:
     text = unicodedata.normalize("NFC", str(value or ""))
     return " ".join(text.split()).strip()
@@ -483,16 +515,44 @@ def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
     return cache
 
 
-def load_cache_chain(cache_paths: Iterable[Path]) -> dict[str, dict[str, Any]]:
-    """Load cache files in order and reject conflicting records."""
+def load_cache_chain(
+    cache_paths: Iterable[Path],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Load cache layers in increasing priority order and audit conflicts."""
     merged: dict[str, dict[str, Any]] = {}
+    selected_paths: dict[str, Path] = {}
+    conflicts: list[dict[str, Any]] = []
     for cache_path in cache_paths:
         for key, record in load_cache(cache_path).items():
             existing = merged.get(key)
             if existing is not None and existing.get("translation") != record.get("translation"):
-                raise RuntimeError(f"Conflicting DeepL translations for cache key {key} across cache chain")
+                conflicts.append(
+                    {
+                        "cache_key": key,
+                        "text": str(record.get("text") or existing.get("text") or ""),
+                        "lower_priority_cache": str(selected_paths[key]),
+                        "lower_priority_created_at": str(existing.get("created_at") or ""),
+                        "lower_priority_translation": str(existing.get("translation") or ""),
+                        "higher_priority_cache": str(cache_path),
+                        "higher_priority_created_at": str(record.get("created_at") or ""),
+                        "selected_translation": str(record.get("translation") or ""),
+                        "selection_policy": "later_cache_wins",
+                    }
+                )
             merged[key] = record
-    return merged
+            selected_paths[key] = cache_path
+    return merged, conflicts
+
+
+def write_jsonl_atomic(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -647,6 +707,12 @@ def translate_direction(
     target_df = read_corpus(direction.original_target_path, f"{direction.name} target corpus")
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
     validate_columns(target_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
+    source_profile = validate_mt_standard_contract(source_df, direction.source_path)
+    target_profile = validate_mt_standard_contract(target_df, direction.original_target_path)
+    if source_profile != target_profile:
+        raise SystemExit(
+            f"{direction.name} source and target corpora use different MT standard profiles"
+        )
     stats.source_rows = len(source_df)
     stats.original_rows = len(target_df)
     target_keys = target_formosan_keys(target_df)
@@ -654,10 +720,23 @@ def translate_direction(
     read_cache_paths = [cache_dir / direction.cache_filename for cache_dir in getattr(args, "read_cache_dir", [])]
     cache_path = args.cache_dir / direction.cache_filename
     error_path = args.cache_dir / direction.cache_filename.replace(".jsonl", ".errors.jsonl")
-    cache = load_cache_chain([*read_cache_paths, cache_path])
+    cache, cache_conflicts = load_cache_chain([*read_cache_paths, cache_path])
     stats.cache_path = str(cache_path)
     stats.read_cache_paths = [str(path) for path in read_cache_paths]
     stats.cached_unique_before = len(cache)
+    stats.cache_conflicts = len(cache_conflicts)
+    conflict_path = args.out_dir / f"pivot_cache_conflicts_{direction.name}.jsonl"
+    if cache_conflicts:
+        print(
+            f"{direction.name}: {len(cache_conflicts):,} cache conflicts; "
+            f"using the later, higher-priority cache layer"
+        )
+        if not args.dry_run:
+            write_jsonl_atomic(conflict_path, cache_conflicts)
+            stats.cache_conflict_path = str(conflict_path)
+            stats.cache_conflict_sha256 = sha256_file(conflict_path)
+    elif not args.dry_run:
+        conflict_path.unlink(missing_ok=True)
 
     jobs = candidate_jobs(
         source_df,
@@ -932,6 +1011,12 @@ def write_pivot_output(
 
     validate_columns(original_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
+    source_profile = validate_mt_standard_contract(source_df, direction.source_path)
+    target_profile = validate_mt_standard_contract(original_df, direction.original_target_path)
+    if source_profile != target_profile:
+        raise SystemExit(
+            f"{direction.name} source and target corpora use different MT standard profiles"
+        )
 
     target_keys = target_formosan_keys(original_df)
     output_path = args.out_dir / direction.output_filename
@@ -1087,6 +1172,18 @@ def write_manifest(
         }
         for name, path in sources.items()
     }
+    source_profiles = {
+        tuple(
+            validate_mt_standard_contract(
+                read_corpus(Path(path), name),
+                Path(path),
+            ).values()
+        )
+        for name, path in sources.items()
+    }
+    if len(source_profiles) != 1:
+        raise SystemExit("Pivot sources do not share one MT standardization profile")
+    profile_id, profile_hash = next(iter(source_profiles))
     cache_records: dict[str, dict[str, Any]] = {}
     for stats in direction_stats:
         for path_string in [*(stats.read_cache_paths or []), stats.cache_path]:
@@ -1099,10 +1196,14 @@ def write_manifest(
                 "bytes": path.stat().st_size if path.is_file() else 0,
             }
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "pipeline_version": load_pipeline_config()["pipeline_version"],
         "created_at": now_iso(),
         "provider": PROVIDER,
+        "mt_standardization": {
+            "id": profile_id,
+            "sha256": profile_hash,
+        },
         "sources": source_records,
         "outputs": {
             "out_dir": str(args.out_dir),
@@ -1201,7 +1302,7 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     ap.add_argument(
         "--splits",
         default="all",
-        help="Compatibility option. Corpus pipeline v2 requires all rows before its single split.",
+        help="Compatibility option. Corpus pipeline v3 requires all rows before its single split.",
     )
     ap.add_argument(
         "--include-target-overlaps",
@@ -1292,7 +1393,7 @@ def main() -> None:
 
     selected_direction_names = parse_directions(args.directions)
     if args.splits.strip().lower() not in {"all", "*"}:
-        raise SystemExit("Corpus pipeline v2 requires --splits all; splitting occurs once after pivoting")
+        raise SystemExit("Corpus pipeline v3 requires --splits all; splitting occurs once after pivoting")
     directions = build_directions(args)
 
     api_key_env_names = parse_api_key_envs(args.api_key_env)

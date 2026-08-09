@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pandas as pd
+from columnar_cache import read_csv_or_columnar
 from experiment_config import sha256_file
 from mt_common import normalize_target_language, target_col_for, write_json
 from tame_mt import CachedSegmentScorer, TameScorer
@@ -26,7 +27,7 @@ EVAL_SPLITS = ("test", "validate")
 
 
 def read_corpus(path: Path, *, target_col: str) -> pd.DataFrame:
-    frame = pd.read_csv(
+    frame = read_csv_or_columnar(
         path,
         dtype=str,
         keep_default_na=False,

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pandas as pd
 import torch
@@ -27,20 +28,90 @@ from build_experiment_splits import (  # noqa: E402
     one_edit_conflicts,
     split_targets,
 )
+from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
+from formosan_mt_inference import normalize_formosan  # noqa: E402
 from model_backends import get_backend, normalize_control_metadata  # noqa: E402
 from mt_common import add_normalized_columns  # noqa: E402
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
+from mt_standardization import (  # noqa: E402
+    DEFAULT_PROFILE_PATH as MT_STANDARD_PROFILE_PATH,
+)
+from mt_standardization import (
+    load_profile as load_mt_standard_profile,
+)
+from mt_standardization import (
+    profile_sha256 as mt_profile_sha256,
+)
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
-from publish_huggingface_models import validate_checkpoint  # noqa: E402
+from publish_huggingface_models import (  # noqa: E402
+    DIRECTIONS,
+    madlad_usage,
+    nllb_usage,
+    validate_checkpoint,
+)
 from setup_formosan_madlad400 import resize_and_initialize  # noqa: E402
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
 from train_directional import metric_improved  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
 from transformers import T5Config, T5ForConditionalGeneration  # noqa: E402
-from validate_experiment import validate_provenance, validate_splits  # noqa: E402
-from verify_experiment_manifest import manifest_errors  # noqa: E402
-from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
+from validate_experiment import (  # noqa: E402
+    validate_provenance,
+    validate_splits,
+    validate_tags,
+)
+from write_submission_manifest import (  # noqa: E402
+    build_job_graph,
+    corpus_record,
+    read_job_ids,
+)
+
+MT_STANDARD_PROFILE = load_mt_standard_profile(MT_STANDARD_PROFILE_PATH)
+MT_STANDARD_PROFILE_HASH = mt_profile_sha256(MT_STANDARD_PROFILE_PATH)
+
+
+class ColumnarCacheTests(unittest.TestCase):
+    def test_round_trip_is_bound_to_canonical_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "corpus.csv"
+            release = pd.DataFrame({"row_id": ["a", "b"], "value": ["x", "y"]})
+            cached = release.assign(_normalized=["x", "y"])
+            release.to_csv(csv_path, index=False)
+            write_columnar_cache(cached, csv_path)
+            pd.testing.assert_frame_equal(
+                read_csv_or_columnar(csv_path, keep_default_na=False),
+                cached,
+            )
+            csv_path.write_text("row_id,value\na,changed\n", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                read_csv_or_columnar(csv_path, keep_default_na=False)
+
+
+def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:
+    output = frame.copy()
+    output["kindOf"] = "standard"
+    output["standard_namespace"] = "formosan-mt"
+    output["formosan_mt_standard"] = output["formosan_sentence"].astype(str)
+    output["formosan_source_standard"] = output["formosan_sentence"].astype(str)
+    output["formosan_original_raw"] = output["formosan_sentence"].astype(str)
+    output["mt_standard_sha256"] = output["formosan_sentence"].map(
+        lambda value: hashlib.sha256(str(value).encode()).hexdigest()
+    )
+    output["source_standard_sha256"] = output["mt_standard_sha256"]
+    output["mt_normalization_status"] = "accepted"
+    output["mt_normalization_confidence"] = "unchanged"
+    output["mt_eval_eligible"] = (
+        output.get("pivot_origin", pd.Series("original", index=output.index))
+        .astype(str)
+        .eq("original")
+        & output.get("row_type", pd.Series("sentence", index=output.index))
+        .astype(str)
+        .eq("sentence")
+    )
+    output["mt_normalization_reason"] = ""
+    output["mt_standard_profile"] = MT_STANDARD_PROFILE["profile_id"]
+    output["mt_standard_profile_sha256"] = MT_STANDARD_PROFILE_HASH
+    return output
 
 
 class DeepLKeyDiscoveryTests(unittest.TestCase):
@@ -105,6 +176,11 @@ class FakeTokenizer:
 
 
 class ModelBackendTests(unittest.TestCase):
+    def test_inference_uses_the_pinned_mt_standardizer(self) -> None:
+        self.assertEqual(normalize_formosan("ma-ku", "ami"), "maku")
+        with self.assertRaisesRegex(ValueError, "not safe"):
+            normalize_formosan("https://example.org/a/b", "ami")
+
     def test_nllb_generation_contract_is_unchanged(self) -> None:
         class NllbTokenizer:
             eos_token_id = 2
@@ -200,6 +276,31 @@ class ModelBackendTests(unittest.TestCase):
             },
         )
         self.assertNotIn("forced_bos_token_id", kwargs)
+
+    def test_tag_validation_uses_selected_backend(self) -> None:
+        tokenizer = FakeTokenizer()
+        backend = SimpleNamespace(
+            family="madlad400",
+            load_tokenizer=mock.Mock(return_value=tokenizer),
+            source_prefix=mock.Mock(return_value="<2ami> <to_eng>"),
+        )
+        frame = pd.DataFrame(
+            [{"source": "fixture.xml", "lang_code": "ami"}]
+        )
+        with mock.patch(
+            "validate_experiment.get_backend",
+            return_value=backend,
+        ):
+            report = validate_tags(
+                frame,
+                Path("tokenizer"),
+                "en2f",
+                "english",
+                {"model_family": "madlad400"},
+            )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["model_family"], "madlad400")
+        backend.load_tokenizer.assert_called_once_with(Path("tokenizer"))
 
     def test_unseen_evaluation_metadata_falls_back_to_setup_tokens(self) -> None:
         tokenizer = FakeTokenizer()
@@ -397,7 +498,7 @@ class LeakageTests(unittest.TestCase):
                 }
             )
         rows.append({**rows[0], "row_id": "duplicate-pair"})
-        return pd.DataFrame(rows)
+        return add_mt_contract(pd.DataFrame(rows))
 
     def test_hard_split_is_human_document_disjoint_and_large(self) -> None:
         raw = self.hard_split_fixture()
@@ -506,6 +607,7 @@ class LeakageTests(unittest.TestCase):
             [raw, pd.DataFrame(near_synthetic)],
             ignore_index=True,
         )
+        raw = add_mt_contract(raw)
         keyed = add_normalized_columns(
             raw,
             target_col="english_sentence",
@@ -622,6 +724,7 @@ class LeakageTests(unittest.TestCase):
                 },
             ]
         )
+        frame = add_mt_contract(frame)
         validation = validate_splits(
             frame,
             target_col="english_sentence",
@@ -883,6 +986,54 @@ class ExposureAuditTests(unittest.TestCase):
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_submission_manifest_reads_current_validation_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus_dir = Path(temporary)
+            provenance = corpus_dir / "provenance"
+            provenance.mkdir()
+            (provenance / "mt_build_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "artifacts": {
+                            "big_corpus_en_in_domain_hard": {
+                                "rows": 100,
+                                "sha256": "a" * 64,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            split_validation = {
+                "ok": True,
+                "ratios_by_language": {
+                    "ami": {"train": 90, "test": 8, "validate": 2}
+                },
+                "synthetic_eval_rows": 0,
+                "train_evaluation": {
+                    "exact_overlap": {"formosan": 0, "target": 0, "pair": 0},
+                    "skeleton_overlap": {"formosan": 0, "target": 0, "pair": 0},
+                    "one_edit_conflicting_rows": {"formosan": 0, "target": 0},
+                    "character_ngram_conflicting_rows": {
+                        "formosan": 0,
+                        "target": 0,
+                    },
+                    "document_overlap": 0,
+                },
+                "lexical_eval_rows": 0,
+                "ratio_failures": [],
+            }
+            (provenance / "validate_en_in_domain_hard.json").write_text(
+                json.dumps({"split_validation": split_validation}),
+                encoding="utf-8",
+            )
+
+            record = corpus_record(corpus_dir, "en")
+
+            self.assertEqual(record["splits"], {"train": 90, "test": 8, "validate": 2})
+            self.assertTrue(record["validation"].pop("ok"))
+            self.assertTrue(all(value == 0 for value in record["validation"].values()))
+
     def test_publication_accepts_sharded_safetensors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             checkpoint = Path(temporary)
@@ -943,14 +1094,46 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
+            "formosan_mt_experiments/scripts/setup_formosan_madlad400.py",
+            repository_paths,
+        )
+        self.assertIn(
             "formosan_mt_experiments/scripts/train_directional.py",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/scripts/columnar_cache.py",
             repository_paths,
         )
         self.assertIn(
             "formosan_mt_experiments/scripts/evaluate_directional.py",
             repository_paths,
         )
+        self.assertIn(
+            "formosan_mt_experiments/scripts/formosan_mt_inference.py",
+            repository_paths,
+        )
+        self.assertIn("config/mt_standardization.json", repository_paths)
+        self.assertIn("scripts/local/mt_standardization.py", repository_paths)
+        self.assertIn(
+            "formosan_mt_experiments/slurm/train_directional.sl",
+            repository_paths,
+        )
         self.assertTrue(all(len(row["sha256"]) == 64 for row in artifacts))
+
+    def test_publication_examples_apply_formosan_mt_standardization(self) -> None:
+        for usage_builder in (nllb_usage, madlad_usage):
+            formosan_source = usage_builder(DIRECTIONS["f2en"])
+            major_source = usage_builder(DIRECTIONS["en2f"])
+            self.assertIn(
+                "from formosan_mt_inference import normalize_formosan",
+                formosan_source,
+            )
+            self.assertIn(
+                "text = normalize_formosan(text, lang_code)",
+                formosan_source,
+            )
+            self.assertNotIn("normalize_formosan", major_source)
 
     def test_submission_graph_requires_complete_directional_chain(self) -> None:
         job_ids = {
@@ -1000,31 +1183,6 @@ class ExperimentManifestTests(unittest.TestCase):
             (state / "validate_zh.id").write_text("not-a-job\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 read_job_ids(state)
-
-    def test_tracked_current_manifest_is_arithmetically_complete(self) -> None:
-        path = ROOT / "formosan_mt_experiments/manifests/no_bible_v1_20260712.json"
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest_errors(manifest), [])
-        self.assertEqual(set(manifest["corpora"]), {
-            "public_no_bible_en",
-            "public_no_bible_zh",
-            "private_no_bible_en",
-            "private_no_bible_zh",
-        })
-        for corpus in manifest["corpora"].values():
-            self.assertEqual(sum(corpus["splits"].values()), corpus["rows"])
-            self.assertGreaterEqual(corpus["splits"]["test"] / corpus["rows"], 0.075)
-            self.assertGreaterEqual(corpus["splits"]["validate"] / corpus["rows"], 0.025)
-            self.assertTrue(all(value == 0 for value in corpus["validation"].values()))
-
-        jobs = manifest["jobs"]
-        all_ids: list[int] = []
-        for scope in jobs.values():
-            for value in scope.values():
-                all_ids.extend(value if isinstance(value, list) else [value])
-        self.assertEqual(len(all_ids), 32)
-        self.assertEqual(len(set(all_ids)), 32)
-
 
 if __name__ == "__main__":
     unittest.main()

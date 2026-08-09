@@ -1,14 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=formosan_mt_validate
-#SBATCH --account=prudlab
 #SBATCH --partition=short
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --output=/home/scheppat/logs/%x-%j.out
-#SBATCH --error=/home/scheppat/logs/%x-%j.err
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=ALL
 
 set -euo pipefail
@@ -17,8 +16,8 @@ module purge
 module load miniconda
 conda activate formosan_mt
 
-EXP_DIR="${EXP_DIR:-/home/scheppat/workspace/projects/mt/formosan_mt_experiments}"
-PROJECT_DATA="${PROJECT_DATA:-/projects/prudlab/formosan_parallel_corpora}"
+EXP_DIR="${EXP_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+PROJECT_DATA="${PROJECT_DATA:-${EXP_DIR}/data/corpora}"
 TIER="${TIER:-in_domain_hard}"
 TARGET_LANG="${TARGET_LANG:?TARGET_LANG is required}"
 CORPUS_NAME="${CORPUS_NAME:?CORPUS_NAME is required}"

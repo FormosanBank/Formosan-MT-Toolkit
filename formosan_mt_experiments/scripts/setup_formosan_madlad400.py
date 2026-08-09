@@ -27,6 +27,7 @@ from model_backends import (
 from mt_common import (
     FORMOSAN_CODES,
     LANG_CODE_TO_CANON,
+    mt_standard_contract,
     read_parallel_csv,
     special_tokens_from_corpus,
 )
@@ -244,6 +245,17 @@ def main() -> None:
         args.input_zh,
         target_col="chinese_sentence",
     )
+    english_mt_standard = mt_standard_contract(english, context=str(args.input_en))
+    chinese_mt_standard = mt_standard_contract(chinese, context=str(args.input_zh))
+    expected_mt_standard = {
+        key: profile["mt_standardization"][key]
+        for key in ("id", "sha256")
+    }
+    if (
+        english_mt_standard != expected_mt_standard
+        or chinese_mt_standard != expected_mt_standard
+    ):
+        raise SystemExit("MADLAD setup inputs use the wrong MT-standard profile")
     combined = pd.concat([english, chinese], ignore_index=True)
     combined = combined.drop_duplicates(
         subset=[
@@ -382,12 +394,16 @@ def main() -> None:
         }
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": True,
         "stage": "madlad_native_ready",
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
         "profile": profile_record(args.profile),
+        "mt_standardization": {
+            **expected_mt_standard,
+            "namespace": profile["mt_standardization"]["namespace"],
+        },
         "repository": git_record(),
         "runtime_dependencies": dependency_versions(),
         "inputs": [

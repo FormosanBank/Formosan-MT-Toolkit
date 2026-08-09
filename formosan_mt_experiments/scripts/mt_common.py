@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 import pandas as pd
+from columnar_cache import read_csv_or_columnar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
@@ -70,6 +71,18 @@ TARGET_CONFIGS = {
 }
 
 EASY_BUCKETS = ("dictionary", "learning_vocab", "classroom_context")
+MT_STANDARD_NAMESPACE = "formosan-mt"
+MT_STANDARD_REQUIRED_COLUMNS = (
+    "kindOf",
+    "standard_namespace",
+    "formosan_mt_standard",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_normalization_confidence",
+    "mt_eval_eligible",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
+)
 
 DEFAULT_DOMAIN_BUCKETS = (
     "dictionary",
@@ -259,16 +272,53 @@ def require_columns(df: pd.DataFrame, columns: Iterable[str], context: str) -> N
         raise SystemExit(f"{context} is missing required columns: {missing}")
 
 
+def bool_series(values: pd.Series, *, context: str) -> pd.Series:
+    normalized = values.astype(str).str.strip().str.lower()
+    invalid = ~normalized.isin({"true", "false", "1", "0"})
+    if invalid.any():
+        examples = sorted(set(normalized[invalid]))[:5]
+        raise SystemExit(f"{context} has invalid boolean values: {examples}")
+    return normalized.isin({"true", "1"})
+
+
+def mt_standard_contract(df: pd.DataFrame, *, context: str) -> dict[str, str]:
+    require_columns(df, MT_STANDARD_REQUIRED_COLUMNS, context)
+    if not df["kindOf"].astype(str).str.strip().str.lower().eq("standard").all():
+        raise SystemExit(f"{context} contains non-standard rows")
+    if not df["standard_namespace"].astype(str).eq(MT_STANDARD_NAMESPACE).all():
+        raise SystemExit(f"{context} contains rows outside the Formosan MT namespace")
+    if not df["mt_normalization_status"].astype(str).eq("accepted").all():
+        raise SystemExit(f"{context} contains non-accepted MT-standard rows")
+    if not df["formosan_sentence"].astype(str).eq(
+        df["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit(f"{context} violates the formosan_sentence MT-standard alias")
+    bool_series(df["mt_eval_eligible"], context=f"{context}:mt_eval_eligible")
+    profile_ids = set(df["mt_standard_profile"].astype(str).str.strip())
+    profile_hashes = set(df["mt_standard_profile_sha256"].astype(str).str.strip())
+    if len(profile_ids) != 1 or not next(iter(profile_ids), ""):
+        raise SystemExit(f"{context} must contain exactly one MT-standard profile ID")
+    profile_hash = next(iter(profile_hashes), "")
+    if len(profile_hashes) != 1 or not re.fullmatch(r"[0-9a-f]{64}", profile_hash):
+        raise SystemExit(f"{context} must contain exactly one valid MT-standard profile hash")
+    return {"id": next(iter(profile_ids)), "sha256": profile_hash}
+
+
 def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.DataFrame:
     # Provenance columns mix empty values and strings. Infer against the whole
     # file so chunk boundaries cannot change dtypes or emit noisy warnings.
-    df = pd.read_csv(
+    df = read_csv_or_columnar(
         path,
         low_memory=False,
         keep_default_na=False,
         na_filter=False,
     )
-    require_columns(df, ["lang_code", "formosan_sentence", target_col, "source", "dialect"], str(path))
+    require_columns(
+        df,
+        ["lang_code", "formosan_sentence", target_col, "source", "dialect"],
+        str(path),
+    )
+    mt_standard_contract(df, context=str(path))
     required_nonempty = (
         df["lang_code"].astype(str).str.strip().ne("")
         & df["formosan_sentence"].astype(str).str.strip().ne("")

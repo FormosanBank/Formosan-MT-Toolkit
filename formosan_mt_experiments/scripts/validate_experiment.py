@@ -17,9 +17,11 @@ from experiment_config import (
     profile_record,
     sha256_file,
 )
+from model_backends import get_backend
 from mt_common import (
-    build_prefix,
+    bool_series,
     direction_choices,
+    mt_standard_contract,
     normalize_target_language,
     read_parallel_csv,
     source_bucket,
@@ -37,11 +39,21 @@ REQUIRED_PROVENANCE = {
     "xml_id",
     "xml_element_index",
     "kindOf",
+    "standard_namespace",
     "standard_origin",
     "standard_after_qc_sha256",
     "qc_transform_id",
     "qc_revision",
     "row_type",
+    "formosan_original_raw",
+    "formosan_source_standard",
+    "formosan_mt_standard",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_normalization_confidence",
+    "mt_eval_eligible",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "source",
     "dialect",
 }
@@ -361,7 +373,7 @@ def validate_provenance(frame: pd.DataFrame) -> dict[str, object]:
     empty_counts = {
         column: int(frame[column].astype(str).str.strip().eq("").sum())
         for column in sorted(REQUIRED_PROVENANCE & set(frame.columns))
-        if column not in {"xml_id", "dialect"}
+        if column not in {"xml_id", "dialect", "formosan_original_raw"}
     }
     empty_counts = {
         column: count
@@ -386,16 +398,25 @@ def validate_provenance(frame: pd.DataFrame) -> dict[str, object]:
         if "kindOf" in frame
         else len(frame)
     )
+    try:
+        mt_profile = mt_standard_contract(frame, context="corpus validation input")
+        mt_contract_error = ""
+    except SystemExit as exc:
+        mt_profile = {}
+        mt_contract_error = str(exc)
     return {
         "missing_columns": missing_columns,
         "empty_required_values": empty_counts,
         "duplicate_row_ids": duplicate_row_ids,
         "non_standard_rows": non_standard,
+        "mt_standardization": mt_profile,
+        "mt_standard_contract_error": mt_contract_error,
         "ok": (
             not missing_columns
             and not empty_counts
             and duplicate_row_ids == 0
             and non_standard == 0
+            and not mt_contract_error
         ),
     }
 
@@ -424,6 +445,17 @@ def validate_splits(
     ).astype(str)
     synthetic_eval_rows = int(
         (pivot_origin.eq("synthetic") & split.isin(EVAL_SPLITS)).sum()
+    )
+    mt_eval_eligible = bool_series(
+        keyed["mt_eval_eligible"],
+        context="corpus validation input:mt_eval_eligible",
+    )
+    mt_ineligible_eval_rows = int((~mt_eval_eligible & split.isin(EVAL_SPLITS)).sum())
+    ambiguous_normalization_eval_rows = int(
+        (
+            keyed["mt_normalization_confidence"].astype(str).eq("ambiguous")
+            & split.isin(EVAL_SPLITS)
+        ).sum()
     )
     lexical_eval_rows = int(
         (
@@ -488,6 +520,8 @@ def validate_splits(
         not unknown_splits
         and not ratio_failures
         and synthetic_eval_rows == 0
+        and mt_ineligible_eval_rows == 0
+        and ambiguous_normalization_eval_rows == 0
         and lexical_eval_rows == 0
         and non_sentence_eval_rows == 0
         and duplicate_pairs == 0
@@ -499,6 +533,8 @@ def validate_splits(
         "unknown_splits": unknown_splits,
         "duplicate_pairs": duplicate_pairs,
         "synthetic_eval_rows": synthetic_eval_rows,
+        "mt_ineligible_eval_rows": mt_ineligible_eval_rows,
+        "ambiguous_normalization_eval_rows": ambiguous_normalization_eval_rows,
         "lexical_eval_rows": lexical_eval_rows,
         "non_sentence_eval_rows": non_sentence_eval_rows,
         "train_evaluation": train_eval,
@@ -523,20 +559,21 @@ def validate_tags(
     tokenizer_dir: Path,
     direction: str,
     target_lang: str,
+    profile: dict,
 ) -> dict[str, object]:
-    from transformers import NllbTokenizer
-
-    tokenizer = NllbTokenizer.from_pretrained(tokenizer_dir)
+    backend = get_backend(profile)
+    tokenizer = backend.load_tokenizer(tokenizer_dir)
     work = frame.copy()
     if "source_bucket" not in work.columns:
         work["source_bucket"] = work["source"].map(source_bucket)
     tags: set[str] = set()
     for _, row in work.iterrows():
         tags.update(
-            build_prefix(
+            backend.source_prefix(
                 row,
                 direction,
                 target_lang=target_lang,
+                use_tags=True,
             ).split()
         )
     bad = []
@@ -549,6 +586,7 @@ def validate_tags(
             bad.append(token)
     return {
         "ok": not bad,
+        "model_family": backend.family,
         "direction": direction,
         "checked_tags": len(tags),
         "bad_tags": bad,
@@ -644,7 +682,7 @@ def main() -> None:
         ngram_threshold=args.ngram_jaccard_threshold,
     )
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": bool(provenance["ok"] and split_validation["ok"]),
         "input": str(args.input),
         "input_sha256": sha256_file(args.input),
@@ -663,6 +701,7 @@ def main() -> None:
             args.tokenizer,
             args.direction,
             target_lang,
+            load_profile(args.profile),
         )
         report["complete"] = bool(
             report["complete"]
