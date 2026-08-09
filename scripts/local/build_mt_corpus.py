@@ -27,6 +27,7 @@ from build_output import (
     format_fetch_summary,
     format_language_summary,
     format_pivot_summary,
+    format_rule_summary,
     format_split_summary,
     run_logged,
 )
@@ -893,6 +894,8 @@ def build_languages(
     print("\nLanguage preparation summary")
     for report in ordered:
         print(format_language_summary(paths.root, report))
+    print(format_rule_summary(paths.root, ordered))
+    for report in ordered:
         report.pop("stage_status", None)
     return ordered
 

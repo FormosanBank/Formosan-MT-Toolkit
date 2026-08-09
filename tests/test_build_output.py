@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts/local"))
 from build_output import (  # noqa: E402
     CommandExecutionError,
     format_language_summary,
+    format_rule_summary,
     run_logged,
 )
 
@@ -103,11 +104,13 @@ class SummaryFormattingTests(unittest.TestCase):
                     "stage_status": {"QC": "rebuilt", "extraction": "cached"},
                 },
             )
+            rules = format_rule_summary(root, [{"code": "ami"}])
 
-            self.assertIn("QC repairs: remove zero width characters=2", summary)
-            self.assertIn("MT cleaning: remove hyphen boundary=5", summary)
-            self.assertIn("en: 9 input -> 7 kept", summary)
-            self.assertIn("QC findings: SOFT=4 across 1 rules", summary)
+            self.assertIn("en 9->7", summary)
+            self.assertIn("zh 11->8", summary)
+            self.assertIn("QC repairs: remove zero width characters=2", rules)
+            self.assertIn("MT cleaning: remove hyphen boundary=5", rules)
+            self.assertIn("QC findings: SOFT=4 across 1 rules", rules)
 
 
 if __name__ == "__main__":

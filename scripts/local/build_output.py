@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -130,27 +131,22 @@ def _detail(label: str, value: str) -> str:
     )
 
 
-def _validator_totals(qc: dict[str, Any]) -> dict[str, tuple[int, int]]:
-    totals: dict[str, tuple[int, int]] = {}
-    for validator in qc.get("validators", []):
-        by_severity = validator.get("summary", {}).get("by_severity", {})
-        for severity, summary in by_severity.items():
-            records, rules = totals.get(severity, (0, 0))
-            totals[severity] = (
-                records + int(summary.get("records", 0)),
-                rules + len(summary.get("rules", {})),
-            )
-    return totals
-
-
-def format_language_summary(build_root: Path, report: dict[str, Any]) -> str:
-    """Render cleaning actions from stage manifests, not subprocess text."""
-    code = str(report["code"])
+def _language_manifests(
+    build_root: Path,
+    code: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     qc = _load(build_root / f"prepared_{code}" / "_qc_manifest.json")
     mt = _load(build_root / f"prepared_{code}" / "_mt_standard_manifest.json")
     reports = build_root / "processed_corpora" / "filter_reports"
     en = _load(reports / f"{code}_en_processed" / "summary.json")
     zh = _load(reports / f"{code}_zh_processed" / "summary.json")
+    return qc, mt, en, zh
+
+
+def format_language_summary(build_root: Path, report: dict[str, Any]) -> str:
+    """Render one compact language row from stage manifests."""
+    code = str(report["code"])
+    qc, mt, en, zh = _language_manifests(build_root, code)
 
     statuses = report.get("stage_status", {})
     cached = sum(value == "cached" for value in statuses.values())
@@ -165,56 +161,62 @@ def format_language_summary(build_root: Path, report: dict[str, Any]) -> str:
 
     inventory = mt.get("inventory", {})
     status_counts = inventory.get("status_counts", {})
-    lines = [
-        f"{code} ({report['language']}): en={_count(report['processed_en_rows'])}, "
-        f"zh={_count(report['processed_zh_rows'])} [{stage_text}]",
-    ]
-    if qc or mt:
-        lines.append(
-            _detail(
-                "XML",
-                f"{_count(qc.get('input', {}).get('xml_files'))} files, "
-                f"{_count(inventory.get('records'))} units; "
-                f"MT accepted={_count(status_counts.get('accepted'))}, "
-                f"quarantined={_count(status_counts.get('quarantine'))}, "
-                f"ineligible={_count(status_counts.get('ineligible'))}",
-            )
-        )
-        lines.append(
-            _detail(
-                "QC repairs",
-                _rules(qc.get("repair_inventory", {}).get("counts", {})),
-            )
-        )
-        lines.append(_detail("MT cleaning", _rules(inventory.get("rule_counts", {}))))
-        if inventory.get("reason_counts"):
-            lines.append(_detail("MT flags", _rules(inventory["reason_counts"])))
-        findings = _validator_totals(qc)
-        if findings:
-            details = "; ".join(
-                f"{severity}={_count(records)} across {_count(rule_count)} rules"
-                for severity, (records, rule_count) in sorted(findings.items())
-            )
-            lines.append(_detail("QC findings", f"{details} (diagnostic only)"))
+    if not statuses:
+        stage_text = "stages skipped"
+    return _detail(
+        code,
+        f"XML={_count(qc.get('input', {}).get('xml_files'))}, "
+        f"units={_count(inventory.get('records'))}, "
+        f"MT accepted={_count(status_counts.get('accepted'))}, "
+        f"quarantine={_count(status_counts.get('quarantine'))}, "
+        f"ineligible={_count(status_counts.get('ineligible'))} | "
+        f"en {_count(en.get('initial_rows'))}->{_count(en.get('accepted_rows'))} | "
+        f"zh {_count(zh.get('initial_rows'))}->{_count(zh.get('accepted_rows'))} | "
+        f"{stage_text}",
+    )
 
-    for target, payload in (("en", en), ("zh", zh)):
-        if not payload:
-            continue
-        lines.append(
-            _detail(
-                target,
-                f"{_count(payload.get('initial_rows'))} input -> "
-                f"{_count(payload.get('accepted_rows'))} kept; "
-                f"removed: {_rules(payload.get('filter_rule_counts', {}))}",
-            )
-        )
-        if payload.get("transformation_counts"):
-            lines.append(
-                _detail(
-                    f"{target} text cleaning",
-                    _rules(payload["transformation_counts"]),
+
+def format_rule_summary(build_root: Path, reports: list[dict[str, Any]]) -> str:
+    """Aggregate every action rule once across all selected languages."""
+    totals: dict[str, Counter[str]] = {
+        "QC repairs": Counter(),
+        "MT cleaning": Counter(),
+        "MT flags": Counter(),
+        "English removals": Counter(),
+        "English text cleaning": Counter(),
+        "Chinese removals": Counter(),
+        "Chinese text cleaning": Counter(),
+    }
+    finding_records: Counter[str] = Counter()
+    finding_rules: dict[str, set[str]] = {}
+    for report in reports:
+        qc, mt, en, zh = _language_manifests(build_root, str(report["code"]))
+        inventory = mt.get("inventory", {})
+        totals["QC repairs"].update(qc.get("repair_inventory", {}).get("counts", {}))
+        totals["MT cleaning"].update(inventory.get("rule_counts", {}))
+        totals["MT flags"].update(inventory.get("reason_counts", {}))
+        totals["English removals"].update(en.get("filter_rule_counts", {}))
+        totals["English text cleaning"].update(en.get("transformation_counts", {}))
+        totals["Chinese removals"].update(zh.get("filter_rule_counts", {}))
+        totals["Chinese text cleaning"].update(zh.get("transformation_counts", {}))
+        for validator in qc.get("validators", []):
+            by_severity = validator.get("summary", {}).get("by_severity", {})
+            for severity, summary in by_severity.items():
+                finding_records[severity] += int(summary.get("records", 0))
+                finding_rules.setdefault(severity, set()).update(
+                    summary.get("rules", {})
                 )
-            )
+
+    lines = ["\nCleaning rule totals"]
+    for label, counts in totals.items():
+        if counts:
+            lines.append(_detail(label, _rules(dict(counts))))
+    if finding_records:
+        details = "; ".join(
+            f"{severity}={_count(records)} across {_count(len(finding_rules[severity]))} rules"
+            for severity, records in sorted(finding_records.items())
+        )
+        lines.append(_detail("QC findings", f"{details} (diagnostic only)"))
     return "\n".join(lines)
 
 
