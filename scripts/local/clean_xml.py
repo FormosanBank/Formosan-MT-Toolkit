@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -188,7 +189,7 @@ def git_blob_sha(data: bytes) -> str:
     return hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
 
 
-def sync_qc_tree(cache_root: Path, revision: str, force_update: bool) -> Path:
+def _sync_qc_tree_unlocked(cache_root: Path, revision: str, force_update: bool) -> Path:
     if not revision or not all(ch in "0123456789abcdef" for ch in revision.lower()) or len(revision) != 40:
         raise SystemExit("--qc-revision must be a full 40-character commit SHA")
 
@@ -256,6 +257,14 @@ def sync_qc_tree(cache_root: Path, revision: str, force_update: bool) -> Path:
         raise SystemExit(f"Pinned QC snapshot is incomplete: {destination}")
     print(f"Pinned QC snapshot: {destination} ({updated} updated, {verified} verified)")
     return destination
+
+
+def sync_qc_tree(cache_root: Path, revision: str, force_update: bool) -> Path:
+    cache_root = cache_root.expanduser().resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with (cache_root / f".{revision}.lock").open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _sync_qc_tree_unlocked(cache_root, revision, force_update)
 
 
 def resolve_qc_root(args: argparse.Namespace) -> Path:

@@ -28,6 +28,7 @@ from build_experiment_splits import (  # noqa: E402
     one_edit_conflicts,
     split_targets,
 )
+from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
 from formosan_mt_inference import normalize_formosan  # noqa: E402
 from model_backends import get_backend, normalize_control_metadata  # noqa: E402
@@ -64,6 +65,23 @@ from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E40
 
 MT_STANDARD_PROFILE = load_mt_standard_profile(MT_STANDARD_PROFILE_PATH)
 MT_STANDARD_PROFILE_HASH = mt_profile_sha256(MT_STANDARD_PROFILE_PATH)
+
+
+class ColumnarCacheTests(unittest.TestCase):
+    def test_round_trip_is_bound_to_canonical_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "corpus.csv"
+            release = pd.DataFrame({"row_id": ["a", "b"], "value": ["x", "y"]})
+            cached = release.assign(_normalized=["x", "y"])
+            release.to_csv(csv_path, index=False)
+            write_columnar_cache(cached, csv_path)
+            pd.testing.assert_frame_equal(
+                read_csv_or_columnar(csv_path, keep_default_na=False),
+                cached,
+            )
+            csv_path.write_text("row_id,value\na,changed\n", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                read_csv_or_columnar(csv_path, keep_default_na=False)
 
 
 def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:

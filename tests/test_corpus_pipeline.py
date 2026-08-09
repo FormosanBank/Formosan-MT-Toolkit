@@ -40,10 +40,12 @@ from corpus_quality import (  # noqa: E402
 )
 from fetch_xml import (  # noqa: E402
     classify_xml,
+    download_blob_for_languages,
     get_tree,
     git_blob_sha,
     load_or_create_repository_snapshot,
     repository_selection,
+    resolve_default_repository_refs,
     write_blob_cache,
 )
 from filter_split_corpus import (  # noqa: E402
@@ -51,7 +53,7 @@ from filter_split_corpus import (  # noqa: E402
     print_filter_rule_summary,
     read_csv,
 )
-from make_corpus import extract_file  # noqa: E402
+from make_corpus import extract_file, extract_file_targets  # noqa: E402
 from mt_standardization import (  # noqa: E402
     DEFAULT_PROFILE_PATH,
     StandardizationContext,
@@ -82,6 +84,7 @@ from qc_reporting import (  # noqa: E402
     run_cleaner_command,
     summarize_validator_findings,
 )
+from stage_cache import cached_stage_valid, record_cached_stage  # noqa: E402
 from xml_repairs import repair_mt_xml_structure  # noqa: E402
 
 MT_PROFILE = load_mt_standard_profile(DEFAULT_PROFILE_PATH)
@@ -938,6 +941,74 @@ class PipelineReportingTests(unittest.TestCase):
 
 
 class AcquisitionTests(unittest.TestCase):
+    def test_multi_language_fetch_parses_and_routes_one_cached_blob(self) -> None:
+        xml_bytes = (
+            b'<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+            b'xml:lang="ami" dialect="Coastal"><S /></TEXT>'
+        )
+        blob = git_blob_sha(xml_bytes)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            cache.mkdir()
+            (cache / f"{blob}.xml").write_bytes(xml_bytes)
+            out_dirs = {"ami": root / "ami", "tay": root / "tay"}
+            for path in out_dirs.values():
+                path.mkdir()
+            with mock.patch.object(fetch_xml, "RAW_XML_CACHE_DIR", cache):
+                result = download_blob_for_languages(
+                    "FormosanBank",
+                    "FixtureRepo",
+                    {"path": "Final_XML/Amis/sample.xml", "sha": blob},
+                    ("ami", "tay"),
+                    None,
+                    "a" * 40,
+                    out_dirs,
+                    None,
+                    download_retries=1,
+                    retry_base_sleep=0,
+                    retry_max_sleep=0,
+                )
+            self.assertEqual(result["ami"].status, "kept")
+            self.assertEqual(result["tay"].status, "source_language_mismatch")
+            self.assertTrue((out_dirs["ami"] / result["ami"].destination).is_file())
+            self.assertFalse(list(out_dirs["tay"].rglob("*.xml")))
+
+    def test_graphql_repository_resolution_preserves_selection_order(self) -> None:
+        response = mock.Mock()
+        response.json.return_value = {
+            "data": {
+                "organization": {
+                    "repositories": {
+                        "nodes": [
+                            {
+                                "name": "RepoA",
+                                "defaultBranchRef": {
+                                    "name": "main",
+                                    "target": {"oid": "a" * 40},
+                                },
+                            },
+                            {
+                                "name": "RepoB",
+                                "defaultBranchRef": {
+                                    "name": "release",
+                                    "target": {"oid": "b" * 40},
+                                },
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        with mock.patch.object(fetch_xml, "api_post", return_value=response):
+            refs = resolve_default_repository_refs(
+                "FormosanBank",
+                ["RepoB", "RepoA"],
+            )
+        self.assertEqual([ref.name for ref in refs], ["RepoB", "RepoA"])
+        self.assertEqual(refs[0].requested_ref, "release")
+
     def test_malformed_xml_is_not_a_language_mismatch(self) -> None:
         status, language, dialect, error = classify_xml(
             b"<TEXT><S>",
@@ -1091,6 +1162,55 @@ class AcquisitionTests(unittest.TestCase):
 
 
 class ExtractionAndCleaningTests(unittest.TestCase):
+    def test_combined_extraction_matches_independent_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "sample.xml"
+            path.write_text(
+                '<?xml version="1.0"?>'
+                '<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+                'xml:lang="ami"><S id="s1">'
+                '<FORM kindOf="standard">malu.</FORM>'
+                '<TRANSL xml:lang="eng">Good.</TRANSL>'
+                '<TRANSL xml:lang="zho">很好。</TRANSL>'
+                "</S></TEXT>",
+                encoding="utf-8",
+            )
+            provenance = {
+                "repository": "FixtureRepo",
+                "repository_commit": "a" * 40,
+                "source_path": "sample.xml",
+            }
+            mt_records = mt_records_for_xml(path, directory)
+            combined, combined_stats = extract_file_targets(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                targets={"english": {"eng"}, "chinese": {"zho"}},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            english, english_stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                target_codes={"eng"},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            chinese, chinese_stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance=provenance,
+                target_codes={"zho"},
+                tags={"S"},
+                mt_records=mt_records,
+            )
+            self.assertEqual(combined["english"], english)
+            self.assertEqual(combined["chinese"], chinese)
+            self.assertEqual(combined_stats["english"], english_stats)
+            self.assertEqual(combined_stats["chinese"], chinese_stats)
+
     def test_extraction_uses_standard_and_keeps_original_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -1644,6 +1764,36 @@ class PivotContractTests(unittest.TestCase):
                 discover_inputs(root, set()),
                 [pivot, unexpected],
             )
+
+    def test_stage_cache_rejects_modified_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "prepared" / "sample.xml"
+            output.parent.mkdir()
+            output.write_text("original", encoding="utf-8")
+            cache_path = root / ".stage_cache" / "ami.json"
+            cache: dict[str, object] = {"schema_version": 1, "stages": {}}
+            paths = BuildPaths(
+                root=root,
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+                final_dir=root / "final",
+                split_root=root / "splits",
+                manifest_path=root / "manifest.json",
+                source_snapshot_path=root / "snapshot.json",
+            )
+            record_cached_stage(
+                paths.root,
+                cache_path,
+                cache,
+                "qc",
+                "stage-key",
+                [output],
+                "ami",
+            )
+            self.assertTrue(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
+            output.write_text("modified", encoding="utf-8")
+            self.assertFalse(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
 
     def test_malformed_cache_is_a_hard_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

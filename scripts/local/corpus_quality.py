@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import pandas as pd
 
@@ -156,7 +156,7 @@ def fertility_reason(
 
 
 def quality_decision(
-    row: pd.Series,
+    row: Mapping[str, object],
     *,
     source_column: str,
     target_column: str,
@@ -275,9 +275,25 @@ def apply_quality_rules(
     reasons: list[str] = []
     flags: list[str] = []
     counts: Counter[str] = Counter()
-    for _, row in frame.iterrows():
+    decision_columns = list(
+        dict.fromkeys(
+            [
+                source_column,
+                target_column,
+                "row_type",
+                "kindOf",
+                "standard_namespace",
+                "mt_normalization_status",
+                "mt_normalization_reason",
+                "formosan_mt_standard",
+                "contains_unclear",
+            ]
+        )
+    )
+    decision_frame = frame.reindex(columns=decision_columns, fill_value="")
+    for values in decision_frame.itertuples(index=False, name=None):
         decision = quality_decision(
-            row,
+            dict(zip(decision_columns, values)),
             source_column=source_column,
             target_column=target_column,
             target_language=target_language,

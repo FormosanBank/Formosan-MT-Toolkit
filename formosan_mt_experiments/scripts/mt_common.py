@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 import pandas as pd
+from columnar_cache import read_csv_or_columnar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
@@ -306,7 +307,7 @@ def mt_standard_contract(df: pd.DataFrame, *, context: str) -> dict[str, str]:
 def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.DataFrame:
     # Provenance columns mix empty values and strings. Infer against the whole
     # file so chunk boundaries cannot change dtypes or emit noisy warnings.
-    df = pd.read_csv(
+    df = read_csv_or_columnar(
         path,
         low_memory=False,
         keep_default_na=False,

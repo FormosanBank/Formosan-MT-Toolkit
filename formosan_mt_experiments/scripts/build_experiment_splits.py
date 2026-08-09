@@ -13,6 +13,7 @@ from itertools import chain
 from pathlib import Path
 
 import pandas as pd
+from columnar_cache import write_columnar_cache
 from mt_common import (
     EASY_BUCKETS,
     add_normalized_columns,
@@ -629,6 +630,7 @@ def build_hard_split(
     min_validate_rows: int,
     ngram_threshold: float,
     registry_in: Path | None,
+    preserve_internal: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     if "row_id" not in frame.columns or frame["row_id"].astype(str).duplicated().any():
         raise SystemExit("Input must contain unique stable row_id values")
@@ -940,6 +942,8 @@ def build_hard_split(
         )
 
     internal_columns = [column for column in output.columns if column.startswith("_")]
+    if preserve_internal:
+        return output, excluded, duplicate_rows, report
     return (
         output.drop(columns=internal_columns),
         excluded.drop(columns=[column for column in internal_columns if column in excluded]),
@@ -1063,8 +1067,15 @@ def main() -> None:
         min_validate_rows=args.min_validate_rows,
         ngram_threshold=args.ngram_jaccard_threshold,
         registry_in=args.registry_in,
+        preserve_internal=True,
     )
     validate_report(report)
+
+    internal_columns = [column for column in output.columns if column.startswith("_")]
+    release_output = output.drop(columns=internal_columns)
+    release_excluded = excluded.drop(
+        columns=[column for column in internal_columns if column in excluded]
+    )
 
     full_path = args.output_dir / f"{output_prefix}_{TIER}.csv"
     test_path = args.output_dir / f"{output_prefix}_{TIER}_test.csv"
@@ -1072,12 +1083,13 @@ def main() -> None:
     excluded_path = args.output_dir / f"{output_prefix}_{TIER}_excluded.csv"
     duplicate_path = args.output_dir / f"{output_prefix}_{TIER}_duplicates.csv"
     registry_path = args.output_dir / "benchmark_registry.json"
-    output.to_csv(full_path, index=False)
-    output[output["split"].eq("test")].to_csv(test_path, index=False)
-    output[output["split"].eq("validate")].to_csv(validate_path, index=False)
-    excluded.to_csv(excluded_path, index=False)
+    release_output.to_csv(full_path, index=False)
+    release_output[release_output["split"].eq("test")].to_csv(test_path, index=False)
+    release_output[release_output["split"].eq("validate")].to_csv(validate_path, index=False)
+    release_excluded.to_csv(excluded_path, index=False)
     duplicates.to_csv(duplicate_path, index=False)
-    write_registry(registry_path, output, report)
+    write_registry(registry_path, release_output, report)
+    columnar_path = write_columnar_cache(output, full_path)
     report["files"] = {
         "full": str(full_path),
         "test": str(test_path),
@@ -1085,6 +1097,7 @@ def main() -> None:
         "excluded": str(excluded_path),
         "duplicates": str(duplicate_path),
         "benchmark_registry": str(registry_path),
+        "full_columnar": str(columnar_path),
     }
     write_json(args.output_dir / f"report_{TIER}.json", report)
     write_json(
