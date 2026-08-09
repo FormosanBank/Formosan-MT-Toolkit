@@ -123,6 +123,13 @@ identity, repetition, placeholder, and fertility checks as human rows.
 Unresolved candidates, invalid cache records, row errors, quota exhaustion, or
 a stop reason prevent output promotion and return a nonzero status.
 
+Large aggregate CSVs are written through same-filesystem temporary files and
+promoted atomically. A conservative free-space check runs before dataframes are
+loaded, so a low-disk build fails without leaving a truncated release file or
+touching DeepL caches. Final hard-split CSVs are hard-linked into the release
+directory when supported, avoiding a second physical copy while preserving
+both expected paths.
+
 ### 7. Hard Splitting
 
 `formosan_mt_experiments/scripts/build_experiment_splits.py` ignores legacy

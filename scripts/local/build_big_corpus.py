@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +21,8 @@ OUTPUT_NAMES = {
     "big_corpus_zh.csv",
     "big_corpus_combined.csv",
 }
+MIB = 1024**2
+GIB = 1024**3
 CANONICAL_PREFIX = [
     "row_id",
     "source_record_id",
@@ -211,6 +215,37 @@ def discover_inputs(directory: Path, output_names: set[str]) -> list[Path]:
     return files
 
 
+def estimated_output_bytes(paths: list[Path]) -> int:
+    """Conservatively estimate CSV output plus a small filesystem reserve."""
+    input_bytes = sum(path.stat().st_size for path in paths)
+    reserve = min(GIB, max(64 * MIB, input_bytes // 4))
+    return int(input_bytes * 1.75) + reserve
+
+
+def require_output_space(paths: list[Path], output_dir: Path) -> None:
+    required = estimated_output_bytes(paths)
+    available = shutil.disk_usage(output_dir).free
+    if available < required:
+        raise SystemExit(
+            "Insufficient disk space for corpus aggregation: "
+            f"{available / GIB:.1f} GiB available, approximately "
+            f"{required / GIB:.1f} GiB required. Existing corpora and DeepL "
+            "caches were not modified."
+        )
+
+
+def write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
+    """Write a CSV without leaving a truncated release artifact on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.incomplete")
+    temporary.unlink(missing_ok=True)
+    try:
+        frame.to_csv(temporary, index=False)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def load_inputs(directory: Path, output_names: set[str]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], list[dict]]:
     english: list[pd.DataFrame] = []
     chinese: list[pd.DataFrame] = []
@@ -276,8 +311,7 @@ def write_target(frames: list[pd.DataFrame], path: Path, target_column: str) -> 
     if not output["mt_normalization_status"].astype(str).eq("accepted").all():
         raise SystemExit(f"Aggregate input contains non-accepted MT-standard rows for {path.name}")
     output = output[canonical_order(output, target_column)]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    output.to_csv(path, index=False)
+    write_csv_atomic(output, path)
     return output
 
 
@@ -319,7 +353,7 @@ def write_combined(chinese: pd.DataFrame, english: pd.DataFrame, path: Path) -> 
     if "english_sentence" in order:
         order.remove("english_sentence")
     order.insert(insert_at, "english_sentence")
-    output[order].to_csv(path, index=False)
+    write_csv_atomic(output[order], path)
     return len(output)
 
 
@@ -348,6 +382,8 @@ def main() -> None:
         args.output_zh_name,
         args.output_combined_name,
     }
+    input_paths = discover_inputs(input_dir, output_names)
+    require_output_space(input_paths, output_dir)
     english_inputs, chinese_inputs, inventory = load_inputs(input_dir, output_names)
     if not english_inputs and not chinese_inputs:
         raise SystemExit("No supported corpus inputs were found")

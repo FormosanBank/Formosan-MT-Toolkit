@@ -216,6 +216,15 @@ def remove_path(path: Path) -> None:
         path.unlink()
 
 
+def replace_with_hardlink(source: Path, destination: Path) -> None:
+    """Avoid storing a second physical copy of a finalized split."""
+    remove_path(destination)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
 def clean_generated_outputs(paths: BuildPaths) -> None:
     """Remove abandoned temporary files while retaining verified stage outputs."""
     pivot_dir = paths.processed_dir / "pivot"
@@ -1181,7 +1190,7 @@ def build_hard_splits(
         hard_file = out_dir / f"big_corpus_{short}_in_domain_hard.csv"
         dest = corpus_dir / hard_file.name
         if hard_file.exists() and not args.dry_run:
-            shutil.copy2(hard_file, dest)
+            replace_with_hardlink(hard_file, dest)
             run(
                 [
                     PYTHON,

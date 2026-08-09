@@ -77,6 +77,11 @@ preparation. Raw subprocess output and full commands are retained under each
 build's `logs/` directory. Use `--verbose` to stream those details live; this
 also disables language concurrency to keep diagnostic output readable.
 
+Aggregation checks available disk space before loading large CSVs and writes
+through `.incomplete` files that are removed on failure. Final hard-split CSVs
+share storage with their validated split artifacts through hard links when
+possible. DeepL cache files are never removed by these safeguards.
+
 ## Release Outputs
 
 Each named build produces:

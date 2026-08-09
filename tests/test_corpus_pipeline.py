@@ -20,10 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
-from build_big_corpus import discover_inputs  # noqa: E402
+from build_big_corpus import (  # noqa: E402
+    discover_inputs,
+    estimated_output_bytes,
+    write_csv_atomic,
+)
 from build_mt_corpus import (  # noqa: E402
     BuildPaths,
     package_training_provenance,
+    replace_with_hardlink,
 )
 from clean_xml import (  # noqa: E402
     audit_standard_tiers,
@@ -2198,6 +2203,42 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                         "pivot_origin",
                     ].ne("synthetic").all()
                 )
+
+
+class LargeArtifactSafetyTests(unittest.TestCase):
+    def test_output_estimate_scales_with_input_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.csv"
+            path.write_bytes(b"x" * 1024)
+            self.assertGreater(estimated_output_bytes([path]), path.stat().st_size)
+
+    def test_atomic_csv_write_removes_incomplete_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "corpus.csv"
+            frame = mock.Mock()
+
+            def fail(path: Path, *, index: bool) -> None:
+                Path(path).write_text("partial", encoding="utf-8")
+                raise OSError("disk full")
+
+            frame.to_csv.side_effect = fail
+            with self.assertRaisesRegex(OSError, "disk full"):
+                write_csv_atomic(frame, output)
+
+            self.assertFalse(output.exists())
+            self.assertFalse((output.parent / ".corpus.csv.incomplete").exists())
+
+    def test_final_split_uses_one_physical_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "split.csv"
+            destination = root / "release.csv"
+            source.write_text("a,b\n1,2\n", encoding="utf-8")
+
+            replace_with_hardlink(source, destination)
+
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(destination.stat().st_ino, source.stat().st_ino)
 
 
 if __name__ == "__main__":
