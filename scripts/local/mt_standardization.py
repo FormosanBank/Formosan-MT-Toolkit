@@ -345,11 +345,6 @@ def standardize_text(
     if policy.get("strip_wiki_heading_markup"):
         run.regex_sub("strip_wiki_heading_markup", WIKI_HEADING_RE, lambda match: f"{match.group(1)}{match.group(2)}")
 
-    speaker = SPEAKER_PREFIX_RE.match(run.text)
-    if speaker:
-        run.speaker_label = speaker.group(1)
-        run.replace("strip_speaker_prefix", run.text[speaker.end() :])
-
     if policy.get("remove_null_morphemes"):
         for marker in ("Ø-", "∅-", "-Ø", "-∅", "Ø", "∅"):
             count = run.text.count(marker)
@@ -383,6 +378,10 @@ def standardize_text(
 
     squeezed = WHITESPACE_RE.sub(" ", run.text).strip()
     run.replace("normalize_whitespace", squeezed)
+
+    speaker = SPEAKER_PREFIX_RE.match(run.text)
+    if speaker:
+        run.speaker_label = speaker.group(1)
 
     markers = unresolved_markers(run.text, profile.get("unresolved_annotation_characters", []))
     reason = run.reason
@@ -432,7 +431,12 @@ def assert_idempotent(
     if result.status != "accepted":
         return
     repeated = standardize_text(result.text, context=context, profile=profile)
-    if repeated.text != result.text or repeated.status != "accepted" or repeated.transformations:
+    if (
+        repeated.text != result.text
+        or repeated.status != "accepted"
+        or repeated.transformations
+        or repeated.speaker_label != result.speaker_label
+    ):
         raise ValueError(
             f"MT standardization is not idempotent for {context.repository}/{context.xml_path}: "
             f"{result.text!r} -> {repeated.text!r}"

@@ -228,7 +228,11 @@ class MTStandardizationTests(unittest.TestCase):
             "lali:ma": ("lali:ma", "unchanged", True),
             "== tjevus ==": ("tjevus", "safe", True),
             "mn_gluw": ("mngluw", "ambiguous", False),
-            "Speaker: malu": ("malu", "safe", True),
+            "Speaker: malu": (
+                "Speaker: malu",
+                "unchanged",
+                True,
+            ),
             "a ~ b": ("a", "ambiguous", False),
             "{um}ali": ("umali", "safe", True),
             "mha oy~~~ binah": ("mha oy binah", "safe", True),
@@ -242,7 +246,11 @@ class MTStandardizationTests(unittest.TestCase):
                 "ambiguous",
                 False,
             ),
-            "  Speaker: malu  ": ("malu", "safe", True),
+            "  Speaker: malu  ": (
+                "Speaker: malu",
+                "safe",
+                True,
+            ),
             "東壘(turuy)- kn-bong": (
                 "東壘turuy knbong",
                 "ambiguous",
@@ -257,6 +265,13 @@ class MTStandardizationTests(unittest.TestCase):
                     expected,
                 )
                 self.assertEqual(result.status, "accepted")
+
+    def test_initial_label_is_metadata_not_deleted_text(self) -> None:
+        source = 'Sowal ni Yis: "Ano cima ko Kawas?"'
+        result = self.standardize(source)
+        self.assertEqual(result.text, source)
+        self.assertEqual(result.speaker_label, "Sowal ni Yis")
+        self.assertEqual(result.transformations, ())
 
     def test_unresolved_or_nonlinguistic_input_is_not_accepted(self) -> None:
         self.assertEqual(

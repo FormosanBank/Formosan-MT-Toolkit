@@ -5,7 +5,7 @@
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
     "id": "formosan-mt-standard-v3",
-    "sha256": "07c2815bc6cc0dbc50544627384c4aabe124ee89d51b7163a2c610ca945410a7",
+    "sha256": "9be6ede7b1ed72a6b060b01785e63e982e0744963c4d7686ef3c74441090baef",
     "namespace": "formosan-mt"
   },
   "project_root": ".",
