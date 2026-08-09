@@ -52,6 +52,18 @@ from filter_split_corpus import (  # noqa: E402
     read_csv,
 )
 from make_corpus import extract_file  # noqa: E402
+from mt_standardization import (  # noqa: E402
+    DEFAULT_PROFILE_PATH,
+    StandardizationContext,
+    assert_idempotent,
+    standardize_text,
+)
+from mt_standardization import (
+    load_profile as load_mt_standard_profile,
+)
+from mt_standardization import (
+    profile_sha256 as mt_profile_sha256,
+)
 from pipeline_common import load_pipeline_config  # noqa: E402
 from pivot import (  # noqa: E402
     Direction,
@@ -69,6 +81,192 @@ from qc_reporting import (  # noqa: E402
     summarize_validator_findings,
 )
 from xml_repairs import repair_mt_xml_structure  # noqa: E402
+
+MT_PROFILE = load_mt_standard_profile(DEFAULT_PROFILE_PATH)
+MT_PROFILE_HASH = mt_profile_sha256(DEFAULT_PROFILE_PATH)
+
+
+def text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def mt_contract_fields(
+    text: str,
+    *,
+    row_type: str = "sentence",
+    pivot_origin: str = "original",
+    confidence: str = "unchanged",
+) -> dict[str, object]:
+    return {
+        "kindOf": "standard",
+        "standard_namespace": "formosan-mt",
+        "formosan_mt_standard": text,
+        "mt_standard_sha256": text_sha256(text),
+        "mt_normalization_status": "accepted",
+        "mt_normalization_confidence": confidence,
+        "mt_eval_eligible": (
+            pivot_origin == "original"
+            and row_type == "sentence"
+            and confidence in {"unchanged", "safe"}
+        ),
+        "mt_normalization_reason": "",
+        "mt_standard_profile": MT_PROFILE["profile_id"],
+        "mt_standard_profile_sha256": MT_PROFILE_HASH,
+    }
+
+
+def mt_records_for_xml(
+    path: Path,
+    directory: Path,
+    *,
+    language: str = "ami",
+) -> dict[tuple[str, str, int, str], dict[str, object]]:
+    relative = str(path.relative_to(directory))
+    repository = Path(relative).parts[0] if Path(relative).parts else "FixtureRepo"
+    records: dict[tuple[str, str, int, str], dict[str, object]] = {}
+    unit_index = 0
+    for element in ET.parse(path).getroot().iter():
+        if element.tag not in {"S", "W", "M"}:
+            continue
+        element_index = unit_index
+        unit_index += 1
+        xml_id = (element.get("id") or "").strip()
+        standard = element.find("FORM[@kindOf='standard']")
+        original = element.find("FORM[@kindOf='original']")
+        selected = standard if standard is not None else original
+        source_standard = (
+            "" if selected is None else "".join(selected.itertext()).strip()
+        )
+        original_text = (
+            "" if original is None else "".join(original.itertext()).strip()
+        )
+        contains_unclear = (
+            selected is not None
+            and selected.find(".//UNCLEAR") is not None
+        )
+        row_type = {"S": "sentence", "W": "lexeme", "M": "morpheme"}[
+            element.tag
+        ]
+        context = StandardizationContext(
+            language=language,
+            row_type=row_type,
+            repository=repository,
+            xml_path=relative,
+        )
+        result = standardize_text(
+            source_standard,
+            context=context,
+            profile=MT_PROFILE,
+            contains_unclear=contains_unclear,
+        )
+        assert_idempotent(result, context=context, profile=MT_PROFILE)
+        records[(relative, element.tag, element_index, xml_id)] = {
+            "standard_origin": (
+                "provided" if standard is not None else "derived_from_original"
+            ),
+            "formosan_original_raw": original_text,
+            "formosan_source_standard": source_standard,
+            "formosan_mt_standard": result.text,
+            "source_standard_sha256": text_sha256(source_standard),
+            "mt_standard_sha256": text_sha256(result.text),
+            "contains_unclear_source": contains_unclear,
+            "mt_normalization_status": result.status,
+            "mt_normalization_confidence": result.confidence,
+            "mt_eval_eligible": result.eval_eligible,
+            "mt_normalization_reason": result.reason,
+            "mt_transformations": json.dumps(result.transformations),
+            "mt_unresolved_markers": "|".join(result.unresolved_markers),
+            "speaker_label": result.speaker_label,
+            "mt_standard_profile": MT_PROFILE["profile_id"],
+            "mt_standard_profile_sha256": MT_PROFILE_HASH,
+        }
+    return records
+
+
+class MTStandardizationTests(unittest.TestCase):
+    def standardize(
+        self,
+        value: str,
+        *,
+        language: str = "ami",
+        row_type: str = "sentence",
+        profile: dict[str, object] | None = None,
+    ):
+        context = StandardizationContext(
+            language=language,
+            row_type=row_type,
+            repository="FixtureRepo",
+            xml_path="Final_XML/fixture.xml",
+        )
+        result = standardize_text(
+            value,
+            context=context,
+            profile=profile or MT_PROFILE,
+        )
+        assert_idempotent(
+            result,
+            context=context,
+            profile=profile or MT_PROFILE,
+        )
+        return result
+
+    def test_observed_notation_families_are_deterministic(self) -> None:
+        cases = {
+            "ma-ku-ta-mul": ("makutamul", "safe", True),
+            "k<om>aen": ("komaen", "safe", True),
+            "cinim∅kee": ("cinimkee", "safe", True),
+            "lemang(e)da": ("lemangeda", "ambiguous", False),
+            "imatiya/hatini": ("imatiya", "ambiguous", False),
+            "lali:ma": ("lali:ma", "unchanged", True),
+            "== tjevus ==": ("tjevus", "safe", True),
+            "mn_gluw": ("mngluw", "ambiguous", False),
+            "Speaker: malu": ("malu", "safe", True),
+            "a ~ b": ("a", "ambiguous", False),
+            "{um}ali": ("umali", "safe", True),
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                result = self.standardize(source)
+                self.assertEqual(
+                    (result.text, result.confidence, result.eval_eligible),
+                    expected,
+                )
+                self.assertEqual(result.status, "accepted")
+
+    def test_unresolved_or_nonlinguistic_input_is_not_accepted(self) -> None:
+        self.assertEqual(
+            self.standardize("https://example.org/a/b").status,
+            "quarantine",
+        )
+        self.assertEqual(
+            self.standardize("a____b").status,
+            "quarantine",
+        )
+        self.assertEqual(self.standardize("∅").status, "ineligible")
+
+    def test_profile_applies_consistently_to_all_formosan_languages(self) -> None:
+        for language in (
+            "ami", "bnn", "ckv", "dru", "pwn", "pyu", "ssf", "sxr",
+            "szy", "tao", "tay", "trv", "tsu", "xnb", "xsy",
+        ):
+            with self.subTest(language=language):
+                result = self.standardize("ma-ku", language=language)
+                self.assertEqual(result.text, "maku")
+                self.assertTrue(result.eval_eligible)
+
+    def test_reviewed_source_override_can_enable_ambiguous_eval(self) -> None:
+        profile = json.loads(json.dumps(MT_PROFILE))
+        profile["source_overrides"] = [
+            {
+                "repository": "FixtureRepo",
+                "path_regex": "Final_XML/fixture\\.xml$",
+                "reviewed_ambiguous": True,
+                "policy": {},
+            }
+        ]
+        result = self.standardize("lemang(e)da", profile=profile)
+        self.assertEqual(result.confidence, "ambiguous")
+        self.assertTrue(result.eval_eligible)
 
 
 class StandardTierTests(unittest.TestCase):
@@ -221,12 +419,11 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
             self.assertEqual(
-                extraction[
-                    "untranscribed_or_unclear_sentences_skipped"
-                ],
+                extraction["mt_ineligible:empty_source_standard"],
                 1,
             )
 
@@ -269,12 +466,11 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
             self.assertEqual(
-                extraction[
-                    "untranscribed_or_unclear_sentences_skipped"
-                ],
+                extraction["mt_ineligible:contains_unclear"],
                 1,
             )
 
@@ -364,15 +560,19 @@ class StandardTierTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"W", "M"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             extracted = {
-                pair.xml_id: pair.formosan_standard for pair in pairs
+                pair.xml_id: pair.formosan_sentence for pair in pairs
             }
-            self.assertEqual(extracted["variant"], "'arup(a)-ara")
-            self.assertEqual(extracted["variant-m"], "usa/bi(n")
+            self.assertEqual(extracted["variant"], "'arupaara")
+            self.assertEqual(extracted["variant-m"], "usa")
             self.assertEqual(extraction["w_units_seen"], 1)
             self.assertEqual(extraction["m_units_seen"], 2)
-            self.assertEqual(extraction["empty_lexical_units_skipped"], 1)
+            self.assertEqual(
+                extraction["mt_ineligible:empty_source_standard"],
+                1,
+            )
             unclear = next(
                 row
                 for row in inventory
@@ -835,6 +1035,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"eng"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(stats["pairs"], 1)
             self.assertEqual(rows[0].formosan_sentence, "maluna.")
@@ -867,6 +1068,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"eng"},
                 tags={"S"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(len(rows), 2)
             self.assertEqual(len({row.row_id for row in rows}), 2)
@@ -898,16 +1100,17 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 },
                 target_codes={"zho"},
                 tags={"M"},
+                mt_records=mt_records_for_xml(path, directory),
             )
             self.assertEqual(rows, [])
-            self.assertEqual(stats["empty_standard"], 1)
-            self.assertEqual(stats["empty_lexical_units_skipped"], 1)
+            self.assertEqual(stats["mt_ineligible:empty_source_standard"], 1)
 
     def test_cleaning_preserves_parentheses_and_structural_sentence_type(self) -> None:
         self.assertEqual(normalize_text("  It is good (today).  ").text, "It is good (today).")
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("hay."),
                     "row_id": "r1",
                     "formosan": "hay.",
                     "english": "Right!",
@@ -940,6 +1143,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("*malu"),
                     "row_id": "asterisk",
                     "ami": "*malu",
                     "english": "bad",
@@ -948,6 +1152,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/a.xml",
                 },
                 {
+                    **mt_contract_fields("456otca"),
                     "row_id": "artifact",
                     "ami": "456otca",
                     "english": "artifact",
@@ -978,6 +1183,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         frame = pd.DataFrame(
             [
                 {
+                    **mt_contract_fields("malu."),
                     "row_id": "r1",
                     "ami": "malu.",
                     "english": "Good.",
@@ -986,6 +1192,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/a.xml",
                 },
                 {
+                    **mt_contract_fields("malu."),
                     "row_id": "r2",
                     "ami": "malu.",
                     "english": "Good.",
@@ -994,6 +1201,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                     "source": "Stories/b.xml",
                 },
                 {
+                    **mt_contract_fields("中文"),
                     "row_id": "r3",
                     "ami": "中文",
                     "english": "Wrong source.",
@@ -1039,6 +1247,7 @@ class PivotContractTests(unittest.TestCase):
     def source_row(self) -> pd.Series:
         return pd.Series(
             {
+                **mt_contract_fields("malu."),
                 "row_id": "human-row",
                 "source_record_id": "source-row",
                 "content_sha256": "old",
@@ -1049,6 +1258,7 @@ class PivotContractTests(unittest.TestCase):
                 "kindOf": "standard",
                 "dialect": "Coastal",
                 "row_type": "sentence",
+                "pivot_origin": "original",
                 "quality_flags": "",
             }
         )
@@ -1103,6 +1313,8 @@ class PivotContractTests(unittest.TestCase):
             original["row_id"] = "original-row"
             original["source_record_id"] = "original-source"
             original["formosan_sentence"] = "misa."
+            original["formosan_mt_standard"] = "misa."
+            original["mt_standard_sha256"] = text_sha256("misa.")
             original["english_sentence"] = "Go."
             original = original.drop(labels=["chinese_sentence"])
             pd.DataFrame([original.to_dict()]).to_csv(
@@ -1167,6 +1379,8 @@ class PivotContractTests(unittest.TestCase):
             original["row_id"] = "original-row"
             original["source_record_id"] = "original-source"
             original["formosan_sentence"] = "misa."
+            original["formosan_mt_standard"] = "misa."
+            original["mt_standard_sha256"] = text_sha256("misa.")
             original["english_sentence"] = "Go."
             original = original.drop(labels=["chinese_sentence"])
             pd.DataFrame([original.to_dict()]).to_csv(
@@ -1453,26 +1667,40 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             ensure_standard_tiers(downloaded)
-            qc_records = [
-                {
-                    "transform_id": f"transform-{document}",
-                    "xml_path": str(
-                        Path("FixtureRepo")
-                        / "Final_XML"
-                        / f"doc-{document}.xml"
-                    ),
-                    "element_tag": "S",
-                    "xml_id": f"s-{document}",
-                    "source_element_index": 0,
-                    "final_element_index": 0,
-                    "standard_origin": "provided",
-                    "original_before_qc_sha256": "a" * 64,
-                    "standard_before_qc_sha256": "b" * 64,
-                    "standard_after_qc_sha256": "c" * 64,
-                    "disposition": "retained",
-                }
-                for document in range(20)
-            ]
+            qc_records = []
+            for document in range(20):
+                digest = hashlib.sha256(
+                    f"document-{document}".encode()
+                ).hexdigest()
+                standard = " ".join(
+                    digest[offset : offset + 8]
+                    for offset in range(0, 40, 8)
+                )
+                original = standard.replace(" ", "-")
+                qc_records.append(
+                    {
+                        "transform_id": f"transform-{document}",
+                        "xml_path": str(
+                            Path("FixtureRepo")
+                            / "Final_XML"
+                            / f"doc-{document}.xml"
+                        ),
+                        "element_tag": "S",
+                        "xml_id": f"s-{document}",
+                        "final_xml_id": f"s-{document}",
+                        "source_element_index": 0,
+                        "final_element_index": 0,
+                        "standard_origin": "provided",
+                        "provided_standard_present": True,
+                        "formosan_original_raw": original,
+                        "formosan_source_standard": standard,
+                        "contains_unclear_source": False,
+                        "original_before_qc_sha256": text_sha256(original),
+                        "standard_before_qc_sha256": text_sha256(standard),
+                        "standard_after_qc_sha256": text_sha256(standard),
+                        "disposition": "retained",
+                    }
+                )
             qc_inventory_path = downloaded / "_qc_transform_inventory.jsonl"
             qc_inventory_path.write_text(
                 "".join(
@@ -1484,7 +1712,10 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             (downloaded / "_qc_manifest.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "pipeline_version": "formosan-mt-corpus-v3",
+                        "source_language": "ami",
+                        "source_immutable": True,
                         "formosanbank_qc": {"revision": "d" * 40},
                         "transform_inventory": {
                             "path": qc_inventory_path.name,
@@ -1499,6 +1730,7 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             )
 
             make = ROOT / "scripts/local/make_corpus.py"
+            standardize = ROOT / "scripts/local/standardize_mt_corpus.py"
             clean = ROOT / "scripts/local/filter_split_corpus.py"
             aggregate = ROOT / "scripts/local/build_big_corpus.py"
             pivot_script = ROOT / "scripts/local/pivot.py"
@@ -1509,6 +1741,16 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
             validate_script = (
                 ROOT
                 / "formosan_mt_experiments/scripts/validate_experiment.py"
+            )
+
+            self.run_script(
+                standardize,
+                "--xml-dir",
+                downloaded,
+                "--src-lang",
+                "ami",
+                "--profile",
+                DEFAULT_PROFILE_PATH,
             )
 
             for target, short in (("english", "en"), ("chinese", "zh")):

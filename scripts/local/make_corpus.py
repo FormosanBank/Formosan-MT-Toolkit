@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Extract provenance-complete MT rows from canonical standard XML tiers."""
+"""Extract provenance-complete pairs using the toolkit MT standard."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -48,6 +49,7 @@ OUTPUT_COLUMNS = [
     "qc_final_xml_id",
     "xml_element_index",
     "kindOf",
+    "standard_namespace",
     "standard_origin",
     "original_before_qc_sha256",
     "standard_before_qc_sha256",
@@ -58,6 +60,20 @@ OUTPUT_COLUMNS = [
     "row_type",
     "formosan_original",
     "formosan_standard",
+    "formosan_original_raw",
+    "formosan_source_standard",
+    "formosan_mt_standard",
+    "source_standard_sha256",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_normalization_confidence",
+    "mt_eval_eligible",
+    "mt_normalization_reason",
+    "mt_transformations",
+    "mt_unresolved_markers",
+    "speaker_label",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "target_lang",
     "translation_index",
     "translation_kind",
@@ -83,6 +99,7 @@ class ExtractedPair:
     qc_final_xml_id: str
     xml_element_index: int
     kind_of: str
+    standard_namespace: str
     standard_origin: str
     original_before_qc_sha256: str
     standard_before_qc_sha256: str
@@ -93,6 +110,20 @@ class ExtractedPair:
     row_type: str
     formosan_original: str
     formosan_standard: str
+    formosan_original_raw: str
+    formosan_source_standard: str
+    formosan_mt_standard: str
+    source_standard_sha256: str
+    mt_standard_sha256: str
+    mt_normalization_status: str
+    mt_normalization_confidence: str
+    mt_eval_eligible: bool
+    mt_normalization_reason: str
+    mt_transformations: str
+    mt_unresolved_markers: str
+    speaker_label: str
+    mt_standard_profile: str
+    mt_standard_profile_sha256: str
     target_lang: str
     translation_index: int
     translation_kind: str
@@ -247,6 +278,77 @@ def load_qc_inventory(
     return records, manifest
 
 
+def load_mt_inventory(
+    xml_dir: Path,
+) -> tuple[dict[tuple[str, str, int, str], dict[str, object]], dict]:
+    manifest_path = xml_dir / "_mt_standard_manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(
+            f"Missing MT standard manifest under {xml_dir}; rerun standardize_mt_corpus.py"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Malformed MT standard manifest {manifest_path}: {exc}") from exc
+    if manifest.get("complete") is not True:
+        raise SystemExit(f"MT standard manifest is incomplete: {manifest_path}")
+    profile = manifest.get("profile", {})
+    profile_id = str(profile.get("id") or "")
+    profile_hash = str(profile.get("sha256") or "")
+    if not profile_id or len(profile_hash) != 64:
+        raise SystemExit(f"MT standard manifest has an invalid profile: {manifest_path}")
+    inventory_meta = manifest.get("inventory", {})
+    inventory_path = xml_dir / str(inventory_meta.get("path") or "")
+    if not inventory_path.is_file():
+        raise SystemExit(f"Missing MT standard inventory: {inventory_path}")
+    expected_hash = str(inventory_meta.get("sha256") or "")
+    if sha256_file(inventory_path) != expected_hash:
+        raise SystemExit(f"MT standard inventory checksum mismatch: {inventory_path}")
+
+    records: dict[tuple[str, str, int, str], dict[str, object]] = {}
+    inventory_rows = 0
+    with inventory_path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            inventory_rows += 1
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"Malformed MT standard inventory {inventory_path}:{line_number}: {exc}"
+                ) from exc
+            if (
+                str(row.get("mt_standard_profile") or "") != profile_id
+                or str(row.get("mt_standard_profile_sha256") or "")
+                != profile_hash
+            ):
+                raise SystemExit(
+                    f"MT standard profile mismatch at {inventory_path}:{line_number}"
+                )
+            if row.get("source_disposition") != "retained":
+                continue
+            final_index = row.get("final_element_index")
+            if final_index is None:
+                raise SystemExit(f"Retained MT standard row has no final locator at line {line_number}")
+            key = (
+                str(row.get("xml_path") or ""),
+                str(row.get("element_tag") or ""),
+                int(final_index),
+                str(row.get("final_xml_id") or row.get("xml_id") or ""),
+            )
+            if key in records:
+                raise SystemExit(f"Duplicate MT standard locator at {inventory_path}:{line_number}: {key}")
+            records[key] = row
+    expected_records = int(inventory_meta.get("records", -1))
+    if expected_records != inventory_rows:
+        raise SystemExit(
+            "MT standard inventory count is inconsistent: "
+            f"manifest={expected_records}, inventory={inventory_rows}"
+        )
+    return records, manifest
+
+
 def extract_file(
     xml_path: Path,
     *,
@@ -255,6 +357,7 @@ def extract_file(
     target_codes: set[str],
     tags: set[str],
     qc_records: dict[tuple[str, str, int, str], dict[str, str]] | None = None,
+    mt_records: dict[tuple[str, str, int, str], dict[str, object]] | None = None,
     qc_revision: str = "",
 ) -> tuple[list[ExtractedPair], Counter[str]]:
     stats: Counter[str] = Counter()
@@ -276,36 +379,11 @@ def extract_file(
         if element.tag not in tags:
             continue
         stats[f"{element.tag.lower()}_units_seen"] += 1
-        standard = direct_form(element, "standard")
-        if standard is None:
-            if element.tag == "S" and element.findall("AUDIO"):
-                stats["untranscribed_audio_sentences_skipped"] += 1
-            else:
-                stats["missing_standard_units_skipped"] += 1
-            continue
-        standard_text = mixed_text(standard)
-        if not standard_text:
-            stats["empty_standard"] += 1
-            if element.tag == "S":
-                if (
-                    standard.find("UNCLEAR") is not None
-                    or element.findall("AUDIO")
-                ):
-                    stats[
-                        "untranscribed_or_unclear_sentences_skipped"
-                    ] += 1
-                else:
-                    stats["empty_source_sentences_skipped"] += 1
-            else:
-                stats["empty_lexical_units_skipped"] += 1
-            continue
-        original = direct_form(element, "original")
-        original_text = mixed_text(original) if original is not None else ""
-        contains_unclear = any(child.tag == "UNCLEAR" for child in standard.iter())
         final_xml_id = (element.get("id") or "").strip()
+        locator = (relative, element.tag, element_index, final_xml_id)
         qc_record = (
             qc_records.get(
-                (relative, element.tag, element_index, final_xml_id)
+                locator
             )
             if qc_records is not None
             else None
@@ -321,6 +399,40 @@ def extract_file(
             "standard_before_qc_sha256": "",
             "standard_after_qc_sha256": "",
         }
+        mt_record = mt_records.get(locator) if mt_records is not None else None
+        if mt_records is not None and mt_record is None:
+            raise ValueError(
+                f"{relative}:{element.tag}:{final_xml_id} has no MT standard record"
+            )
+        if mt_record is None:
+            raise ValueError(
+                "MT standard inventory is required for extraction; run standardize_mt_corpus.py"
+            )
+        mt_status = str(mt_record.get("mt_normalization_status") or "")
+        if mt_status == "ineligible":
+            reason = str(mt_record.get("mt_normalization_reason") or "unspecified")
+            stats[f"mt_ineligible:{reason}"] += 1
+            continue
+        standard_text = str(mt_record.get("formosan_mt_standard") or "")
+        if not standard_text:
+            raise ValueError(
+                f"{relative}:{element.tag}:{final_xml_id} has empty model text with status {mt_status!r}"
+            )
+        source_standard = str(mt_record.get("formosan_source_standard") or "")
+        original_text = str(mt_record.get("formosan_original_raw") or "")
+        expected_source_hash = hashlib.sha256(
+            source_standard.encode("utf-8")
+        ).hexdigest()
+        expected_mt_hash = hashlib.sha256(standard_text.encode("utf-8")).hexdigest()
+        if str(mt_record.get("source_standard_sha256") or "") != expected_source_hash:
+            raise ValueError(
+                f"{relative}:{element.tag}:{final_xml_id} has a source-standard hash mismatch"
+            )
+        if str(mt_record.get("mt_standard_sha256") or "") != expected_mt_hash:
+            raise ValueError(
+                f"{relative}:{element.tag}:{final_xml_id} has an MT-standard hash mismatch"
+            )
+        contains_unclear = bool(mt_record.get("contains_unclear_source"))
         source_xml_id = qc_record.get("xml_id") or final_xml_id
 
         target_index = 0
@@ -376,7 +488,8 @@ def extract_file(
                     qc_final_xml_id=final_xml_id,
                     xml_element_index=element_index,
                     kind_of="standard",
-                    standard_origin=qc_record["standard_origin"],
+                    standard_namespace="formosan-mt",
+                    standard_origin=str(mt_record.get("standard_origin") or "missing"),
                     original_before_qc_sha256=qc_record[
                         "original_before_qc_sha256"
                     ],
@@ -391,7 +504,25 @@ def extract_file(
                     dialect=dialect,
                     row_type=row_type_for_tag(element.tag),
                     formosan_original=original_text,
-                    formosan_standard=standard_text,
+                    formosan_standard=source_standard,
+                    formosan_original_raw=original_text,
+                    formosan_source_standard=source_standard,
+                    formosan_mt_standard=standard_text,
+                    source_standard_sha256=str(mt_record.get("source_standard_sha256") or ""),
+                    mt_standard_sha256=str(mt_record.get("mt_standard_sha256") or ""),
+                    mt_normalization_status=mt_status,
+                    mt_normalization_confidence=str(
+                        mt_record.get("mt_normalization_confidence") or ""
+                    ),
+                    mt_eval_eligible=bool(mt_record.get("mt_eval_eligible")),
+                    mt_normalization_reason=str(mt_record.get("mt_normalization_reason") or ""),
+                    mt_transformations=str(mt_record.get("mt_transformations") or "[]"),
+                    mt_unresolved_markers=str(mt_record.get("mt_unresolved_markers") or ""),
+                    speaker_label=str(mt_record.get("speaker_label") or ""),
+                    mt_standard_profile=str(mt_record.get("mt_standard_profile") or ""),
+                    mt_standard_profile_sha256=str(
+                        mt_record.get("mt_standard_profile_sha256") or ""
+                    ),
                     target_lang=target_language,
                     translation_index=target_index,
                     translation_kind=(translation.get("kindOf") or "").strip(),
@@ -406,7 +537,7 @@ def extract_file(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract canonical standard-tier parallel rows from FormosanBank XML.",
+        description="Extract parallel rows using the toolkit MT standard.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--xml-dir", default="downloaded_xml", type=Path)
@@ -429,6 +560,7 @@ def main() -> None:
 
     fetch_inventory = load_fetch_inventory(xml_dir)
     qc_inventory, qc_manifest = load_qc_inventory(xml_dir)
+    mt_inventory, mt_manifest = load_mt_inventory(xml_dir)
     actual_xml = {
         str(path.relative_to(xml_dir))
         for path in xml_files
@@ -465,6 +597,7 @@ def main() -> None:
                 target_codes=target_codes,
                 tags=tags,
                 qc_records=qc_inventory,
+                mt_records=mt_inventory,
                 qc_revision=qc_revision,
             )
         except (ET.ParseError, ValueError) as exc:
@@ -505,7 +638,7 @@ def main() -> None:
             writer.writerow(row)
 
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": utc_now(),
         "xml_dir": str(xml_dir),
         "output": str(args.out),
@@ -521,6 +654,11 @@ def main() -> None:
         "qc_transform_inventory_sha256": qc_manifest[
             "transform_inventory"
         ]["sha256"],
+        "mt_standard_manifest_sha256": sha256_file(
+            xml_dir / "_mt_standard_manifest.json"
+        ),
+        "mt_standard_inventory_sha256": mt_manifest["inventory"]["sha256"],
+        "mt_standard_profile": mt_manifest["profile"],
         "qc_revision": qc_revision,
         "units": sorted(parse_units(args.units)),
         "files_total": len(xml_files),
@@ -531,7 +669,7 @@ def main() -> None:
     }
     report_path = args.out.with_suffix(".extraction.json")
     atomic_write_json(report_path, report)
-    print(f"Wrote {len(extracted):,} standard-tier pairs -> {args.out}")
+    print(f"Wrote {len(extracted):,} MT-standard pairs -> {args.out}")
     print(f"Extraction report: {report_path}")
 
 

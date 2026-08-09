@@ -1,6 +1,6 @@
 # No-Bible Corpus Rebuild
 
-This is the canonical corpus pipeline v2 release procedure. Generated CSVs and
+This is the canonical corpus pipeline v3 release procedure. Generated CSVs and
 paid DeepL caches are intentionally ignored by git. A completed build is
 self-describing through its checksummed manifests and portable provenance
 bundle.
@@ -74,6 +74,15 @@ Each named build produces:
 - `pivot_corpora_final/provenance/bundle_manifest.json`;
 - split, independent validation, and TAME-MT exposure reports.
 
+Each language build retains `downloaded_<lang>` as the immutable fetched
+snapshot and writes a separate `prepared_<lang>` tree. The prepared tree has
+`_qc_transform_inventory.jsonl`, `_mt_standard_inventory.jsonl`, and their
+checksummed manifests. `config/mt_standardization.json` is copied into the
+final provenance bundle. A changed profile hash invalidates downstream corpus,
+tokenizer, resume, and evaluation contracts, but it does not invalidate DeepL
+cache entries because those are keyed by the English/Chinese pivot text and
+provider settings.
+
 Rows and hashes are release outputs, not constants in source documentation.
 Read them from the build and bundle manifests.
 
@@ -82,6 +91,8 @@ Read them from the build and bundle manifests.
 - XML lexemes/morphemes: training only.
 - DeepL/synthetic rows: training only.
 - Evaluation: human sentence references only.
+- Evaluation normalization: unchanged or safe only; ambiguous and unresolved
+  Formosan notation is train-only or quarantined.
 - Final per-language split minimum: 7.5% test and 2.5% validation, measured
   against every emitted row including synthetic training rows.
 - Small-language desired floors: 500 test and 150 validation rows.

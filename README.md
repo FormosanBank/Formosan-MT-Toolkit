@@ -6,17 +6,19 @@ separate public and private/all-repository corpora, excludes the exact Taiwan
 Bible Society repository, completes English/Chinese coverage with cached
 DeepL pivots, and creates leakage-resistant evaluation splits.
 
-Corpus pipeline v2 is the first supported release path. July 2026 v1 manifests
+Corpus pipeline v3 is the supported release path. July 2026 v1 manifests
 remain in `formosan_mt_experiments/manifests/` as historical experiment
-records; their corpora must not be reused as v2 training inputs.
+records; their corpora must not be reused as v3 training inputs.
 
 ## Current Production Path
 
 ```text
 FormosanBank Final_XML
   -> immutable repository/commit/blob inventory
-  -> pinned FormosanBank QC, preserving supplied standard tiers
-  -> extract only FORM kindOf="standard" with element-level provenance
+  -> derived XML copy + pinned structural QC
+  -> source tier selection: supplied standard, else original, else untyped
+  -> versioned toolkit MT standardization + complete unit ledger
+  -> extract formosan_mt_standard with element-level provenance
   -> conservative NFC cleaning + rejection ledger
   -> multilingual EN/ZH aggregates
   -> validated, transactional DeepL pivot completion
@@ -39,7 +41,7 @@ documents the superseded July v1 flight.
 | Path | Role |
 |---|---|
 | `build_corpora.sh` | Stable wrapper for the end-to-end corpus builder. |
-| `scripts/local/` | Fetch, QC, XML extraction, pair filtering, aggregation, and orchestration. |
+| `scripts/local/` | Fetch, source selection, MT standardization, extraction, filtering, aggregation, and orchestration. |
 | `scripts/local/pivot.py` | DeepL key rotation, caching, and pivot provenance. |
 | `formosan_mt_experiments/` | Current split, validation, NLLB/MADLAD training, evaluation, and Slurm stack. |
 | `corpus_builds/<name>/` | Ignored self-contained public/private generated builds. |
@@ -98,8 +100,8 @@ combine `--skip-fetch` with a first-time Bible exclusion because stale fetched
 XML could remain.
 
 Production builds require a clean Git checkout. They fail if acquisition,
-parsing, QC, row conservation, pivot completion, split validation, exposure
-auditing, or provenance packaging is incomplete.
+parsing, source selection, standardization, row conservation, pivot completion,
+split validation, exposure auditing, or provenance packaging is incomplete.
 
 DeepL responses that fail target-script, identity, markup, or fertility checks
 are excluded from training and recorded in a checksummed per-direction
@@ -128,9 +130,13 @@ The model-facing artifact is
 `big_corpus_<en|zh>_in_domain_hard.csv`. Its contract is enforced locally and
 again on Andromeda before any GPU dependency can start:
 
-- extract source text from `FORM kindOf="standard"`;
-- retain raw original, cleaned standard, XML locator, source commit, QC commit,
-  standard origin, and pre/post-QC hashes for every row;
+- preserve `formosan_original_raw` and `formosan_source_standard`, then train on
+  the separate `formosan_mt_standard` namespace;
+- retain the XML locator, source commit, QC commit, standard origin, profile
+  hash, ordered transformations, confidence, and before/after hashes;
+- permit only unchanged or safely transformed human sentences in evaluation;
+- route ambiguous normalizations, unresolved notation, synthetic rows,
+  lexemes, and morphemes to training or quarantine as appropriate;
 - route XML lexemes and morphemes to training only;
 - reserve at least 7.5% test and 2.5% validation for every language, measured
   against all final rows;

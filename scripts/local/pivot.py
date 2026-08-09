@@ -56,6 +56,12 @@ BASE_COLUMNS = [
     "source_record_id",
     "lang_code",
     "formosan_sentence",
+    "formosan_mt_standard",
+    "standard_namespace",
+    "mt_normalization_status",
+    "mt_eval_eligible",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "source",
     "dialect",
     "row_type",
@@ -344,6 +350,29 @@ def validate_columns(df: pd.DataFrame, path: Path, columns: Iterable[str]) -> No
     missing = [c for c in columns if c not in df.columns]
     if missing:
         raise SystemExit(f"{path} is missing required column(s): {missing}")
+
+
+def validate_mt_standard_contract(df: pd.DataFrame, path: Path) -> dict[str, str]:
+    validate_columns(df, path, BASE_COLUMNS)
+    if not df["standard_namespace"].astype(str).eq("formosan-mt").all():
+        raise SystemExit(f"{path} contains rows outside the Formosan MT namespace")
+    if not df["mt_normalization_status"].astype(str).eq("accepted").all():
+        raise SystemExit(f"{path} contains non-accepted MT standardization rows")
+    if not df["formosan_sentence"].astype(str).eq(
+        df["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit(f"{path} violates the Formosan MT-standard alias contract")
+    profile_ids = set(df["mt_standard_profile"].astype(str).str.strip())
+    profile_hashes = set(df["mt_standard_profile_sha256"].astype(str).str.strip())
+    if len(profile_ids) != 1 or not next(iter(profile_ids), ""):
+        raise SystemExit(f"{path} does not identify one MT standardization profile")
+    profile_hash = next(iter(profile_hashes), "")
+    if len(profile_hashes) != 1 or len(profile_hash) != 64:
+        raise SystemExit(f"{path} does not identify one valid MT standardization profile hash")
+    return {
+        "id": next(iter(profile_ids)),
+        "sha256": profile_hash,
+    }
 
 
 def normalize_key_text(value: Any) -> str:
@@ -647,6 +676,12 @@ def translate_direction(
     target_df = read_corpus(direction.original_target_path, f"{direction.name} target corpus")
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
     validate_columns(target_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
+    source_profile = validate_mt_standard_contract(source_df, direction.source_path)
+    target_profile = validate_mt_standard_contract(target_df, direction.original_target_path)
+    if source_profile != target_profile:
+        raise SystemExit(
+            f"{direction.name} source and target corpora use different MT standard profiles"
+        )
     stats.source_rows = len(source_df)
     stats.original_rows = len(target_df)
     target_keys = target_formosan_keys(target_df)
@@ -932,6 +967,12 @@ def write_pivot_output(
 
     validate_columns(original_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
+    source_profile = validate_mt_standard_contract(source_df, direction.source_path)
+    target_profile = validate_mt_standard_contract(original_df, direction.original_target_path)
+    if source_profile != target_profile:
+        raise SystemExit(
+            f"{direction.name} source and target corpora use different MT standard profiles"
+        )
 
     target_keys = target_formosan_keys(original_df)
     output_path = args.out_dir / direction.output_filename
@@ -1087,6 +1128,18 @@ def write_manifest(
         }
         for name, path in sources.items()
     }
+    source_profiles = {
+        tuple(
+            validate_mt_standard_contract(
+                read_corpus(Path(path), name),
+                Path(path),
+            ).values()
+        )
+        for name, path in sources.items()
+    }
+    if len(source_profiles) != 1:
+        raise SystemExit("Pivot sources do not share one MT standardization profile")
+    profile_id, profile_hash = next(iter(source_profiles))
     cache_records: dict[str, dict[str, Any]] = {}
     for stats in direction_stats:
         for path_string in [*(stats.read_cache_paths or []), stats.cache_path]:
@@ -1099,10 +1152,14 @@ def write_manifest(
                 "bytes": path.stat().st_size if path.is_file() else 0,
             }
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "pipeline_version": load_pipeline_config()["pipeline_version"],
         "created_at": now_iso(),
         "provider": PROVIDER,
+        "mt_standardization": {
+            "id": profile_id,
+            "sha256": profile_hash,
+        },
         "sources": source_records,
         "outputs": {
             "out_dir": str(args.out_dir),
@@ -1201,7 +1258,7 @@ def configure_arg_parser(project_root: Path) -> argparse.ArgumentParser:
     ap.add_argument(
         "--splits",
         default="all",
-        help="Compatibility option. Corpus pipeline v2 requires all rows before its single split.",
+        help="Compatibility option. Corpus pipeline v3 requires all rows before its single split.",
     )
     ap.add_argument(
         "--include-target-overlaps",
@@ -1292,7 +1349,7 @@ def main() -> None:
 
     selected_direction_names = parse_directions(args.directions)
     if args.splits.strip().lower() not in {"all", "*"}:
-        raise SystemExit("Corpus pipeline v2 requires --splits all; splitting occurs once after pivoting")
+        raise SystemExit("Corpus pipeline v3 requires --splits all; splitting occurs once after pivoting")
     directions = build_directions(args)
 
     api_key_env_names = parse_api_key_envs(args.api_key_env)

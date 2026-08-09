@@ -36,6 +36,7 @@ CANONICAL_SUFFIX = [
     "qc_final_xml_id",
     "xml_element_index",
     "kindOf",
+    "standard_namespace",
     "standard_origin",
     "original_before_qc_sha256",
     "standard_before_qc_sha256",
@@ -46,6 +47,20 @@ CANONICAL_SUFFIX = [
     "row_type",
     "formosan_original",
     "formosan_standard",
+    "formosan_original_raw",
+    "formosan_source_standard",
+    "formosan_mt_standard",
+    "source_standard_sha256",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_normalization_confidence",
+    "mt_eval_eligible",
+    "mt_normalization_reason",
+    "mt_transformations",
+    "mt_unresolved_markers",
+    "speaker_label",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
     "target_lang",
     "translation_index",
     "translation_kind",
@@ -125,6 +140,12 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
         "row_id",
         "source_record_id",
         "kindOf",
+        "standard_namespace",
+        "formosan_mt_standard",
+        "mt_normalization_status",
+        "mt_eval_eligible",
+        "mt_standard_profile",
+        "mt_standard_profile_sha256",
         "source",
         "row_type",
     }
@@ -133,6 +154,10 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
         raise SystemExit(f"{path} is missing required cleaned columns: {missing}")
     if not frame["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit(f"{path} contains non-standard Formosan rows")
+    if not frame["standard_namespace"].astype(str).eq("formosan-mt").all():
+        raise SystemExit(f"{path} contains rows outside the Formosan MT standard namespace")
+    if not frame["formosan_sentence"].astype(str).eq(frame["formosan_mt_standard"].astype(str)).all():
+        raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
     languages = set(frame["lang_code"].astype(str).str.lower())
     if languages != {language}:
         raise SystemExit(
@@ -144,7 +169,15 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
 
 def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
     frame = read_csv(path)
-    required = {"lang_code", "formosan_sentence"}
+    required = {
+        "lang_code",
+        "formosan_sentence",
+        "formosan_mt_standard",
+        "standard_namespace",
+        "mt_normalization_status",
+        "mt_standard_profile",
+        "mt_standard_profile_sha256",
+    }
     missing = sorted(required - set(frame.columns))
     if missing:
         raise SystemExit(f"{path} is not a supported aggregate corpus: missing {missing}")
@@ -154,6 +187,14 @@ def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
         raise SystemExit(
             f"{path} must contain exactly one target column, not English={has_english}, Chinese={has_chinese}"
         )
+    if not frame["standard_namespace"].astype(str).eq("formosan-mt").all():
+        raise SystemExit(f"{path} contains rows outside the Formosan MT standard namespace")
+    if not frame["mt_normalization_status"].astype(str).eq("accepted").all():
+        raise SystemExit(f"{path} contains non-accepted MT-standard rows")
+    if not frame["formosan_sentence"].astype(str).eq(
+        frame["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
     return ("en" if has_english else "zh"), ensure_metadata(frame)
 
 
@@ -220,6 +261,20 @@ def write_target(frames: list[pd.DataFrame], path: Path, target_column: str) -> 
     )
     if empty.any():
         raise SystemExit(f"Aggregate input contains {int(empty.sum())} empty required rows for {path.name}")
+    if "formosan_mt_standard" not in output or not output["formosan_sentence"].astype(str).eq(
+        output["formosan_mt_standard"].astype(str)
+    ).all():
+        raise SystemExit(f"Aggregate input violates the MT-standard alias contract for {path.name}")
+    if "mt_standard_profile_sha256" not in output:
+        raise SystemExit(f"Aggregate input has no MT standard profile hash for {path.name}")
+    profile_hashes = set(output["mt_standard_profile_sha256"].astype(str))
+    if len(profile_hashes) != 1 or len(next(iter(profile_hashes), "")) != 64:
+        raise SystemExit(f"Aggregate input mixes or omits MT standard profiles for {path.name}")
+    profile_ids = set(output["mt_standard_profile"].astype(str))
+    if len(profile_ids) != 1 or not next(iter(profile_ids), ""):
+        raise SystemExit(f"Aggregate input mixes or omits MT standard profile IDs for {path.name}")
+    if not output["mt_normalization_status"].astype(str).eq("accepted").all():
+        raise SystemExit(f"Aggregate input contains non-accepted MT-standard rows for {path.name}")
     output = output[canonical_order(output, target_column)]
     path.parent.mkdir(parents=True, exist_ok=True)
     output.to_csv(path, index=False)
@@ -304,12 +359,25 @@ def main() -> None:
     chinese = write_target(chinese_inputs, chinese_path, "chinese_sentence")
     combined_rows = write_combined(chinese, english, combined_path)
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": utc_now(),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "inputs": inventory,
         "input_inventory_sha256": stable_json_hash(inventory),
+        "mt_standardization": {
+            "id": str(
+                (english if not english.empty else chinese)[
+                    "mt_standard_profile"
+                ].iloc[0]
+            ),
+            "sha256": str(
+                (english if not english.empty else chinese)[
+                    "mt_standard_profile_sha256"
+                ].iloc[0]
+            ),
+            "namespace": "formosan-mt",
+        },
         "outputs": {
             "english": {
                 "path": str(english_path),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply pinned FormosanBank QC without ever overwriting standard tiers."""
+"""Prepare a derived XML copy for MT without mutating fetched source XML."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -18,15 +19,10 @@ from urllib.parse import quote
 import requests
 from dotenv import load_dotenv
 from pipeline_common import atomic_write_json, load_pipeline_config, sha256_file, stable_json_hash, utc_now
-from qc_change_audit import (
-    classify_cleaner_field_changes,
-    snapshot_cleaner_fields,
-)
 from qc_reporting import (
     QC_LOG_DIR,
     print_qc_rule_summary,
     run_captured_command,
-    run_cleaner_command,
     summarize_validator_findings,
 )
 from requests.adapters import HTTPAdapter
@@ -85,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--src-lang", required=True, help="Source ISO 639-3 code")
     parser.add_argument("--tgt-lang", help="Optional target-language eligibility check")
     parser.add_argument("--in-dir", help="Directory containing downloaded XML")
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        help="Derived XML directory. Must differ from --in-dir.",
+    )
     parser.add_argument(
         "--formosanbank-path",
         type=Path,
@@ -338,7 +339,7 @@ def validate_fetch_contract(directory: Path) -> dict[str, object]:
         raise SystemExit(
             f"Fetch inventory hash mismatch under {directory}"
         )
-    kept: set[str] = set()
+    kept: dict[str, str] = {}
     with inventory_path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -351,26 +352,60 @@ def validate_fetch_contract(directory: Path) -> dict[str, object]:
                     f"{inventory_path}:{line_number}: {exc}"
                 ) from exc
             if row.get("status") == "kept":
-                kept.add(str(row.get("destination") or ""))
+                destination = str(row.get("destination") or "")
+                expected_sha256 = str(row.get("sha256") or "")
+                if not destination or len(expected_sha256) != 64:
+                    raise SystemExit(
+                        f"Incomplete kept fetch record at {inventory_path}:{line_number}"
+                    )
+                kept[destination] = expected_sha256
     actual = {
         str(path.relative_to(directory))
         for path in directory.rglob("*.xml")
     }
-    if actual != kept:
+    expected = set(kept)
+    if actual != expected:
         raise SystemExit(
             "Fetched XML set does not match its immutable inventory: "
-            f"missing={sorted(kept - actual)[:10]}, "
-            f"unexpected={sorted(actual - kept)[:10]}"
+            f"missing={sorted(expected - actual)[:10]}, "
+            f"unexpected={sorted(actual - expected)[:10]}"
+        )
+    mismatched = [
+        relative
+        for relative, expected_sha256 in kept.items()
+        if sha256_file(directory / relative) != expected_sha256
+    ]
+    if mismatched:
+        raise SystemExit(
+            "Fetched XML content does not match its immutable inventory: "
+            f"mismatched={mismatched[:10]}"
         )
     return {
         "manifest_sha256": sha256_file(manifest_path),
         "inventory_sha256": inventory_hash,
         "xml_files": len(actual),
+        "xml_inventory_sha256": stable_json_hash(sorted(kept.items())),
     }
+
+
+def prepare_working_copy(source_dir: Path, output_dir: Path) -> None:
+    source = source_dir.resolve()
+    output = output_dir.resolve()
+    if source == output:
+        raise SystemExit("--out-dir must differ from --in-dir; fetched XML is immutable")
+    if source in output.parents or output in source.parents:
+        raise SystemExit("--out-dir cannot contain or be contained by --in-dir")
+    if output.exists():
+        shutil.rmtree(output)
+    shutil.copytree(source, output)
 
 
 def mixed_content_signature(element: ET.Element) -> str:
     return ET.tostring(element, encoding="unicode")
+
+
+def mixed_text(element: ET.Element | None) -> str:
+    return "" if element is None else "".join(element.itertext()).strip()
 
 
 def form_sha256(element: ET.Element | None) -> str | None:
@@ -414,10 +449,42 @@ def tag_transform_sources(
                 for form in element.findall("FORM")
                 if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
-            if len(originals) > 1 or len(standards) > 1:
+            untyped = [
+                form
+                for form in element.findall("FORM")
+                if not (form.get("kindOf") or "").strip()
+            ]
+            if len(originals) > 1 or len(standards) > 1 or len(untyped) > 1:
                 raise SystemExit(
-                    f"Duplicate original/standard tier at "
+                    f"Duplicate or ambiguous FORM tiers at "
                     f"{relative}:{element.tag}:{element.get('id', '')}"
+                )
+            original = originals[0] if originals else None
+            provided_standard = standards[0] if standards else None
+            untyped_form = untyped[0] if untyped else None
+            provided_text = mixed_text(provided_standard)
+            original_text = mixed_text(original)
+            untyped_text = mixed_text(untyped_form)
+            if provided_text:
+                selected = provided_standard
+                selected_text = provided_text
+                standard_origin = "provided"
+            elif original_text:
+                selected = original
+                selected_text = original_text
+                standard_origin = "derived_from_original"
+            elif untyped_text:
+                selected = untyped_form
+                selected_text = untyped_text
+                standard_origin = "derived_from_untyped"
+                original_text = untyped_text
+            else:
+                selected = None
+                selected_text = ""
+                standard_origin = (
+                    "untranscribed_audio"
+                    if element.tag == "S" and element.findall("AUDIO")
+                    else "missing"
                 )
             records[token] = {
                 "transform_id": token,
@@ -425,25 +492,19 @@ def tag_transform_sources(
                 "element_tag": element.tag,
                 "xml_id": element.get("id", ""),
                 "source_element_index": unit_index,
-                "standard_origin": (
-                    "provided"
-                    if standards
-                    else (
-                        "derived_from_original"
-                        if originals
-                        else (
-                            "untranscribed_audio"
-                            if element.tag == "S"
-                            and element.findall("AUDIO")
-                            else "missing"
-                        )
-                    )
-                ),
+                "standard_origin": standard_origin,
+                "provided_standard_present": bool(provided_standard is not None),
                 "original_before_qc_sha256": form_sha256(
-                    originals[0] if originals else None
+                    original if original is not None else untyped_form
                 ),
-                "standard_before_qc_sha256": form_sha256(
-                    standards[0] if standards else None
+                "standard_before_qc_sha256": form_sha256(provided_standard),
+                "source_standard_sha256": form_sha256(selected),
+                "formosan_original_raw": original_text,
+                "formosan_source_standard": selected_text,
+                "provided_standard_raw": provided_text,
+                "contains_unclear_source": bool(
+                    selected is not None
+                    and any(child.tag == "UNCLEAR" for child in selected.iter())
                 ),
             }
             element.set(PROVENANCE_ATTR, token)
@@ -868,12 +929,6 @@ def run_qc_scripts(
 ) -> dict[str, object]:
     logs_dir = corpus_dir / QC_LOG_DIR
     logs_dir.mkdir(parents=True, exist_ok=True)
-    for generated in (
-        corpus_dir / "cleaner_warnings.csv",
-        corpus_dir / "html_entities.log",
-    ):
-        generated.unlink(missing_ok=True)
-    clean_script = qc_root / "QC" / "cleaning" / "clean_xml.py"
     transform_sources = tag_transform_sources(corpus_dir)
     try:
         tier_completion = ensure_standard_tiers(corpus_dir)
@@ -885,22 +940,6 @@ def run_qc_scripts(
             corpus_dir,
             qc_root,
             log_path=logs_dir / "fix_multiple_translations.log",
-        )
-        cleaner_fields_before = snapshot_cleaner_fields(corpus_dir)
-        cleaner = run_cleaner_command(
-            [
-                sys.executable,
-                str(clean_script),
-                "--corpora_path",
-                str(corpus_dir),
-            ],
-            qc_root,
-            corpus_dir=corpus_dir,
-            log_path=logs_dir / "clean_xml.log",
-        )
-        cleaner["field_changes"] = classify_cleaner_field_changes(
-            cleaner_fields_before,
-            snapshot_cleaner_fields(corpus_dir),
         )
         (
             dialect_completion,
@@ -987,7 +1026,14 @@ def run_qc_scripts(
             translation_version_completion
         ),
         "translation_version_log": translation_version_log,
-        "cleaner": cleaner,
+        "semantic_text_cleaning": {
+            "applied": False,
+            "authority": "formosan-mt-standardization",
+            "reason": (
+                "FormosanBank source tiers are preserved; model text is "
+                "derived by standardize_mt_corpus.py"
+            ),
+        },
         "dialect_completion": dialect_completion,
         "dialect_log": dialect_log,
         "mt_structure_repair": mt_structure_repair,
@@ -1000,20 +1046,28 @@ def run_qc_scripts(
 
 def main() -> None:
     args = parse_args()
-    corpus_dir = Path(args.in_dir or f"downloaded_{args.src_lang}").expanduser().resolve()
-    if not corpus_dir.is_dir():
-        raise SystemExit(f"Input directory does not exist: {corpus_dir}")
+    source_dir = Path(args.in_dir or f"downloaded_{args.src_lang}").expanduser().resolve()
+    if not source_dir.is_dir():
+        raise SystemExit(f"Input directory does not exist: {source_dir}")
+    if args.out_dir is None:
+        raise SystemExit("--out-dir is required so fetched source XML remains immutable")
+    corpus_dir = args.out_dir.expanduser().resolve()
 
-    fetch_snapshot = validate_fetch_contract(corpus_dir)
+    fetch_snapshot_before = validate_fetch_contract(source_dir)
+    prepare_working_copy(source_dir, corpus_dir)
     qc_root = resolve_qc_root(args)
     input_counts = validate_input_files(corpus_dir, args.src_lang, args.tgt_lang)
     qc_result = run_qc_scripts(corpus_dir, qc_root, validate=not args.skip_validation)
+    fetch_snapshot_after = validate_fetch_contract(source_dir)
+    if fetch_snapshot_before != fetch_snapshot_after:
+        raise SystemExit("Fetched source snapshot changed during XML preparation")
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "pipeline_version": PIPELINE_CONFIG["pipeline_version"],
         "created_at": utc_now(),
         "source_language": args.src_lang,
         "target_language": args.tgt_lang,
+        "source_dir": str(source_dir),
         "corpus_dir": str(corpus_dir),
         "formosanbank_qc": {
             "repository": f"{QC_ORG}/{QC_REPO}",
@@ -1024,7 +1078,8 @@ def main() -> None:
             ),
         },
         "input": input_counts,
-        "fetch_snapshot": fetch_snapshot,
+        "fetch_snapshot": fetch_snapshot_before,
+        "source_immutable": True,
         **qc_result,
         "complete": not args.skip_validation,
     }

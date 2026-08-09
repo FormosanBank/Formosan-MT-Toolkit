@@ -20,8 +20,15 @@ def load_pipeline_config() -> dict[str, Any]:
         value = json.loads(PIPELINE_CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Cannot load pipeline config {PIPELINE_CONFIG_PATH}: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
+    if not isinstance(value, dict) or value.get("schema_version") != 3:
         raise RuntimeError(f"Unsupported corpus pipeline config: {PIPELINE_CONFIG_PATH}")
+    mt_standard = value.get("mt_standardization", {})
+    if (
+        mt_standard.get("profile_id") != "formosan-mt-standard-v3"
+        or mt_standard.get("namespace") != "formosan-mt"
+        or mt_standard.get("source_xml_immutable") is not True
+    ):
+        raise RuntimeError("Corpus pipeline has an invalid MT-standard contract")
     exposure = value.get("exposure_audit", {})
     if exposure.get("tool") != "tame-mt" or exposure.get("version") != "0.2.2":
         raise RuntimeError("Corpus pipeline must pin tame-mt==0.2.2")

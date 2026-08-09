@@ -52,8 +52,11 @@ class BuildPaths:
     manifest_path: Path
     source_snapshot_path: Path
 
-    def xml_dir(self, lang: Language) -> Path:
+    def source_xml_dir(self, lang: Language) -> Path:
         return self.root / f"downloaded_{lang.code}"
+
+    def prepared_xml_dir(self, lang: Language) -> Path:
+        return self.root / f"prepared_{lang.code}"
 
 
 LANGUAGES = (
@@ -321,6 +324,7 @@ def package_training_provenance(
         "mt_build_manifest.json": paths.manifest_path,
         "source_repository_snapshot.json": paths.source_snapshot_path,
         "corpus_pipeline.json": PIPELINE_CONFIG_PATH,
+        "mt_standardization.json": PROJECT_ROOT / "config" / "mt_standardization.json",
         "aggregate_manifest.json": final_corpus_dir / "aggregate_manifest.json",
         "split_en_in_domain_hard.json": (
             paths.split_root / "splits_en_v1" / "report_in_domain_hard.json"
@@ -349,6 +353,15 @@ def package_training_provenance(
             / "exposure_in_domain_hard.json"
         ),
     }
+    for prepared_dir in sorted(paths.root.glob("prepared_*")):
+        language = prepared_dir.name.removeprefix("prepared_")
+        for source_name, prefix in (
+            ("_qc_manifest.json", "xml_preparation"),
+            ("_mt_standard_manifest.json", "mt_standard"),
+        ):
+            source = prepared_dir / source_name
+            if source.is_file():
+                sources[f"{prefix}_{language}.json"] = source
     pivot_manifest = (
         paths.processed_dir / "pivot" / "pivot_manifest.json"
     )
@@ -413,17 +426,19 @@ def package_training_provenance(
 
 
 def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) -> dict:
-    xml_dir = paths.xml_dir(lang)
+    source_xml_dir = paths.source_xml_dir(lang)
+    prepared_xml_dir = paths.prepared_xml_dir(lang)
     raw_zh = paths.raw_dir / f"{lang.code}_zh.csv"
     raw_en = paths.raw_dir / f"{lang.code}_en.csv"
     proc_zh = paths.processed_dir / f"{lang.code}_zh_processed.csv"
     proc_en = paths.processed_dir / f"{lang.code}_en_processed.csv"
-    fetch_manifest = xml_dir / "_fetch_manifest.json"
-    qc_manifest = xml_dir / "_qc_manifest.json"
+    fetch_manifest = source_xml_dir / "_fetch_manifest.json"
+    qc_manifest = prepared_xml_dir / "_qc_manifest.json"
+    mt_standard_manifest = prepared_xml_dir / "_mt_standard_manifest.json"
 
     if not args.skip_fetch:
         cmd = [PYTHON, str(script("scripts/local/fetch_xml.py")), "--src-lang", lang.code]
-        cmd.extend(["--out-dir", str(xml_dir)])
+        cmd.extend(["--out-dir", str(source_xml_dir)])
         cmd.extend(["--workers", str(args.fetch_workers)])
         cmd.extend(["--download-retries", str(args.fetch_download_retries)])
         cmd.extend(["--retry-base-sleep", str(args.fetch_retry_base_sleep)])
@@ -456,7 +471,8 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
 
     if not args.skip_clean:
         cmd = [PYTHON, str(script("scripts/local/clean_xml.py")), "--src-lang", lang.code]
-        cmd.extend(["--in-dir", str(xml_dir)])
+        cmd.extend(["--in-dir", str(source_xml_dir)])
+        cmd.extend(["--out-dir", str(prepared_xml_dir)])
         if args.formosanbank_path:
             cmd.extend(["--formosanbank-path", str(args.formosanbank_path)])
         cmd.extend(["--qc-revision", args.qc_revision])
@@ -475,13 +491,44 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         if qc_revision != args.qc_revision:
             raise SystemExit(f"{lang.code} QC revision mismatch: expected {args.qc_revision}, found {qc_revision}")
 
+    if not args.skip_mt_standardization:
+        run(
+            [
+                PYTHON,
+                str(script("scripts/local/standardize_mt_corpus.py")),
+                "--xml-dir",
+                str(prepared_xml_dir),
+                "--src-lang",
+                lang.code,
+                "--profile",
+                str(args.mt_standard_profile),
+            ],
+            dry_run=args.dry_run,
+        )
+    if not args.dry_run:
+        mt_payload = require_json_manifest(
+            mt_standard_manifest,
+            stage=f"{lang.code} MT standardization",
+            expected={"source_language": lang.code},
+        )
+        expected_profile_hash = sha256_file(args.mt_standard_profile)
+        profile_record = mt_payload.get("profile", {})
+        if (
+            profile_record.get("id")
+            != PIPELINE_CONFIG["mt_standardization"]["profile_id"]
+            or profile_record.get("sha256") != expected_profile_hash
+        ):
+            raise SystemExit(
+                f"{lang.code} MT standardization profile does not match the build contract"
+            )
+
     if not args.skip_raw:
         run(
             [
                 PYTHON,
                 str(script("scripts/local/make_corpus.py")),
                 "--xml-dir",
-                str(xml_dir),
+                str(prepared_xml_dir),
                 "--target",
                 "chinese",
                 "--out",
@@ -496,7 +543,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 PYTHON,
                 str(script("scripts/local/make_corpus.py")),
                 "--xml-dir",
-                str(xml_dir),
+                str(prepared_xml_dir),
                 "--target",
                 "english",
                 "--out",
@@ -546,6 +593,11 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         "manifests": {
             "fetch": stage_manifest_record(fetch_manifest) if not args.dry_run else {},
             "qc": stage_manifest_record(qc_manifest) if not args.dry_run else {},
+            "mt_standard": (
+                stage_manifest_record(mt_standard_manifest)
+                if not args.dry_run
+                else {}
+            ),
             "extract_zh": (stage_manifest_record(raw_zh.with_suffix(".extraction.json")) if not args.dry_run else {}),
             "extract_en": (stage_manifest_record(raw_en.with_suffix(".extraction.json")) if not args.dry_run else {}),
             "clean_zh": (stage_manifest_record(zh_filter_manifest) if not args.dry_run else {}),
@@ -789,7 +841,7 @@ def write_manifest(
             dependency_versions[package] = "not-installed"
     complete = not missing_artifacts and not missing_stages
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "pipeline_version": PIPELINE_CONFIG["pipeline_version"],
         "created_at": utc_now(),
         "corpus_name": args.corpus_name,
@@ -798,6 +850,11 @@ def write_manifest(
         "pipeline_config": {
             "path": str(PIPELINE_CONFIG_PATH.relative_to(PROJECT_ROOT)),
             "sha256": sha256_file(PIPELINE_CONFIG_PATH),
+        },
+        "mt_standardization": {
+            "id": PIPELINE_CONFIG["mt_standardization"]["profile_id"],
+            "sha256": sha256_file(args.mt_standard_profile),
+            "namespace": PIPELINE_CONFIG["mt_standardization"]["namespace"],
         },
         "runtime": {
             "python": sys.version,
@@ -825,6 +882,7 @@ def write_manifest(
             "keep_redactions": args.keep_redactions,
             "fresh_downloads": not args.keep_downloaded,
             "source_repository_snapshot": str(paths.source_snapshot_path),
+            "mt_standardization_profile": str(args.mt_standard_profile),
             "keep_build_output": args.keep_build_output,
             "allow_dirty_repository": args.allow_dirty_repository,
             "fetch_workers": args.fetch_workers,
@@ -973,6 +1031,12 @@ def parse_args() -> argparse.Namespace:
         default=PIPELINE_CONFIG["formosanbank"]["qc_revision"],
         help="Pinned FormosanBank commit used for QC.",
     )
+    parser.add_argument(
+        "--mt-standard-profile",
+        type=Path,
+        default=PROJECT_ROOT / PIPELINE_CONFIG["mt_standardization"]["profile"],
+        help="Versioned toolkit profile used to derive model-facing Formosan text.",
+    )
     parser.add_argument("--force-qc-update", action="store_true")
     parser.add_argument(
         "--skip-qc-validation",
@@ -990,6 +1054,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--skip-fetch", action="store_true")
     parser.add_argument("--skip-clean", action="store_true")
+    parser.add_argument("--skip-mt-standardization", action="store_true")
     parser.add_argument("--skip-raw", action="store_true")
     parser.add_argument("--skip-filter", action="store_true")
     parser.add_argument("--skip-aggregate", action="store_true")
@@ -1095,13 +1160,18 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
     if args.tiers != PIPELINE_CONFIG["splits"]["headline_tier"]:
         raise SystemExit(
-            "Corpus pipeline v2 supports only "
+            "Corpus pipeline v3 supports only "
             f"--tiers {PIPELINE_CONFIG['splits']['headline_tier']}"
         )
     if len(args.qc_revision) != 40 or any(
         character not in "0123456789abcdef" for character in args.qc_revision.lower()
     ):
         raise SystemExit("--qc-revision must be a full 40-character commit SHA")
+    args.mt_standard_profile = args.mt_standard_profile.expanduser().resolve()
+    if not args.mt_standard_profile.is_file():
+        raise SystemExit(
+            f"MT standardization profile does not exist: {args.mt_standard_profile}"
+        )
     split_total = args.train_ratio + args.val_ratio + args.test_ratio
     if abs(split_total - 1.0) > 1e-9:
         raise SystemExit(f"Hard split ratios must sum to 1.0, found {split_total:.12f}")

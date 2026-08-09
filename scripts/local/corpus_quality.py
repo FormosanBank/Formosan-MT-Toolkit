@@ -170,6 +170,14 @@ def quality_decision(
 
     if str(row.get("kindOf", "standard")).strip().lower() != "standard":
         return QualityDecision("rejected", "non_standard_form")
+    if str(row.get("standard_namespace", "")).strip() != "formosan-mt":
+        return QualityDecision("rejected", "non_mt_standard_namespace")
+    mt_status = str(row.get("mt_normalization_status", "")).strip().lower()
+    if mt_status != "accepted":
+        reason = str(row.get("mt_normalization_reason", "")).strip() or mt_status or "missing"
+        return QualityDecision("quarantine", f"mt_standard:{reason}")
+    if str(row.get("formosan_mt_standard", "")) != source:
+        return QualityDecision("rejected", "mt_standard_alias_mismatch")
     if "456otca" in source.casefold():
         return QualityDecision("rejected", "source_artifact_marker")
     if "*" in source:

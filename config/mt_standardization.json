@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile_id": "formosan-mt-standard-v3",
+  "unicode_normalization": "NFC",
+  "policy": {
+    "unwrap_letter_infixes": true,
+    "remove_clitic_boundaries": true,
+    "remove_null_morphemes": true,
+    "remove_intraword_hyphens": true,
+    "remove_intraword_tildes": true,
+    "remove_intraword_pluses": true,
+    "include_optional_intraword_segments": true,
+    "select_first_simple_alternative": true,
+    "strip_wiki_heading_markup": true,
+    "strip_trailing_superscript_footnotes": true
+  },
+  "source_overrides": [],
+  "unresolved_annotation_characters": [
+    "<",
+    ">",
+    "=",
+    "Ø",
+    "∅",
+    "*",
+    "_",
+    "{",
+    "}",
+    "|",
+    "\\"
+  ]
+}
