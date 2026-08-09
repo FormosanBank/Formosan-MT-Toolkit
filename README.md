@@ -94,10 +94,12 @@ python scripts/local/build_mt_corpus.py --corpus-name private_no_bible \
   --exclude-bible --with-pivot --resplit-only --tiers in_domain_hard
 ```
 
-Named builds do not overwrite one another. Full builds clear stale generated
-outputs but preserve paid pivot caches unless explicitly told otherwise. Do not
-combine `--skip-fetch` with a first-time Bible exclusion because stale fetched
-XML could remain.
+Named builds do not overwrite one another. Full builds refresh repository heads
+and verify a content-addressed stage cache before reusing language or release
+artifacts. Paid pivot caches are preserved. Use `--no-stage-cache` for a cold
+rebuild or `--language-workers 1` to disable the default three-language
+preparation pool. Do not combine `--skip-fetch` with a first-time Bible
+exclusion because stale fetched XML could remain.
 
 Production builds require a clean Git checkout. They fail if acquisition,
 parsing, source selection, standardization, row conservation, pivot completion,
@@ -114,12 +116,12 @@ time. Layered caches are loaded in increasing priority order, with the writable
 build cache last. The selected translation and every shadowed alternative are
 recorded in a checksummed cache-conflict ledger included with corpus provenance.
 
-Fetches resolve repository heads once per named build, record the immutable
-commit set in `source_repository_snapshot.json`, and reuse it for every
-language. Private repositories are traversed only under `Final_XML`; public
-data is traversed only under `Corpora`. Raw downloads use bounded concurrency,
-retries, exponential backoff, and content-addressed caching. If GitHub
-rate-limits a run, resume with existing files and lower concurrency:
+Fetches batch repository-head resolution, record the immutable commit set in
+`source_repository_snapshot.json`, and parse each XML blob once before routing
+it to per-language inventories. Private repositories are traversed only under
+`Final_XML`; public data is traversed only under `Corpora`. Raw downloads use
+bounded concurrency, retries, exponential backoff, and Git-blob caching. If
+GitHub rate-limits a run, resume with existing files and lower concurrency:
 
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot --exclude-bible \
@@ -170,6 +172,10 @@ python formosan_mt_experiments/scripts/validate_experiment.py \
 Each completed build writes `mt_build_manifest.json` and a portable
 `pivot_corpora_final/provenance/` bundle containing the build, pivot, split,
 validation, exposure, and configuration manifests.
+
+Large hard corpora also have ignored Parquet companions for internal validation
+and TAME-MT reads. They are checksum-bound to the canonical CSV and include the
+splitter's normalized leakage features; CSV remains the release contract.
 
 ## Train On Andromeda
 

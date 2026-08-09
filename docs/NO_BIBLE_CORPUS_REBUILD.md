@@ -16,18 +16,19 @@ Prerequisites:
 A sibling `../FormosanBank` checkout is optional. It is accepted only when its
 clean HEAD equals the pinned QC commit.
 
-Run the complete fresh build:
+Run the normal content-addressed build. Repository heads are refreshed, changed
+languages rerun, and valid unchanged stages are reused:
 
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot --exclude-bible
 ```
 
-Rebuild all data while reusing completed translations and making DeepL calls
-only for new eligible rows:
+Force every corpus stage to rerun while still reusing paid DeepL responses by
+content key:
 
 ```bash
 ./build_corpora.sh --build-public-private --with-pivot \
-  --exclude-bible
+  --exclude-bible --no-stage-cache
 ```
 
 Rebuild without any DeepL network calls, failing if the caches do not cover
@@ -61,8 +62,14 @@ audited; absent cache entries and provider errors remain release-blocking.
 Each public/private build records one immutable
 `source_repository_snapshot.json`. Every language fetch reuses those exact
 repository commits, and private tree discovery is limited to `Final_XML`.
-This keeps one build internally consistent and avoids resolving and traversing
-every organization repository once per language.
+Each XML blob is downloaded and parsed once, then routed into the independent
+language inventories. This keeps one build internally consistent without
+traversing every organization repository once per language.
+
+Three language preparation pipelines run concurrently by default. Stage keys
+include all input, script, profile, configuration, runtime, and dependency
+hashes, and cached outputs are rehashed before reuse. Use
+`--language-workers 1` for serial debugging.
 
 ## Release Outputs
 

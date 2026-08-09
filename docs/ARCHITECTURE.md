@@ -18,6 +18,11 @@ failures make the fetch manifest incomplete. Public mode restricts input to the
 public FormosanBank corpus tree. Private mode means every eligible repository
 visible to the token.
 
+One build resolves large repository sets with paginated GraphQL, then downloads,
+parses, and classifies each XML blob once for all requested Formosan languages.
+Per-language inventories retain independent exclusion and mismatch accounting.
+Raw bytes are cached by Git blob ID, never by path or modification time.
+
 `--exclude-bible` excludes one exact repository/corpus root:
 `Formosan-Taiwan-Bible-Society-Bibles`. It is not a fuzzy path-name filter.
 
@@ -86,6 +91,10 @@ separate. Stable row IDs include the XML element index, so
 files with missing or repeated XML IDs remain traceable. Rows retain raw
 original, post-QC standard, repository commit, QC commit, dialect, structural
 type, target metadata, and transform hashes.
+
+English and Chinese outputs are collected in one XML traversal. Each target
+still receives its own ordered CSV, counters, file inventory, and extraction
+manifest.
 
 ### 5. MT Filtering
 
@@ -156,6 +165,24 @@ within-language exposure; cross-language reuse remains a separate diagnostic
 in independent split validation. Exact overlap and exposure at 0.95 must be
 zero; 0.70 and 0.85 remain diagnostics. Exposure is evidence of similarity
 risk, not proof of memorization.
+
+The splitter also writes a checksum-bound Parquet companion containing its
+normalized keys, skeletons, token counts, source buckets, and document keys.
+Validation and TAME-MT verify the canonical CSV hash before using it. Release
+and training files remain CSV, and validation still recomputes leakage keys.
+
+## Incremental Execution
+
+Language preparation and corpus-wide release stages are content-addressed. A
+cache hit requires matching input, repository/blob, QC revision, profile,
+configuration, script, Python, and dependency hashes. Every cached output is
+SHA-256 verified; missing or edited artifacts rerun the affected stage and any
+downstream stage whose key changes.
+
+Acquisition refreshes repository heads unless explicitly skipped or reused.
+Three language pipelines run concurrently by default. `--language-workers 1`
+disables concurrency, and `--no-stage-cache` forces a cold rebuild without
+weakening any QC, split, validation, or exposure gate.
 
 ### 9. NLLB And MADLAD Training
 
