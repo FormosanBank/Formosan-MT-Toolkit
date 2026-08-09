@@ -232,6 +232,22 @@ class MTStandardizationTests(unittest.TestCase):
             "a ~ b": ("a", "ambiguous", False),
             "{um}ali": ("umali", "safe", True),
             "mha oy~~~ binah": ("mha oy binah", "safe", True),
+            "kalin(-na)-lumah=in": (
+                "kalinnalumahin",
+                "ambiguous",
+                False,
+            ),
+            "kali(n(na)luma)hin": (
+                "kalinnalumahin",
+                "ambiguous",
+                False,
+            ),
+            "  Speaker: malu  ": ("malu", "safe", True),
+            "東壘(turuy)- kn-bong": (
+                "東壘turuy knbong",
+                "ambiguous",
+                False,
+            ),
         }
         for source, expected in cases.items():
             with self.subTest(source=source):

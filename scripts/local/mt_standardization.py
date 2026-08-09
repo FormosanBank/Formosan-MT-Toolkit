@@ -165,28 +165,47 @@ def unwrap_infixes(run: _StandardizationRun, pattern: re.Pattern[str], rule: str
 
 
 def include_optional_segments(run: _StandardizationRun) -> None:
-    count = 0
+    original = run.text
+    working = original
+    total = 0
+    while True:
+        count = 0
 
-    def replacement(match: re.Match[str]) -> str:
-        nonlocal count
-        start, end = match.span()
-        previous = run.text[start - 1] if start else ""
-        following = run.text[end] if end < len(run.text) else ""
-        content = match.group(1)
-        previous_is_boundary = is_orthographic_character(previous) or previous in {"-", "=", "+", "~"}
-        following_is_boundary = is_orthographic_character(following) or following in {"-", "=", "+", "~"}
-        if not (
-            insertion_content_is_safe(content)
-            and previous_is_boundary
-            and following_is_boundary
-        ):
-            return match.group(0)
-        count += 1
-        return content
+        def replacement(match: re.Match[str]) -> str:
+            nonlocal count
+            start, end = match.span()
+            previous = working[start - 1] if start else ""
+            following = working[end] if end < len(working) else ""
+            content = match.group(1)
+            previous_is_boundary = (
+                is_orthographic_character(previous)
+                or previous in {"-", "=", "+", "~"}
+            )
+            following_is_boundary = (
+                is_orthographic_character(following)
+                or following in {"-", "=", "+", "~"}
+            )
+            if not (
+                insertion_content_is_safe(content)
+                and previous_is_boundary
+                and following_is_boundary
+            ):
+                return match.group(0)
+            count += 1
+            return content
 
-    new_text = OPTIONAL_CONTENT_RE.sub(replacement, run.text)
-    if count:
-        run.replace("include_optional_intraword_segment", new_text, count=count, ambiguous=True)
+        updated = OPTIONAL_CONTENT_RE.sub(replacement, working)
+        if not count:
+            break
+        total += count
+        working = updated
+    if total:
+        run.replace(
+            "include_optional_intraword_segment",
+            working,
+            count=total,
+            ambiguous=True,
+        )
 
 
 def remove_boundary_character(run: _StandardizationRun, marker: str, rule: str) -> None:
@@ -214,6 +233,47 @@ def remove_boundary_character(run: _StandardizationRun, marker: str, rule: str) 
         index = end
     if removed:
         run.replace(rule, "".join(output), count=removed)
+
+
+def normalize_morphological_boundaries(
+    run: _StandardizationRun,
+    policy: dict[str, Any],
+) -> None:
+    while True:
+        before = run.text
+        if policy.get("remove_clitic_boundaries") and "=" in run.text:
+            count = run.text.count("=")
+            run.replace(
+                "remove_clitic_boundary",
+                run.text.replace("=", ""),
+                count=count,
+            )
+        if policy.get("remove_intraword_hyphens"):
+            remove_boundary_character(
+                run,
+                "-",
+                "remove_hyphen_boundary",
+            )
+        if policy.get("remove_intraword_tildes"):
+            remove_boundary_character(
+                run,
+                "~",
+                "remove_tilde_boundary",
+            )
+        if policy.get("remove_intraword_pluses"):
+            remove_boundary_character(
+                run,
+                "+",
+                "remove_plus_boundary",
+            )
+        if policy.get("include_optional_intraword_segments"):
+            include_optional_segments(run)
+        if run.text == before:
+            return
+        if len(run.text) >= len(before):
+            raise ValueError(
+                "Morphological normalization did not strictly reduce text"
+            )
 
 
 def select_simple_alternatives(run: _StandardizationRun) -> None:
@@ -277,6 +337,10 @@ def standardize_text(
     run.replace("remove_control_and_format_characters", controls)
     run.replace("html_unescape", html.unescape(run.text))
     run.replace("unicode_nfc", unicodedata.normalize("NFC", run.text))
+    run.replace(
+        "normalize_whitespace",
+        WHITESPACE_RE.sub(" ", run.text).strip(),
+    )
 
     if policy.get("strip_wiki_heading_markup"):
         run.regex_sub("strip_wiki_heading_markup", WIKI_HEADING_RE, lambda match: f"{match.group(1)}{match.group(2)}")
@@ -296,19 +360,7 @@ def standardize_text(
         unwrap_infixes(run, ANGLE_CONTENT_RE, "unwrap_angle_infix")
         unwrap_infixes(run, BRACE_CONTENT_RE, "unwrap_braced_morpheme")
 
-    if policy.get("include_optional_intraword_segments"):
-        include_optional_segments(run)
-
-    if policy.get("remove_clitic_boundaries") and "=" in run.text:
-        count = run.text.count("=")
-        run.replace("remove_clitic_boundary", run.text.replace("=", ""), count=count)
-
-    if policy.get("remove_intraword_hyphens"):
-        remove_boundary_character(run, "-", "remove_hyphen_boundary")
-    if policy.get("remove_intraword_tildes"):
-        remove_boundary_character(run, "~", "remove_tilde_boundary")
-    if policy.get("remove_intraword_pluses"):
-        remove_boundary_character(run, "+", "remove_plus_boundary")
+    normalize_morphological_boundaries(run, policy)
 
     if policy.get("select_first_simple_alternative"):
         select_simple_alternatives(run)
