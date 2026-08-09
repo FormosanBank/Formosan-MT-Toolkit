@@ -1,8 +1,13 @@
 {
-  "schema_version": 2,
-  "recipe_id": "madlad400-3b-native-directional-v1",
+  "schema_version": 3,
+  "recipe_id": "madlad400-3b-native-directional-v2",
   "model_family": "madlad400",
-  "corpus_pipeline_version": "formosan-mt-corpus-v2",
+  "corpus_pipeline_version": "formosan-mt-corpus-v3",
+  "mt_standardization": {
+    "id": "formosan-mt-standard-v3",
+    "sha256": "c2f18c3525628a5b0206e76099de4bb85969fcb5d834228c26e87bdbf5ccb32c",
+    "namespace": "formosan-mt"
+  },
   "project_root": ".",
   "corpus_variants": ["public_no_bible", "private_no_bible"],
   "base_model": {

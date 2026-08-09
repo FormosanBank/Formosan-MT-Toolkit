@@ -283,7 +283,7 @@ def main() -> None:
     write_json(
         args.output_dir / "tokenizer_sweep_report.json",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "complete": True,
             "recipe_id": profile["recipe_id"],
             "profile": profile_record(args.profile),

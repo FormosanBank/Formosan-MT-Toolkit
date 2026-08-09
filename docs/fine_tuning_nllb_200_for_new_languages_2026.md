@@ -3,7 +3,7 @@
 A practical successor to David Dale's NLLB tutorial, updated for current `transformers` and written as a public Colab workflow.
 
 > This is a standalone teaching example, not the repository's production
-> recipe. Production Formosan experiments must use the standard-tier corpus v2
+> recipe. Production Formosan experiments must use the MT-standard corpus v3
 > release bundle and `formosan_mt_experiments/`, which adds document-aware
 > splits, TAME-MT exposure gates, pinned revisions, run contracts, and complete
 > provenance.

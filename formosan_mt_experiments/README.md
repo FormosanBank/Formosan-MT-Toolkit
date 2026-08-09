@@ -25,7 +25,7 @@ unidirectional models:
 The historical July 2026 flight snapshot is
 [`manifests/no_bible_v1_20260712.json`](manifests/no_bible_v1_20260712.json).
 It records corpus checksums, split totals, code commit, hyperparameters, and all
-validation/setup/training/evaluation job IDs. It is not a corpus pipeline v2
+validation/setup/training/evaluation job IDs. It is not a corpus pipeline v3
 release manifest and must not be used to authorize new training.
 
 New submission manifests also contain a SHA-256 inventory of every active
@@ -45,7 +45,8 @@ final corpus denominator. It also requires:
 
 - no lexemes in validation or test;
 - no synthetic rows in validation or test;
-- standard-tier element/QC provenance on every row;
+- exact `formosan-mt` namespace/profile provenance on every row;
+- no ambiguous or MT-ineligible normalization in validation or test;
 - source-document holdout or a declared small-language fallback;
 - zero normalized source, target, or pair overlap across train/evaluation;
 - zero punctuation/spacing skeleton overlap across train/evaluation;
@@ -204,7 +205,10 @@ overridable through launcher environment variables.
 `scripts/publish_huggingface_models.py` builds four standalone Hub packages
 from a matched profile, flight manifest, best/final checkpoints, and hard-test
 reports. It accepts single-file or sharded safetensors and emits NLLB- or
-MADLAD-correct inference examples. `--publish` replaces stale Hub files and
+MADLAD-correct inference examples. Formosan-source packages include
+`formosan_mt_inference.py`, the standardizer, and the exact profile so
+interactive source text receives the same idempotent transformation as
+training data. `--publish` replaces stale Hub files and
 records every published commit and file SHA-256.
 
 The production publication is recorded in
@@ -223,6 +227,7 @@ per-language metrics, BLEU tokenization, and reference provenance.
 | `setup_tokenizer_sweep.py` | SPM extension, NLLB resize, token audit, smoke generation. |
 | `setup_formosan_madlad400.py` | Native MADLAD controls, untied embedding/head resize, train-only audits. |
 | `model_backends.py` | Family-specific prompting, tokenizer state, and generation contract. |
+| `formosan_mt_inference.py` | Applies the pinned V3 Formosan standardizer at inference. |
 | `train_directional.py` | Shared sampling, optimization, validation metrics, checkpointing, resume. |
 | `evaluate_directional.py` | Default-tag headline and oracle-metadata diagnostic evaluation. |
 | `mt_metrics.py` | BLEU/chrF2/TER, signatures, diagnostics, and bootstrap intervals. |

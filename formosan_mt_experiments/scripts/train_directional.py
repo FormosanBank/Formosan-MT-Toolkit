@@ -36,6 +36,7 @@ from model_backends import (
 from mt_common import (
     EASY_BUCKETS,
     FORMOSAN_CODES,
+    bool_series,
     direction_choices,
     is_formosan_to_target,
     language_sampling_probs,
@@ -96,6 +97,15 @@ def prepare_data(
         raise SystemExit("No train rows found.")
     if val.empty:
         raise SystemExit("No human validation rows found")
+    val_mt_eligible = bool_series(
+        val["mt_eval_eligible"],
+        context="training validation rows:mt_eval_eligible",
+    )
+    if (
+        not val_mt_eligible.all()
+        or val["mt_normalization_confidence"].astype(str).eq("ambiguous").any()
+    ):
+        raise SystemExit("Validation contains MT-ineligible or ambiguous-normalization rows")
 
     validation_metadata_fallback = {
         "domain_fallback_rows": 0,
@@ -498,6 +508,9 @@ def build_run_contract(args, profile: dict) -> dict:
         != profile["corpus_pipeline_version"]
     ):
         raise SystemExit("Corpus pipeline version does not match the recipe")
+    expected_mt_standard = profile["mt_standardization"]
+    if corpus_manifest.get("mt_standardization") != expected_mt_standard:
+        raise SystemExit("Corpus manifest does not match the recipe MT-standard profile")
     if not manifest_contains_hash(corpus_manifest, input_hash):
         raise SystemExit(
             "Training CSV checksum is absent from the corpus build manifest"
@@ -510,6 +523,11 @@ def build_run_contract(args, profile: dict) -> dict:
         raise SystemExit(
             "Corpus validation report does not match the training CSV"
         )
+    if (
+        validation.get("provenance_validation", {}).get("mt_standardization")
+        != {key: expected_mt_standard[key] for key in ("id", "sha256")}
+    ):
+        raise SystemExit("Corpus validation does not match the recipe MT-standard profile")
     setup = read_complete_manifest(
         args.setup_manifest,
         "model setup manifest",
@@ -532,6 +550,7 @@ def build_run_contract(args, profile: dict) -> dict:
         or setup.get("profile", {}).get("sha256")
         != expected_profile["sha256"]
         or not setup_has_input
+        or setup.get("mt_standardization") != expected_mt_standard
     ):
         raise SystemExit(
             "Model setup manifest does not match corpus/profile/family"
@@ -555,10 +574,11 @@ def build_run_contract(args, profile: dict) -> dict:
         }
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": True,
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
+        "mt_standardization": expected_mt_standard,
         "profile": expected_profile,
         "input": {
             "path": str(args.input.resolve()),
@@ -718,6 +738,11 @@ def main() -> None:
         resume_path = None
     load_path = resume_path or args.model
     backend = get_backend(profile)
+    checkpoint_contract = {
+        "model_family": backend.family,
+        "recipe_id": profile["recipe_id"],
+        "mt_standardization": profile["mt_standardization"],
+    }
     tokenizer = backend.load_tokenizer(resume_path or args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         load_path,
@@ -932,6 +957,7 @@ def main() -> None:
                     tokenizer,
                     args.output_dir / "best",
                     {
+                        **checkpoint_contract,
                         "step": step,
                         "best_metric": args.best_metric,
                         "best_value": best_value,
@@ -950,6 +976,7 @@ def main() -> None:
                 scaler,
                 args.output_dir / "resume",
                 {
+                    **checkpoint_contract,
                     "step": step,
                     "best_value": best_value,
                     "best_step": best_step,
@@ -972,6 +999,7 @@ def main() -> None:
                 tokenizer,
                 args.output_dir / "checkpoints" / f"step-{step:06d}",
                 {
+                    **checkpoint_contract,
                     "step": step,
                     "direction": args.direction,
                     "run_contract_sha256": contract_sha256,
@@ -983,6 +1011,7 @@ def main() -> None:
         tokenizer,
         args.output_dir / "final",
         {
+            **checkpoint_contract,
             "step": actual_step,
             "planned_steps": args.steps,
             "stopped_early": stopped_early,

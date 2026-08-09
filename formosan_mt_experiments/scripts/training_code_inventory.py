@@ -13,6 +13,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "scripts/build_experiment_splits.py",
     "scripts/evaluate_directional.py",
     "scripts/experiment_config.py",
+    "scripts/formosan_mt_inference.py",
     "scripts/model_backends.py",
     "scripts/mt_common.py",
     "scripts/mt_metrics.py",
@@ -31,6 +32,12 @@ ACTIVE_EXPERIMENT_FILES = (
     "slurm/submit_directional_experiment.sh",
     "slurm/train_directional.sl",
     "slurm/validate_corpus.sl",
+)
+
+ACTIVE_REPOSITORY_FILES = (
+    "config/mt_standardization.json",
+    "scripts/local/mt_standardization.py",
+    "scripts/local/standardize_mt_corpus.py",
 )
 
 
@@ -63,6 +70,14 @@ def build_code_inventory(
         )
         for relative_path in ACTIVE_EXPERIMENT_FILES
     ]
+    project_root = experiment_root.parent
+    artifacts.extend(
+        artifact_record(
+            project_root / relative_path,
+            relative_path,
+        )
+        for relative_path in ACTIVE_REPOSITORY_FILES
+    )
     artifacts.sort(key=lambda row: row["repository_path"])
     return {
         "experiment_root": str(experiment_root),

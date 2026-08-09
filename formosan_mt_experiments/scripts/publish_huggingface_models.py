@@ -12,7 +12,13 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from experiment_config import load_profile, profile_record
+from experiment_config import load_profile, profile_record, sha256_file
+
+EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = EXPERIMENT_ROOT.parent
+MT_STANDARDIZER = PROJECT_ROOT / "scripts/local/mt_standardization.py"
+MT_INFERENCE = EXPERIMENT_ROOT / "scripts/formosan_mt_inference.py"
+MT_PROFILE = PROJECT_ROOT / "config/mt_standardization.json"
 
 
 @dataclass(frozen=True)
@@ -145,9 +151,20 @@ def nllb_usage(spec: Direction) -> str:
         source_lid = repr(major_lid)
         target_lid = "NLLB_LIDS[lang_code]"
         prefix = f"<to_{{lang_code}}> <src_{major_tag}>"
+    normalization_import = (
+        "from formosan_mt_inference import normalize_formosan\n"
+        if spec.code.startswith("f2")
+        else ""
+    )
+    normalization_line = (
+        "    text = normalize_formosan(text, lang_code)\n"
+        if spec.code.startswith("f2")
+        else ""
+    )
     return f"""```python
 import torch
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
+{normalization_import}
 
 model_id = "REPLACE_MODEL_ID"
 tokenizer = NllbTokenizer.from_pretrained(model_id, use_fast=False)
@@ -156,6 +173,7 @@ model.to("cuda" if torch.cuda.is_available() else "cpu")
 NLLB_LIDS = {NLLB_LIDS!r}
 
 def translate(text, lang_code, source_bucket="unknown", dialect="default"):
+{normalization_line.rstrip()}
     tokenizer.src_lang = {source_lid}
     prompt = (
         f"{prefix} <dom_{{source_bucket}}> "
@@ -184,9 +202,20 @@ def madlad_usage(spec: Direction) -> str:
     else:
         selector = 'f"<2{lang_code}>"'
         controls = f"<to_{{lang_code}}> <src_{major_tag}>"
+    normalization_import = (
+        "from formosan_mt_inference import normalize_formosan\n"
+        if spec.code.startswith("f2")
+        else ""
+    )
+    normalization_line = (
+        "    text = normalize_formosan(text, lang_code)\n"
+        if spec.code.startswith("f2")
+        else ""
+    )
     return f"""```python
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+{normalization_import}
 
 model_id = "REPLACE_MODEL_ID"
 tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
@@ -197,6 +226,7 @@ model = AutoModelForSeq2SeqLM.from_pretrained(
 model.to("cuda" if torch.cuda.is_available() else "cpu")
 
 def translate(text, lang_code, source_bucket="unknown", dialect="default"):
+{normalization_line.rstrip()}
     target = {selector}
     prompt = (
         f"{{target}} {controls} <dom_{{source_bucket}}> "
@@ -373,12 +403,17 @@ def prepare_direction(
     metadata = json.loads(
         (source / "experiment_metadata.json").read_text(encoding="utf-8")
     )
+    expected_mt_standard = profile["mt_standardization"]
     if (
         metrics.get("direction") != spec.code
         or metadata.get("direction") != spec.code
         or metrics.get("model_family", family) != family
+        or metrics.get("mt_standardization") != expected_mt_standard
+        or metadata.get("mt_standardization") != expected_mt_standard
     ):
-        raise RuntimeError(f"Direction/family mismatch for {spec.code}")
+        raise RuntimeError(
+            f"Direction/family/MT-standard mismatch for {spec.code}"
+        )
     expected_test_rows = int(
         corpus_record(manifest, spec.target_lang)["splits"]["test"]
     )
@@ -395,6 +430,16 @@ def prepare_direction(
     output.mkdir(parents=True)
     for path in files:
         link_or_copy(path, output / path.name)
+    for source_path, output_name in (
+        (MT_STANDARDIZER, "mt_standardization.py"),
+        (MT_INFERENCE, "formosan_mt_inference.py"),
+        (MT_PROFILE, "mt_standardization_profile.json"),
+    ):
+        if not source_path.is_file():
+            raise RuntimeError(
+                f"Missing inference standardization artifact: {source_path}"
+            )
+        link_or_copy(source_path, output / output_name)
     (output / "eval").mkdir()
     shutil.copy2(metrics_path, output / "eval" / "metrics.json")
     (output / "README.md").write_text(
@@ -432,6 +477,10 @@ def prepare_direction(
 def main() -> None:
     args = parse_args()
     profile = load_profile(args.profile)
+    if sha256_file(MT_PROFILE) != profile["mt_standardization"]["sha256"]:
+        raise RuntimeError(
+            "Experiment profile does not pin the repository MT standardization profile"
+        )
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     run_stamp = args.run_stamp or manifest["run_stamp"]
     if manifest["run_stamp"] != run_stamp:
@@ -441,11 +490,12 @@ def main() -> None:
 
     args.output_root.mkdir(parents=True, exist_ok=True)
     release = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_stamp": run_stamp,
         "corpus": manifest["corpus_name"],
         "checkpoint_policy": args.checkpoint,
         "model_family": profile["model_family"],
+        "mt_standardization": profile["mt_standardization"],
         "profile": profile_record(args.profile),
         "models": [
             prepare_direction(

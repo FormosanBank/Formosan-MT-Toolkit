@@ -22,7 +22,12 @@ from experiment_config import (
     profile_record,
     sha256_file,
 )
-from mt_common import CODE_TO_LID, FORMOSAN_CODES, read_parallel_csv
+from mt_common import (
+    CODE_TO_LID,
+    FORMOSAN_CODES,
+    mt_standard_contract,
+    read_parallel_csv,
+)
 from sentencepiece import sentencepiece_model_pb2
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
@@ -252,6 +257,12 @@ def main() -> None:
         )
 
     train = load_training_rows(args.input, target_col=args.target_col)
+    mt_standard = mt_standard_contract(train, context=str(args.input))
+    if mt_standard != {
+        key: profile["mt_standardization"][key]
+        for key in ("id", "sha256")
+    }:
+        raise SystemExit("NLLB tokenizer input uses the wrong MT-standard profile")
     languages = sorted(set(train["lang_code"]) & set(FORMOSAN_CODES))
     if not languages:
         raise SystemExit("No supported Formosan languages in training rows")
@@ -333,12 +344,16 @@ def main() -> None:
         if path.is_file()
     ]
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "complete": False,
         "stage": "base_spm_ready",
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
         "profile": profile_record(args.profile),
+        "mt_standardization": {
+            **mt_standard,
+            "namespace": profile["mt_standardization"]["namespace"],
+        },
         "repository": git_record(),
         "runtime_dependencies": dependency_versions(),
         "input": {
