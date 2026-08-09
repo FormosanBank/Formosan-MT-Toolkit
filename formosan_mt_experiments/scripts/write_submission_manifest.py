@@ -67,6 +67,7 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
     build = json.loads(build_path.read_text(encoding="utf-8"))
     validation = json.loads(validation_path.read_text(encoding="utf-8"))["split_validation"]
     artifact = build["artifacts"][f"big_corpus_{short}_in_domain_hard"]
+    train_evaluation = validation["train_evaluation"]
 
     ratios = validation["ratios_by_language"].values()
     test = sum(int(row["test"]) for row in ratios)
@@ -81,12 +82,18 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
         "synthetic_eval_rows": int(validation["synthetic_eval_rows"]),
         "validation": {
             "ok": bool(validation["ok"]),
-            "exact_overlap": sum(v["overlap_unique"] for v in validation["overlaps"].values()),
+            "exact_overlap": sum(train_evaluation["exact_overlap"].values()),
             "skeleton_overlap": sum(
-                v["overlap_unique"] for v in validation["skeleton_overlaps"].values()
+                train_evaluation["skeleton_overlap"].values()
             ),
-            "one_edit_conflicts": int(validation["one_edit_train_conflicts"]),
-            "lexeme_eval_rows": int(validation["lexeme_eval_rows"]),
+            "one_edit_conflicts": sum(
+                train_evaluation["one_edit_conflicting_rows"].values()
+            ),
+            "character_ngram_conflicts": sum(
+                train_evaluation["character_ngram_conflicting_rows"].values()
+            ),
+            "document_overlap": int(train_evaluation["document_overlap"]),
+            "lexeme_eval_rows": int(validation["lexical_eval_rows"]),
             "per_language_ratio_failures": len(validation["ratio_failures"]),
         },
     }

@@ -61,7 +61,11 @@ from validate_experiment import (  # noqa: E402
     validate_tags,
 )
 from verify_experiment_manifest import manifest_errors  # noqa: E402
-from write_submission_manifest import build_job_graph, read_job_ids  # noqa: E402
+from write_submission_manifest import (  # noqa: E402
+    build_job_graph,
+    corpus_record,
+    read_job_ids,
+)
 
 MT_STANDARD_PROFILE = load_mt_standard_profile(MT_STANDARD_PROFILE_PATH)
 MT_STANDARD_PROFILE_HASH = mt_profile_sha256(MT_STANDARD_PROFILE_PATH)
@@ -983,6 +987,54 @@ class ExposureAuditTests(unittest.TestCase):
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_submission_manifest_reads_current_validation_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus_dir = Path(temporary)
+            provenance = corpus_dir / "provenance"
+            provenance.mkdir()
+            (provenance / "mt_build_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "artifacts": {
+                            "big_corpus_en_in_domain_hard": {
+                                "rows": 100,
+                                "sha256": "a" * 64,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            split_validation = {
+                "ok": True,
+                "ratios_by_language": {
+                    "ami": {"train": 90, "test": 8, "validate": 2}
+                },
+                "synthetic_eval_rows": 0,
+                "train_evaluation": {
+                    "exact_overlap": {"formosan": 0, "target": 0, "pair": 0},
+                    "skeleton_overlap": {"formosan": 0, "target": 0, "pair": 0},
+                    "one_edit_conflicting_rows": {"formosan": 0, "target": 0},
+                    "character_ngram_conflicting_rows": {
+                        "formosan": 0,
+                        "target": 0,
+                    },
+                    "document_overlap": 0,
+                },
+                "lexical_eval_rows": 0,
+                "ratio_failures": [],
+            }
+            (provenance / "validate_en_in_domain_hard.json").write_text(
+                json.dumps({"split_validation": split_validation}),
+                encoding="utf-8",
+            )
+
+            record = corpus_record(corpus_dir, "en")
+
+            self.assertEqual(record["splits"], {"train": 90, "test": 8, "validate": 2})
+            self.assertTrue(record["validation"].pop("ok"))
+            self.assertTrue(all(value == 0 for value in record["validation"].values()))
+
     def test_publication_accepts_sharded_safetensors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             checkpoint = Path(temporary)
