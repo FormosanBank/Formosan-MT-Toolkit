@@ -286,11 +286,29 @@ def select_simple_alternatives(run: _StandardizationRun) -> None:
     if slash_count > 4:
         run.reason = "complex_slash_notation"
         return
-    new_text, count = SIMPLE_ALTERNATIVE_RE.subn(lambda match: match.group(1), run.text)
-    if count and "/" not in new_text:
-        run.replace("select_first_slash_alternative", new_text, count=count, ambiguous=True)
-    else:
+    working = run.text
+    total = 0
+    while True:
+        working, count = SIMPLE_ALTERNATIVE_RE.subn(lambda match: match.group(1), working)
+        total += count
+        if not count:
+            break
+    if total:
+        run.replace("select_first_slash_alternative", working, count=total, ambiguous=True)
+    if "/" in run.text:
         run.reason = "unresolved_slash_notation"
+
+
+def select_tilde_alternatives(run: _StandardizationRun) -> None:
+    working = run.text
+    total = 0
+    while True:
+        working, count = SPACED_TILDE_RE.subn(lambda match: match.group(1), working)
+        total += count
+        if not count:
+            break
+    if total:
+        run.replace("select_first_tilde_alternative", working, count=total, ambiguous=True)
 
 
 def unresolved_markers(text: str, configured: Iterable[str]) -> tuple[str, ...]:
@@ -355,23 +373,20 @@ def standardize_text(
         unwrap_infixes(run, ANGLE_CONTENT_RE, "unwrap_angle_infix")
         unwrap_infixes(run, BRACE_CONTENT_RE, "unwrap_braced_morpheme")
 
-    normalize_morphological_boundaries(run, policy)
-
-    if policy.get("select_first_simple_alternative"):
-        select_simple_alternatives(run)
-        run.regex_sub(
-            "select_first_tilde_alternative",
-            SPACED_TILDE_RE,
-            lambda match: match.group(1),
-            ambiguous=True,
-        )
-
+    # Remove annotation characters before boundary and alternative handling so
+    # cleanup cannot expose notation that is processed only on a later pass.
     if "_" in run.text and not EXERCISE_BLANK_RE.search(run.text):
         count = run.text.count("_")
         run.replace("remove_annotation_underscore", run.text.replace("_", ""), count=count, ambiguous=True)
     if "\\" in run.text:
         count = run.text.count("\\")
         run.replace("remove_escape_backslash", run.text.replace("\\", ""), count=count)
+
+    normalize_morphological_boundaries(run, policy)
+
+    if policy.get("select_first_simple_alternative"):
+        select_simple_alternatives(run)
+        select_tilde_alternatives(run)
 
     if policy.get("strip_trailing_superscript_footnotes"):
         run.regex_sub("strip_superscript_footnote", SUPERSCRIPT_FOOTNOTE_RE, "")

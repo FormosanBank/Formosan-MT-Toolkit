@@ -234,8 +234,14 @@ class MTStandardizationTests(unittest.TestCase):
                 True,
             ),
             "a ~ b": ("a", "ambiguous", False),
+            "itaial ~ 'taial ~ taial": ("itaial", "ambiguous", False),
             "{um}ali": ("umali", "safe", True),
             "mha oy~~~ binah": ("mha oy binah", "safe", True),
+            "a~ sawni qaniy ga _~ aw yaqu": (
+                "a sawni qaniy ga yaqu",
+                "ambiguous",
+                False,
+            ),
             "kalin(-na)-lumah=in": (
                 "kalinnalumahin",
                 "ambiguous",
