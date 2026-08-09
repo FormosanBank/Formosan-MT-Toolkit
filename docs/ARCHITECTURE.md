@@ -55,12 +55,14 @@ duplicate IDs remain hard structural failures. All repairs are written to
 `_qc_repair_inventory.jsonl`, and validator findings are stored beside the
 cleaned XML rather than in the shared QC checkout.
 
-Pinned QC subprocess output is captured under `_qc_logs/`. Normal terminal
-output uses file/stage progress bars followed by rule-level counts for tier
-completion, repaired XML units, standardization outcomes, and validator
-findings. Pair filtering likewise reports every
-normalization, rejection, quarantine, and deduplication rule; the same counts
-are stored in the corresponding manifests and filter report.
+Pinned QC subprocess output is captured under `_qc_logs/`. The orchestrator is
+the only writer to the normal terminal: concurrent child output goes to
+build-local stage logs, while one parent progress bar and manifest-backed
+summaries report repaired XML units, standardization outcomes, validator
+finding totals, and pair-filtering rules. `--verbose` streams raw child output
+serially for debugging. Every normalization, rejection, quarantine, and
+deduplication count remains stored in its corresponding manifest and filter
+report.
 
 Before QC, every S/W/M element receives a temporary transform ID. After QC the
 temporary attribute is removed and a sidecar records whether the standard was

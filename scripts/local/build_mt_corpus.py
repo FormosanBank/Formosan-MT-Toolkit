@@ -17,11 +17,19 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from build_output import (
+    CommandExecutionError,
+    format_aggregate_summary,
+    format_fetch_summary,
+    format_language_summary,
+    format_pivot_summary,
+    format_split_summary,
+    run_logged,
+)
 from pipeline_common import (
     PIPELINE_CONFIG_PATH,
     atomic_write_json,
@@ -37,6 +45,7 @@ from stage_cache import (
     record_cached_stage,
     stage_key,
 )
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
@@ -90,11 +99,32 @@ def script(path: str) -> Path:
     return PROJECT_ROOT / path
 
 
-def run(cmd: list[str], *, dry_run: bool = False, env: dict[str, str] | None = None) -> None:
-    print("+ " + " ".join(cmd))
-    if dry_run:
-        return
-    subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
+def run(
+    cmd: list[str],
+    *,
+    label: str,
+    log_path: Path,
+    dry_run: bool = False,
+    env: dict[str, str] | None = None,
+    verbose: bool = False,
+    quiet: bool = False,
+    append: bool = False,
+) -> None:
+    run_logged(
+        cmd,
+        project_root=PROJECT_ROOT,
+        label=label,
+        log_path=log_path,
+        dry_run=dry_run,
+        env=env,
+        verbose=verbose,
+        quiet=quiet,
+        append=append,
+    )
+
+
+def stage_log(paths: BuildPaths, name: str) -> Path:
+    return paths.root / "logs" / f"{name}.log"
 
 
 def parse_languages(raw: str) -> list[Language]:
@@ -459,6 +489,22 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
     en_filter_manifest = paths.processed_dir / "filter_reports" / proc_en.stem / "summary.json"
     cache_path = language_cache_path(paths, lang)
     cache = load_stage_cache(cache_path)
+    language_log = stage_log(paths, f"language_{lang.code}")
+    stage_status: dict[str, str] = {}
+    log_started = False
+
+    def run_language_stage(cmd: list[str], stage: str) -> None:
+        nonlocal log_started
+        run(
+            cmd,
+            label=f"{lang.code} {stage}",
+            log_path=language_log,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            quiet=not args.verbose,
+            append=log_started,
+        )
+        log_started = True
 
     if not args.dry_run:
         fetch_payload = require_json_manifest(
@@ -493,8 +539,9 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             and cached_stage_valid(paths.root, cache, "qc", qc_key)
         )
         if qc_cached:
-            print(f"Cache hit: {lang.code} QC")
+            stage_status["QC"] = "cached"
         else:
+            stage_status["QC"] = "planned" if args.dry_run else "rebuilt"
             cmd = [PYTHON, str(script("scripts/local/clean_xml.py")), "--src-lang", lang.code]
             cmd.extend(["--in-dir", str(source_xml_dir)])
             cmd.extend(["--out-dir", str(prepared_xml_dir)])
@@ -505,7 +552,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 cmd.append("--force-update")
             if args.skip_qc_validation:
                 cmd.append("--skip-validation")
-            run(cmd, dry_run=args.dry_run)
+            run_language_stage(cmd, "QC")
     if not args.dry_run:
         qc_payload = require_json_manifest(
             qc_manifest,
@@ -551,9 +598,10 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             and cached_stage_valid(paths.root, cache, "mt_standard", mt_key)
         )
         if mt_cached:
-            print(f"Cache hit: {lang.code} MT standardization")
+            stage_status["MT standardization"] = "cached"
         else:
-            run(
+            stage_status["MT standardization"] = "planned" if args.dry_run else "rebuilt"
+            run_language_stage(
                 [
                     PYTHON,
                     str(script("scripts/local/standardize_mt_corpus.py")),
@@ -564,7 +612,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                     "--profile",
                     str(args.mt_standard_profile),
                 ],
-                dry_run=args.dry_run,
+                "MT standardization",
             )
     if not args.dry_run:
         mt_payload = require_json_manifest(
@@ -620,9 +668,10 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             and cached_stage_valid(paths.root, cache, "extract", extract_key)
         )
         if extract_cached:
-            print(f"Cache hit: {lang.code} bilingual extraction")
+            stage_status["extraction"] = "cached"
         else:
-            run(
+            stage_status["extraction"] = "planned" if args.dry_run else "rebuilt"
+            run_language_stage(
                 [
                     PYTHON,
                     str(script("scripts/local/make_corpus.py")),
@@ -635,7 +684,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                     "--units",
                     args.units,
                 ],
-                dry_run=args.dry_run,
+                "bilingual extraction",
             )
     if not args.dry_run:
         require_json_manifest(
@@ -703,13 +752,14 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 and cached_stage_valid(paths.root, cache, cache_name, filter_key)
             )
             if filter_cached:
-                print(f"Cache hit: {lang.code} {target} filtering")
+                stage_status[f"{target} filtering"] = "cached"
                 continue
-            remove_path(report_path.parent)
-            run(
-                filter_base
-                + ["--input", str(raw_path), "--output", str(output_path)],
-                dry_run=args.dry_run,
+            stage_status[f"{target} filtering"] = "planned" if args.dry_run else "rebuilt"
+            if not args.dry_run:
+                remove_path(report_path.parent)
+            run_language_stage(
+                filter_base + ["--input", str(raw_path), "--output", str(output_path)],
+                f"{target} filtering",
             )
             if not args.dry_run:
                 require_json_manifest(
@@ -736,6 +786,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         "raw_en_rows": count_csv_rows(raw_en),
         "processed_zh_rows": count_csv_rows(proc_zh),
         "processed_en_rows": count_csv_rows(proc_en),
+        "stage_status": stage_status,
         "manifests": {
             "fetch": stage_manifest_record(fetch_manifest) if not args.dry_run else {},
             "qc": stage_manifest_record(qc_manifest) if not args.dry_run else {},
@@ -794,7 +845,15 @@ def fetch_languages(
         cmd.extend(["--exclude-repo-pattern", pattern])
     for pattern in args.exclude_path_pattern:
         cmd.extend(["--exclude-path-pattern", pattern])
-    run(cmd, dry_run=args.dry_run)
+    run(
+        cmd,
+        label=f"Acquire XML snapshot for {len(languages)} languages",
+        log_path=stage_log(paths, "fetch"),
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+    )
+    if not args.dry_run:
+        print(format_fetch_summary(paths.root, [lang.code for lang in languages]))
 
 
 def build_languages(
@@ -802,22 +861,40 @@ def build_languages(
     args: argparse.Namespace,
     paths: BuildPaths,
 ) -> list[dict]:
-    language_workers = 1 if args.force_qc_update else args.language_workers
+    language_workers = 1 if args.force_qc_update or args.verbose else args.language_workers
     if args.force_qc_update and args.language_workers > 1:
-        print("Forced QC cache refresh: preparing languages serially")
-    if language_workers == 1 or len(languages) == 1 or args.dry_run:
-        return [build_language(lang, args, paths) for lang in languages]
-
+        print("Language concurrency disabled during forced QC cache refresh.")
+    if args.verbose and args.language_workers > 1:
+        print("Language concurrency disabled in verbose mode to keep output ordered.")
     reports: dict[str, dict] = {}
-    with futures.ThreadPoolExecutor(max_workers=language_workers) as executor:
-        jobs = {
-            executor.submit(build_language, lang, args, paths): lang
-            for lang in languages
-        }
-        for job in futures.as_completed(jobs):
-            lang = jobs[job]
-            reports[lang.code] = job.result()
-    return [reports[lang.code] for lang in languages]
+    progress = tqdm(
+        total=len(languages),
+        desc="Prepare languages",
+        unit="lang",
+        dynamic_ncols=True,
+        disable=args.verbose,
+    )
+    try:
+        if language_workers == 1 or len(languages) == 1 or args.dry_run:
+            for lang in languages:
+                reports[lang.code] = build_language(lang, args, paths)
+                progress.update()
+        else:
+            with futures.ThreadPoolExecutor(max_workers=language_workers) as executor:
+                jobs = {executor.submit(build_language, lang, args, paths): lang for lang in languages}
+                for job in futures.as_completed(jobs):
+                    lang = jobs[job]
+                    reports[lang.code] = job.result()
+                    progress.update()
+    finally:
+        progress.close()
+
+    ordered = [reports[lang.code] for lang in languages]
+    print("\nLanguage preparation summary")
+    for report in ordered:
+        print(format_language_summary(paths.root, report))
+        report.pop("stage_status", None)
+    return ordered
 
 
 def build_aggregates(
@@ -844,13 +921,14 @@ def build_aggregates(
             script("scripts/local/pipeline_common.py"),
         ],
     )
-    cached = (
-        not args.dry_run
-        and not args.no_stage_cache
-        and cached_stage_valid(paths.root, cache, cache_name, key)
+    cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, cache_name, key)
+    label = (
+        "Aggregate cleaned bilingual corpora"
+        if cache_name == "processed_aggregate"
+        else "Aggregate finalized pivot corpora"
     )
     if cached:
-        print(f"Cache hit: {cache_name}")
+        print(f"[cache] {label}")
     else:
         run(
             [
@@ -861,11 +939,15 @@ def build_aggregates(
                 "--output-dir",
                 str(output_dir),
             ],
+            label=label,
+            log_path=stage_log(paths, cache_name),
             dry_run=args.dry_run,
+            verbose=args.verbose,
         )
     if not args.dry_run:
+        manifest_path = output_dir / "aggregate_manifest.json"
         require_json_manifest(
-            output_dir / "aggregate_manifest.json",
+            manifest_path,
             stage=f"aggregate {input_dir.name}",
         )
         if not cached:
@@ -883,6 +965,7 @@ def build_aggregates(
                 ],
                 "build",
             )
+        print(format_aggregate_summary(manifest_path, label))
 
 
 def run_pivot(
@@ -928,13 +1011,11 @@ def run_pivot(
         )
 
     key = current_key()
-    cached = (
-        not args.dry_run
-        and not args.no_stage_cache
-        and cached_stage_valid(paths.root, cache, "pivot", key)
-    )
+    cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, "pivot", key)
+    manifest_path = paths.processed_dir / "pivot" / "pivot_manifest.json"
     if cached:
-        print("Cache hit: pivot")
+        print("[cache] Assemble DeepL pivot rows")
+        print(format_pivot_summary(manifest_path))
         return
     cmd = [
         PYTHON,
@@ -962,10 +1043,16 @@ def run_pivot(
         cmd.append("--dry-run")
     if args.respect_usage_limit:
         cmd.append("--respect-usage-limit")
-    run(cmd, dry_run=args.dry_run)
+    run(
+        cmd,
+        label="Assemble DeepL pivot rows",
+        log_path=stage_log(paths, "pivot"),
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+    )
     if not args.dry_run:
         pivot_manifest = require_json_manifest(
-            paths.processed_dir / "pivot" / "pivot_manifest.json",
+            manifest_path,
             stage="DeepL pivot",
         )
         for stats in pivot_manifest.get("stats", []):
@@ -992,6 +1079,7 @@ def run_pivot(
             ],
             "build",
         )
+        print(format_pivot_summary(manifest_path))
 
 
 def build_hard_splits(
@@ -1031,13 +1119,11 @@ def build_hard_splits(
             script("formosan_mt_experiments/scripts/columnar_cache.py"),
         ],
     )
-    cached = (
-        not args.dry_run
-        and not args.no_stage_cache
-        and cached_stage_valid(paths.root, cache, "hard_splits", key)
-    )
+    cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, "hard_splits", key)
     if cached:
-        print("Cache hit: hard splits and audits")
+        print("[cache] Hard splits and audits")
+        for short, target in (("en", "English"), ("zh", "Chinese")):
+            print(format_split_summary(output_root / f"splits_{short}_v1", target))
         return
     if not args.dry_run:
         remove_path(output_root)
@@ -1084,13 +1170,15 @@ def build_hard_splits(
                 "--tiers",
                 args.tiers,
             ],
+            label=f"Build {target_lang} hard split",
+            log_path=stage_log(paths, f"split_{short}"),
             dry_run=args.dry_run,
+            verbose=args.verbose,
         )
         hard_file = out_dir / f"big_corpus_{short}_in_domain_hard.csv"
         dest = corpus_dir / hard_file.name
         if hard_file.exists() and not args.dry_run:
             shutil.copy2(hard_file, dest)
-            print(f"Copied headline hard split -> {dest}")
             run(
                 [
                     PYTHON,
@@ -1116,7 +1204,10 @@ def build_hard_splits(
                     "--require-human-eval",
                     "--require-document-holdout-report",
                 ],
+                label=f"Validate {target_lang} hard split",
+                log_path=stage_log(paths, f"validate_{short}"),
                 dry_run=False,
+                verbose=args.verbose,
             )
             require_json_manifest(
                 out_dir / "validation_in_domain_hard.json",
@@ -1152,12 +1243,16 @@ def build_hard_splits(
                     "--report",
                     str(out_dir / "exposure_in_domain_hard.json"),
                 ],
+                label=f"Audit {target_lang} train-test exposure",
+                log_path=stage_log(paths, f"exposure_{short}"),
                 dry_run=False,
+                verbose=args.verbose,
             )
             require_json_manifest(
                 out_dir / "exposure_in_domain_hard.json",
                 stage=f"{target_lang} TAME-MT exposure audit",
             )
+            print(format_split_summary(out_dir, target_lang.title()))
         elif not args.dry_run:
             raise SystemExit(f"Hard split builder did not produce {hard_file}")
     if not args.dry_run:
@@ -1308,10 +1403,10 @@ def write_manifest(
         "complete": complete,
     }
     if args.dry_run:
-        print(json.dumps(manifest, indent=2, ensure_ascii=False))
+        print(f"[plan]  Write build manifest: {paths.manifest_path}")
         return
     atomic_write_json(paths.manifest_path, manifest)
-    print(f"Manifest: {paths.manifest_path}")
+    print(f"Build manifest: {paths.manifest_path}")
     if not complete:
         raise SystemExit(f"Corpus build did not pass release gates; inspect {paths.manifest_path}")
     try:
@@ -1324,7 +1419,7 @@ def write_manifest(
         manifest["release_gate"]["provenance_bundle_error"] = str(exc)
         atomic_write_json(paths.manifest_path, manifest)
         raise
-    print(f"Training provenance bundle: {bundle_manifest}")
+    print(f"Training provenance: {bundle_manifest}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1476,6 +1571,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help=(
+            "Stream child-process output and full commands. Normal mode writes "
+            "raw stage output under <build-root>/logs/."
+        ),
+    )
+    parser.add_argument(
         "--skip-artifact-checksums",
         action="store_true",
         help="Do not compute SHA-256 checksums for final corpus/split artifacts in the manifest.",
@@ -1615,9 +1718,11 @@ def run_build(args: argparse.Namespace) -> Path:
         return paths.root
 
     languages = parse_languages(args.languages)
-    print(f"📦  Corpus build root: {paths.root}")
+    print(f"\nCorpus build: {args.corpus_name or paths.root.name}")
+    print(f"Output: {paths.root}")
+    print(f"Detailed logs: {paths.root / 'logs'}")
     if should_clean_generated_outputs(args, paths):
-        print(f"🧹  Cleaning abandoned temporary outputs under {paths.root}")
+        print("Removing abandoned temporary outputs.")
         clean_generated_outputs(paths)
     if not args.dry_run:
         paths.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1669,6 +1774,8 @@ def run_build(args: argparse.Namespace) -> Path:
         validate_no_bible_sources(paths, final_corpus_dir)
 
     write_manifest(args, language_reports, final_corpus_dir, paths)
+    if not args.dry_run:
+        print(f"Build complete: {paths.root}")
     return paths.root
 
 
@@ -1711,10 +1818,13 @@ def main() -> None:
             "Production corpus builds require a clean Git checkout. "
             f"Commit or remove local changes first: {paths}"
         )
-    if args.build_public_private:
-        run_public_private(args)
-    else:
-        run_build(args)
+    try:
+        if args.build_public_private:
+            run_public_private(args)
+        else:
+            run_build(args)
+    except CommandExecutionError as exc:
+        raise SystemExit(str(exc)) from None
 
 
 if __name__ == "__main__":

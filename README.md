@@ -101,6 +101,13 @@ rebuild or `--language-workers 1` to disable the default three-language
 preparation pool. Do not combine `--skip-fetch` with a first-time Bible
 exclusion because stale fetched XML could remain.
 
+Normal orchestration output is intentionally concise: one language progress
+bar, stage timings, row totals, and rule-level cleaning summaries. Full child
+commands and raw output are written to `corpus_builds/<name>/logs/`, with one
+log per global stage and language. Add `--verbose` only for live debugging;
+verbose mode streams raw output and prepares languages serially so messages do
+not interleave.
+
 Production builds require a clean Git checkout. They fail if acquisition,
 parsing, source selection, standardization, row conservation, pivot completion,
 split validation, exposure auditing, or provenance packaging is incomplete.

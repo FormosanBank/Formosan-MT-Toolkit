@@ -71,6 +71,12 @@ include all input, script, profile, configuration, runtime, and dependency
 hashes, and cached outputs are rehashed before reuse. Use
 `--language-workers 1` for serial debugging.
 
+The parent process owns normal terminal output. It prints one progress bar,
+compact stage timings, and manifest-backed rule summaries after language
+preparation. Raw subprocess output and full commands are retained under each
+build's `logs/` directory. Use `--verbose` to stream those details live; this
+also disables language concurrency to keep diagnostic output readable.
+
 ## Release Outputs
 
 Each named build produces:
