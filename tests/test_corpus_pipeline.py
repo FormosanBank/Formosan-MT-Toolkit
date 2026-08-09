@@ -77,6 +77,7 @@ from qc_change_audit import (  # noqa: E402
 )
 from qc_reporting import (  # noqa: E402
     parse_cleaner_transformation,
+    print_qc_rule_summary,
     run_cleaner_command,
     summarize_validator_findings,
 )
@@ -646,6 +647,39 @@ class StandardTierTests(unittest.TestCase):
 
 
 class PipelineReportingTests(unittest.TestCase):
+    def test_v3_qc_summary_does_not_require_legacy_cleaner(self) -> None:
+        result = {
+            "tier_completion": {
+                "standard_copied_from_original": 2,
+            },
+            "repair_inventory": {
+                "path": "_qc_repair_inventory.jsonl",
+                "counts": {"complete_missing_dialect": 3},
+            },
+            "transform_inventory": {
+                "path": "_qc_transform_inventory.jsonl",
+                "records": 10,
+                "retained": 10,
+                "removed_by_cleaner": 0,
+            },
+            "semantic_text_cleaning": {
+                "applied": False,
+                "authority": "formosan-mt-standardization",
+            },
+            "validators": [],
+        }
+        terminal = io.StringIO()
+        with contextlib.redirect_stdout(terminal):
+            print_qc_rule_summary("ami", result)
+        output = terminal.getvalue()
+        self.assertIn("QC rule summary [ami]", output)
+        self.assertIn("standard copied from original: 2", output)
+        self.assertIn("complete missing dialect: 3", output)
+        self.assertIn(
+            "Semantic text cleaning: not applied during XML preparation",
+            output,
+        )
+
     def test_cleaner_filename_chatter_is_logged_not_printed(
         self,
     ) -> None:
