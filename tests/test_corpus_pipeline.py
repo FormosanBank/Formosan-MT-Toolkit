@@ -185,6 +185,13 @@ def mt_records_for_xml(
 
 
 class MTStandardizationTests(unittest.TestCase):
+    def test_profile_pins_standardizer_implementation(self) -> None:
+        implementation = ROOT / "scripts/local/mt_standardization.py"
+        self.assertEqual(
+            MT_PROFILE["implementation_sha256"],
+            hashlib.sha256(implementation.read_bytes()).hexdigest(),
+        )
+
     def standardize(
         self,
         value: str,
@@ -224,6 +231,7 @@ class MTStandardizationTests(unittest.TestCase):
             "Speaker: malu": ("malu", "safe", True),
             "a ~ b": ("a", "ambiguous", False),
             "{um}ali": ("umali", "safe", True),
+            "mha oy~~~ binah": ("mha oy binah", "safe", True),
         }
         for source, expected in cases.items():
             with self.subTest(source=source):

@@ -60,6 +60,18 @@ def load_profile(path: Path = DEFAULT_PROFILE_PATH) -> dict[str, Any]:
         raise SystemExit(f"MT standardization profile has no profile_id: {path}")
     if profile.get("unicode_normalization") != "NFC":
         raise SystemExit("MT standardization currently requires NFC")
+    expected_implementation = str(
+        profile.get("implementation_sha256") or ""
+    )
+    actual_implementation = hashlib.sha256(
+        Path(__file__).read_bytes()
+    ).hexdigest()
+    if expected_implementation != actual_implementation:
+        raise SystemExit(
+            "MT standardization implementation hash mismatch: "
+            f"profile={expected_implementation or '<missing>'}, "
+            f"loaded={actual_implementation}"
+        )
     if not isinstance(profile.get("policy"), dict):
         raise SystemExit(f"MT standardization profile has no policy mapping: {path}")
     if not isinstance(profile.get("source_overrides", []), list):
@@ -180,18 +192,26 @@ def include_optional_segments(run: _StandardizationRun) -> None:
 def remove_boundary_character(run: _StandardizationRun, marker: str, rule: str) -> None:
     output: list[str] = []
     removed = 0
-    for index, character in enumerate(run.text):
+    index = 0
+    while index < len(run.text):
+        character = run.text[index]
         if character != marker:
             output.append(character)
+            index += 1
             continue
+        end = index + 1
+        while end < len(run.text) and run.text[end] == marker:
+            end += 1
         previous = run.text[index - 1] if index else ""
-        following = run.text[index + 1] if index + 1 < len(run.text) else ""
+        following = run.text[end] if end < len(run.text) else ""
         if (is_orthographic_character(previous) or is_orthographic_character(following)) and not (
             previous.isdigit() and following.isdigit()
         ):
-            removed += 1
+            removed += end - index
+            index = end
             continue
-        output.append(character)
+        output.append(run.text[index:end])
+        index = end
     if removed:
         run.replace(rule, "".join(output), count=removed)
 
