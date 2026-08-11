@@ -10,6 +10,7 @@ from typing import Any
 ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
     "configs/madlad400_3b_native.json",
+    "scripts/bootstrap_predictions.py",
     "scripts/build_experiment_splits.py",
     "scripts/columnar_cache.py",
     "scripts/evaluate_directional.py",
@@ -27,6 +28,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "scripts/training_code_inventory.py",
     "scripts/validate_experiment.py",
     "scripts/write_submission_manifest.py",
+    "slurm/bootstrap_metrics.sl",
     "slurm/evaluate_directional.sl",
     "slurm/setup_madlad400.sl",
     "slurm/setup_spm_sweep.sl",

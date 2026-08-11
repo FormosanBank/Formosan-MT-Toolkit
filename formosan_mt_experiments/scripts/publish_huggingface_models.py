@@ -353,8 +353,8 @@ are human sentence pairs; synthetic pivots and lexical entries are train-only.
 The corpus gate enforces standard-tier Formosan text, at least 7.5% test and
 2.5% validation per language, human sentence-only evaluation, and zero exact,
 skeleton, one-edit, or configured high character n-gram train/evaluation
-conflicts. See `eval/metrics.json` for bootstrap confidence intervals and
-domain/length diagnostics.
+conflicts. See `eval/metrics.json` for domain/length diagnostics and optional
+bootstrap confidence intervals when they were generated.
 
 ## Limitations
 

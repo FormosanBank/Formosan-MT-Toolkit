@@ -137,8 +137,15 @@ breakdowns.
 
 Each generation validation atomically updates `resume/` with model, optimizer,
 scheduler, scaler, random state, and run-contract hash. Successful training
-retains deployable `best/` and `final/` directories. Evaluation reports default
-metadata tags as the headline and oracle metadata as a diagnostic.
+retains deployable `best/` and `final/` directories. The default Slurm flight
+evaluates only the validation-selected `best/` checkpoint with realistic
+default metadata. Set `EVAL_CHECKPOINTS="best final"` or
+`METADATA_MODES="default,oracle"` only for a specific ablation.
+
+Headline and grouped metrics are written immediately after generation.
+Bootstrap confidence intervals are optional because they are not needed for
+routine model selection. Set `SUBMIT_BOOTSTRAP=1` to add a parallel CPU-only
+confidence-interval job; the GPU is not held while resampling.
 
 ## Component Ownership
 
@@ -150,7 +157,8 @@ metadata tags as the headline and oracle metadata as a diagnostic.
 | `setup_formosan_madlad400.py` | MADLAD controls and embedding/head resize. |
 | `model_backends.py` | Model-family prompts and generation behavior. |
 | `train_directional.py` | Sampling, optimization, validation, and resume. |
-| `evaluate_directional.py` | Final/best test evaluation. |
+| `evaluate_directional.py` | Selected-checkpoint test evaluation. |
+| `bootstrap_predictions.py` | Optional CPU confidence intervals. |
 | `mt_metrics.py` | BLEU, chrF2, TER, signatures, and confidence intervals. |
 | `publish_huggingface_models.py` | Audited standalone Hub packages. |
 | `slurm/submit_directional_experiment.sh` | Idempotent Slurm DAG. |

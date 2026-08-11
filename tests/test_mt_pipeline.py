@@ -1064,6 +1064,19 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn('--error="${LOGS_DIR}/%x-%j.err"', submitter)
         self.assertIn("COMPLETED*)", submitter)
         self.assertIn('eval_dependency="--dependency=afterok:${train_id}"', submitter)
+        self.assertIn(
+            'read -r -a checkpoints <<<"${EVAL_CHECKPOINTS:-best}"',
+            submitter,
+        )
+        self.assertIn('--time="${EVAL_TIME:-08:00:00}"', submitter)
+        self.assertNotIn("for checkpoint in final best", submitter)
+
+        bootstrap = (
+            ROOT
+            / "formosan_mt_experiments/slurm/bootstrap_metrics.sl"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--cpus-per-task=8", bootstrap)
+        self.assertNotIn("--gres", bootstrap)
 
     def test_evaluator_checkpoints_outputs_before_bootstrap(self) -> None:
         evaluator = (
@@ -1073,16 +1086,28 @@ class ExperimentManifestTests(unittest.TestCase):
         predictions_write = evaluator.index(
             "predictions.to_csv(args.output_csv, index=False)"
         )
+        completed = evaluator.index('metrics["complete"] = True')
         metrics_write = evaluator.index("write_json(args.output_json, metrics)")
         bootstrap = evaluator.index(
-            'metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals('
+            "bootstrap_confidence_intervals("
         )
-        completed = evaluator.index('metrics["complete"] = True')
 
-        self.assertLess(predictions_write, metrics_write)
+        self.assertLess(predictions_write, completed)
+        self.assertLess(completed, metrics_write)
         self.assertLess(metrics_write, bootstrap)
-        self.assertLess(bootstrap, completed)
-        self.assertIn('"complete": False', evaluator)
+        self.assertIn("if args.bootstrap_samples > 0:", evaluator)
+
+    def test_full_evaluation_defaults_are_resource_conservative(self) -> None:
+        for profile_name in (
+            "default_experiment.json",
+            "madlad400_3b_native.json",
+        ):
+            profile = load_profile(
+                ROOT / "formosan_mt_experiments/configs" / profile_name
+            )
+            defaults = profile["generation_defaults"]
+            self.assertEqual(defaults["metadata_modes"], ["default"])
+            self.assertEqual(defaults["bootstrap_samples"], 0)
 
     def test_nllb_setup_checksum_is_computed_then_enforced(self) -> None:
         submitter = (

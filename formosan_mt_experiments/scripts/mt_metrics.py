@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import random
 from collections.abc import Sequence
 
@@ -13,6 +14,43 @@ try:
 except Exception as exc:  # pragma: no cover - exercised only in incomplete envs
     BLEU = CHRF = TER = None  # type: ignore
     _SACREBLEU_ERROR = exc
+
+
+_BOOTSTRAP_HYPOTHESES: tuple[str, ...] = ()
+_BOOTSTRAP_REFERENCES: tuple[str, ...] = ()
+_BOOTSTRAP_LOWERCASE = False
+_BOOTSTRAP_BLEU_TOKENIZE = "13a"
+
+
+def _initialize_bootstrap_worker(
+    hypotheses: tuple[str, ...],
+    references: tuple[str, ...],
+    lowercase: bool,
+    bleu_tokenize: str,
+) -> None:
+    global _BOOTSTRAP_HYPOTHESES
+    global _BOOTSTRAP_REFERENCES
+    global _BOOTSTRAP_LOWERCASE
+    global _BOOTSTRAP_BLEU_TOKENIZE
+
+    _BOOTSTRAP_HYPOTHESES = hypotheses
+    _BOOTSTRAP_REFERENCES = references
+    _BOOTSTRAP_LOWERCASE = lowercase
+    _BOOTSTRAP_BLEU_TOKENIZE = bleu_tokenize
+
+
+def _score_bootstrap_indexes(indexes: list[int]) -> tuple[float, float, float]:
+    metrics = score_translations(
+        [_BOOTSTRAP_HYPOTHESES[index] for index in indexes],
+        [_BOOTSTRAP_REFERENCES[index] for index in indexes],
+        lowercase=_BOOTSTRAP_LOWERCASE,
+        bleu_tokenize=_BOOTSTRAP_BLEU_TOKENIZE,
+    )
+    return (
+        float(metrics["BLEU"]),
+        float(metrics["chrF2"]),
+        float(metrics["TER"]),
+    )
 
 
 def score_translations(
@@ -82,6 +120,7 @@ def bootstrap_confidence_intervals(
     strata: Sequence[str] | None = None,
     samples: int = 200,
     seed: int = 42,
+    workers: int = 1,
     lowercase: bool = False,
     bleu_tokenize: str = "13a",
 ) -> dict[str, object]:
@@ -94,28 +133,62 @@ def bootstrap_confidence_intervals(
         strata = ["all"] * len(hypotheses)
     if len(strata) != len(hypotheses):
         raise ValueError("Bootstrap strata count does not match outputs")
+    if workers <= 0:
+        raise ValueError("Bootstrap workers must be positive")
     groups: dict[str, list[int]] = {}
     for index, name in enumerate(strata):
         groups.setdefault(str(name), []).append(index)
     rng = random.Random(seed)
     values = {"BLEU": [], "chrF2": [], "TER": []}
-    for _ in range(samples):
-        indexes = [
+
+    def sampled_indexes() -> list[int]:
+        return [
             rng.choice(group)
             for group in groups.values()
             for _ in range(len(group))
         ]
-        metrics = score_translations(
-            [str(hypotheses[index]) for index in indexes],
-            [str(references[index]) for index in indexes],
-            lowercase=lowercase,
-            bleu_tokenize=bleu_tokenize,
+
+    hypotheses_tuple = tuple(str(value) for value in hypotheses)
+    references_tuple = tuple(str(value) for value in references)
+    worker_count = min(workers, samples)
+    initializer_args = (
+        hypotheses_tuple,
+        references_tuple,
+        lowercase,
+        bleu_tokenize,
+    )
+    indexes = (sampled_indexes() for _ in range(samples))
+    if worker_count == 1:
+        _initialize_bootstrap_worker(*initializer_args)
+        scores = map(_score_bootstrap_indexes, indexes)
+        for bleu, chrf, ter in scores:
+            values["BLEU"].append(bleu)
+            values["chrF2"].append(chrf)
+            values["TER"].append(ter)
+    else:
+        start_method = (
+            "fork"
+            if "fork" in multiprocessing.get_all_start_methods()
+            else "spawn"
         )
-        for metric in values:
-            values[metric].append(float(metrics[metric]))
+        context = multiprocessing.get_context(start_method)
+        with context.Pool(
+            processes=worker_count,
+            initializer=_initialize_bootstrap_worker,
+            initargs=initializer_args,
+        ) as pool:
+            for bleu, chrf, ter in pool.imap(
+                _score_bootstrap_indexes,
+                indexes,
+                chunksize=1,
+            ):
+                values["BLEU"].append(bleu)
+                values["chrF2"].append(chrf)
+                values["TER"].append(ter)
     return {
         "samples": samples,
         "seed": seed,
+        "workers": worker_count,
         "stratification": "language",
         "confidence": 0.95,
         "metrics": {

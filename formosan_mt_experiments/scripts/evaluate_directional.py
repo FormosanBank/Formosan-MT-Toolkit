@@ -474,6 +474,7 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
         type=int,
         default=defaults["bootstrap_seed"],
     )
+    parser.add_argument("--bootstrap-workers", type=int, default=1)
     parser.add_argument("--limit-per-lang", type=int, default=0)
     parser.add_argument("--lowercase-bleu", action="store_true")
     parser.add_argument(
@@ -712,6 +713,7 @@ def main() -> None:
         "direction": args.direction,
         "target_lang": args.target_lang,
         "bleu_tokenize": bleu_tokenize,
+        "lowercase_bleu": args.lowercase_bleu,
         "split": args.split,
         "samples": len(predictions),
         "headline_metadata_mode": "default",
@@ -719,7 +721,11 @@ def main() -> None:
         "metadata_modes": mode_metrics,
         "metadata_fallbacks": metadata_fallbacks,
         "bootstrap_95_ci": {
-            "status": "pending",
+            "status": (
+                "pending"
+                if args.bootstrap_samples > 0
+                else "skipped"
+            ),
             "samples": args.bootstrap_samples,
             "seed": args.bootstrap_seed,
         },
@@ -752,21 +758,26 @@ def main() -> None:
             bleu_tokenize=bleu_tokenize,
         ),
     }
+    metrics["complete"] = True
     write_json(args.output_json, metrics)
     print(json.dumps(primary, indent=2))
     print(f"metrics checkpoint: {args.output_json}")
 
-    metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals(
-        predictions["hyp_default"].tolist(),
-        predictions["ref"].tolist(),
-        strata=predictions["lang_code"].tolist(),
-        samples=args.bootstrap_samples,
-        seed=args.bootstrap_seed,
-        lowercase=args.lowercase_bleu,
-        bleu_tokenize=bleu_tokenize,
-    )
-    metrics["complete"] = True
-    write_json(args.output_json, metrics)
+    if args.bootstrap_samples > 0:
+        metrics["bootstrap_95_ci"] = (
+            bootstrap_confidence_intervals(
+                predictions["hyp_default"].tolist(),
+                predictions["ref"].tolist(),
+                strata=predictions["lang_code"].tolist(),
+                samples=args.bootstrap_samples,
+                seed=args.bootstrap_seed,
+                workers=args.bootstrap_workers,
+                lowercase=args.lowercase_bleu,
+                bleu_tokenize=bleu_tokenize,
+            )
+        )
+        metrics["bootstrap_95_ci"]["status"] = "complete"
+        write_json(args.output_json, metrics)
     print(f"predictions: {args.output_csv}")
     print(f"metrics: {args.output_json}")
 

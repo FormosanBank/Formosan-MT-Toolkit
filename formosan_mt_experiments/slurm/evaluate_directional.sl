@@ -100,6 +100,7 @@ add_override LENGTH_PENALTY --length-penalty
 add_override METADATA_MODES --metadata-modes
 add_override BOOTSTRAP_SAMPLES --bootstrap-samples
 add_override BOOTSTRAP_SEED --bootstrap-seed
+add_override BOOTSTRAP_WORKERS --bootstrap-workers
 add_override LOAD_DTYPE --load-dtype
 
 srun --cpu-bind=cores "${evaluation_command[@]}"

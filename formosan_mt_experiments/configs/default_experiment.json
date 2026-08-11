@@ -87,8 +87,8 @@
     "no_repeat_ngram_size": 0,
     "repetition_penalty": 1.0,
     "length_penalty": 1.0,
-    "metadata_modes": ["default", "oracle"],
-    "bootstrap_samples": 200,
+    "metadata_modes": ["default"],
+    "bootstrap_samples": 0,
     "bootstrap_seed": 42
   }
 }
