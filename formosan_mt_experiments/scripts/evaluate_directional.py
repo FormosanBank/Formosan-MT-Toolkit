@@ -682,6 +682,10 @@ def main() -> None:
         and is_formosan_to_target(args.direction)
         else "13a"
     )
+    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+    predictions.to_csv(args.output_csv, index=False)
+    print(f"predictions checkpoint: {args.output_csv}")
+
     mode_metrics = {
         mode: {
             "samples": len(predictions),
@@ -695,18 +699,9 @@ def main() -> None:
         for mode in modes
     }
     primary = mode_metrics["default"]
-    confidence = bootstrap_confidence_intervals(
-        predictions["hyp_default"].tolist(),
-        predictions["ref"].tolist(),
-        strata=predictions["lang_code"].tolist(),
-        samples=args.bootstrap_samples,
-        seed=args.bootstrap_seed,
-        lowercase=args.lowercase_bleu,
-        bleu_tokenize=bleu_tokenize,
-    )
     metrics = {
         "schema_version": 3,
-        "complete": True,
+        "complete": False,
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
         "model_family": backend.family,
@@ -723,7 +718,11 @@ def main() -> None:
         "global": primary,
         "metadata_modes": mode_metrics,
         "metadata_fallbacks": metadata_fallbacks,
-        "bootstrap_95_ci": confidence,
+        "bootstrap_95_ci": {
+            "status": "pending",
+            "samples": args.bootstrap_samples,
+            "seed": args.bootstrap_seed,
+        },
         "by_language": group_scores(
             predictions,
             "lang_code",
@@ -753,10 +752,21 @@ def main() -> None:
             bleu_tokenize=bleu_tokenize,
         ),
     }
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    predictions.to_csv(args.output_csv, index=False)
     write_json(args.output_json, metrics)
     print(json.dumps(primary, indent=2))
+    print(f"metrics checkpoint: {args.output_json}")
+
+    metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals(
+        predictions["hyp_default"].tolist(),
+        predictions["ref"].tolist(),
+        strata=predictions["lang_code"].tolist(),
+        samples=args.bootstrap_samples,
+        seed=args.bootstrap_seed,
+        lowercase=args.lowercase_bleu,
+        bleu_tokenize=bleu_tokenize,
+    )
+    metrics["complete"] = True
+    write_json(args.output_json, metrics)
     print(f"predictions: {args.output_csv}")
     print(f"metrics: {args.output_json}")
 

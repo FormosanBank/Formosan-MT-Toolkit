@@ -1065,6 +1065,25 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("COMPLETED*)", submitter)
         self.assertIn('eval_dependency="--dependency=afterok:${train_id}"', submitter)
 
+    def test_evaluator_checkpoints_outputs_before_bootstrap(self) -> None:
+        evaluator = (
+            ROOT
+            / "formosan_mt_experiments/scripts/evaluate_directional.py"
+        ).read_text(encoding="utf-8")
+        predictions_write = evaluator.index(
+            "predictions.to_csv(args.output_csv, index=False)"
+        )
+        metrics_write = evaluator.index("write_json(args.output_json, metrics)")
+        bootstrap = evaluator.index(
+            'metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals('
+        )
+        completed = evaluator.index('metrics["complete"] = True')
+
+        self.assertLess(predictions_write, metrics_write)
+        self.assertLess(metrics_write, bootstrap)
+        self.assertLess(bootstrap, completed)
+        self.assertIn('"complete": False', evaluator)
+
     def test_nllb_setup_checksum_is_computed_then_enforced(self) -> None:
         submitter = (
             ROOT
