@@ -1469,7 +1469,13 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         )
 
         self.assertEqual(set(accepted["row_id"]), {"normal-parenthetical", "normal-acronym"})
-        reasons = dict(zip(rejected["row_id"], rejected["disposition_reason"]))
+        reasons = dict(
+            zip(
+                rejected["row_id"],
+                rejected["disposition_reason"],
+                strict=True,
+            )
+        )
         self.assertEqual(reasons["labelled-gloss"], "target_gloss_translation")
         self.assertEqual(reasons["unlabelled-annotation"], "target_annotation_gloss")
         self.assertEqual(counts["rejected:target_gloss_translation"], 1)
@@ -1553,6 +1559,7 @@ class PivotContractTests(unittest.TestCase):
             original_target_path=Path("en.csv"),
             source_text_col="chinese_sentence",
             target_text_col="english_sentence",
+            source_language="chinese",
             deepl_source_lang="ZH",
             deepl_target_lang="EN-US",
             output_filename="big_corpus_en_pivot.csv",

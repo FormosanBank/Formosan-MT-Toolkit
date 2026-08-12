@@ -107,6 +107,7 @@ class Direction:
     original_target_path: Path
     source_text_col: str
     target_text_col: str
+    source_language: str
     deepl_source_lang: str
     deepl_target_lang: str
     output_filename: str
@@ -205,7 +206,7 @@ def pivot_candidate_reason(row: Mapping[str, Any], direction: Direction) -> str:
         return "short_formosan"
 
     source_text = str(row.get(direction.source_text_col) or "").strip()
-    source_language = "chinese" if direction.deepl_source_lang == "ZH" else "english"
+    source_language = direction.source_language
     if target_units(source_text, source_language) < int(PIVOT_POLICY["min_source_units"]):
         return "short_pivot_source"
 
@@ -921,7 +922,7 @@ def translate_direction(
                 raise DeepLFatalError(f"DeepL returned {len(translations)} translations for a batch of {len(batch)}")
 
             records: list[dict[str, Any]] = []
-            for job, translated in zip(batch, translations):
+            for job, translated in zip(batch, translations, strict=True):
                 translation_text = str(translated.get("text", ""))
                 record = {
                     "created_at": now_iso(),
@@ -1319,6 +1320,7 @@ def build_directions(args: argparse.Namespace) -> dict[str, Direction]:
             original_target_path=args.big_corpus_zh,
             source_text_col="english_sentence",
             target_text_col="chinese_sentence",
+            source_language="english",
             deepl_source_lang=args.source_en,
             deepl_target_lang=args.target_zh,
             output_filename="big_corpus_zh_pivot.csv",
@@ -1330,6 +1332,7 @@ def build_directions(args: argparse.Namespace) -> dict[str, Direction]:
             original_target_path=args.big_corpus_en,
             source_text_col="chinese_sentence",
             target_text_col="english_sentence",
+            source_language="chinese",
             deepl_source_lang=args.source_zh,
             deepl_target_lang=args.target_en,
             output_filename="big_corpus_en_pivot.csv",

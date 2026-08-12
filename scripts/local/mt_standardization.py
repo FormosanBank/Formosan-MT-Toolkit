@@ -170,12 +170,16 @@ def include_optional_segments(run: _StandardizationRun) -> None:
     total = 0
     while True:
         count = 0
+        current = working
 
-        def replacement(match: re.Match[str]) -> str:
+        def replacement(
+            match: re.Match[str],
+            current_text: str = current,
+        ) -> str:
             nonlocal count
             start, end = match.span()
-            previous = working[start - 1] if start else ""
-            following = working[end] if end < len(working) else ""
+            previous = current_text[start - 1] if start else ""
+            following = current_text[end] if end < len(current_text) else ""
             content = match.group(1)
             previous_is_boundary = (
                 is_orthographic_character(previous)
@@ -194,7 +198,7 @@ def include_optional_segments(run: _StandardizationRun) -> None:
             count += 1
             return content
 
-        updated = OPTIONAL_CONTENT_RE.sub(replacement, working)
+        updated = OPTIONAL_CONTENT_RE.sub(replacement, current)
         if not count:
             break
         total += count

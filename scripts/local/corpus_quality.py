@@ -322,6 +322,7 @@ def normalize_dataframe(
         for row_type, source in zip(
             output.get("row_type", pd.Series([""] * len(output))),
             output.get("source", pd.Series([""] * len(output))),
+            strict=True,
         )
     ]
     return output, transformations
@@ -358,7 +359,7 @@ def apply_quality_rules(
     decision_frame = frame.reindex(columns=decision_columns, fill_value="")
     for values in decision_frame.itertuples(index=False, name=None):
         decision = quality_decision(
-            dict(zip(decision_columns, values)),
+            dict(zip(decision_columns, values, strict=True)),
             source_column=source_column,
             target_column=target_column,
             target_language=target_language,
@@ -389,7 +390,11 @@ def deduplicate_pairs(
     work = frame.copy()
     work["_pair_key"] = [
         f"{exact_key(source)}\u241f{exact_key(target)}"
-        for source, target in zip(work[source_column], work[target_column])
+        for source, target in zip(
+            work[source_column],
+            work[target_column],
+            strict=True,
+        )
     ]
     priority = {"sentence": 0, "lexeme": 1, "morpheme": 2, "unknown": 3}
     work["_priority"] = work["row_type"].map(priority).fillna(4)

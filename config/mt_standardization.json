@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile_id": "formosan-mt-standard-v3",
-  "implementation_sha256": "c78f092f826aed70468bb3d4276eb27bab482dc5dc36dedf9ed5726596e0dd31",
+  "implementation_sha256": "2062106642f27053616728f6f962f7d3ffea022bf737dbe98a8d4af1e6de3831",
   "unicode_normalization": "NFC",
   "policy": {
     "unwrap_letter_infixes": true,

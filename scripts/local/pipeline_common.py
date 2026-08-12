@@ -34,7 +34,8 @@ def load_pipeline_config() -> dict[str, Any]:
         raise RuntimeError("Corpus pipeline must pin tame-mt==0.2.2")
     pivot = value.get("pivot", {})
     if (
-        pivot.get("eligible_row_types") != ["sentence"]
+        pivot.get("require_complete") is not True
+        or pivot.get("eligible_row_types") != ["sentence"]
         or pivot.get("require_mt_eval_eligible") is not True
         or pivot.get("exclude_lexical_sources") is not True
         or not isinstance(pivot.get("min_formosan_tokens"), int)
@@ -43,6 +44,23 @@ def load_pipeline_config() -> dict[str, Any]:
         or pivot["min_source_units"] < 1
     ):
         raise RuntimeError("Corpus pipeline has an invalid sentence-only pivot policy")
+    splits = value.get("splits", {})
+    ratios = [
+        splits.get("train_ratio"),
+        splits.get("validate_ratio"),
+        splits.get("test_ratio"),
+    ]
+    if (
+        not all(isinstance(ratio, (int, float)) and 0 <= ratio <= 1 for ratio in ratios)
+        or abs(sum(ratios) - 1.0) > 1e-9
+        or splits.get("lexical_eval") is not False
+        or splits.get("synthetic_eval_policy")
+        != "human_preferred_source_stratified_fallback"
+        or not isinstance(splits.get("source_ratio_tolerance"), (int, float))
+        or not 0 <= splits["source_ratio_tolerance"] <= 1
+        or splits.get("headline_tier") != "in_domain_hard"
+    ):
+        raise RuntimeError("Corpus pipeline has an invalid hard-split policy")
     return value
 
 

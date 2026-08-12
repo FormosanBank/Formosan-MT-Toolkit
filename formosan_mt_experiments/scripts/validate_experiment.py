@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 from experiment_config import (
     DEFAULT_PROFILE,
+    load_corpus_pipeline_config,
     load_profile,
     profile_record,
     sha256_file,
@@ -31,6 +32,8 @@ from mt_common import (
     target_col_for,
     write_json,
 )
+
+SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
@@ -458,9 +461,9 @@ def validate_splits(
     min_test_rows: int,
     min_validate_rows: int,
     ngram_threshold: float,
-    min_formosan_tokens: int = 4,
-    min_target_tokens: int = 4,
-    source_ratio_tolerance: float = 0.02,
+    min_formosan_tokens: int = SPLIT_DEFAULTS["min_formosan_tokens"],
+    min_target_tokens: int = SPLIT_DEFAULTS["min_target_tokens"],
+    source_ratio_tolerance: float = SPLIT_DEFAULTS["source_ratio_tolerance"],
     require_human_eval: bool = False,
     require_document_holdout: bool = False,
 ) -> dict[str, object]:
@@ -581,10 +584,7 @@ def validate_splits(
         source_ratios[language_key] = {}
         source_ratio_failures[language_key] = {}
         source_distribution_tvd[language_key] = {}
-        for split_name, ratio in (
-            ("test", min_test_ratio),
-            ("validate", min_validate_ratio),
-        ):
+        for split_name in ("test", "validate"):
             distribution = Counter(
                 language_candidate[
                     language_candidate["split"].astype(str).str.lower().eq(split_name)
@@ -756,8 +756,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PROFILE,
     )
     known, _ = preliminary.parse_known_args()
-    profile = load_profile(known.profile)
-    split_defaults = profile["splits"]
+    load_profile(known.profile)
+    split_defaults = SPLIT_DEFAULTS
     parser = argparse.ArgumentParser(
         parents=[preliminary],
         description="Independently validate a release Formosan MT corpus.",
@@ -802,17 +802,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-formosan-tokens",
         type=int,
-        default=split_defaults.get("min_formosan_tokens", 4),
+        default=split_defaults["min_formosan_tokens"],
     )
     parser.add_argument(
         "--min-target-tokens",
         type=int,
-        default=split_defaults.get("min_target_tokens", 4),
+        default=split_defaults["min_target_tokens"],
     )
     parser.add_argument(
         "--source-ratio-tolerance",
         type=float,
-        default=split_defaults.get("source_ratio_tolerance", 0.02),
+        default=split_defaults["source_ratio_tolerance"],
         help="Allowed per-source split deviation in addition to one row.",
     )
     parser.add_argument("--report", "--output-json", dest="report", type=Path)

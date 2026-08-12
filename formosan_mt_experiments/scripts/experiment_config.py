@@ -11,7 +11,38 @@ from pathlib import Path
 from typing import Any
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = EXPERIMENT_ROOT.parent
 DEFAULT_PROFILE = EXPERIMENT_ROOT / "configs" / "default_experiment.json"
+CORPUS_PIPELINE_CONFIG = PROJECT_ROOT / "config" / "corpus_pipeline.json"
+
+SHARED_SPLIT_FIELDS = (
+    "train_ratio",
+    "validate_ratio",
+    "test_ratio",
+    "min_test_rows",
+    "min_validate_rows",
+    "min_formosan_tokens",
+    "min_target_tokens",
+    "source_ratio_tolerance",
+    "synthetic_eval_policy",
+    "character_ngram_jaccard_threshold",
+    "headline_tier",
+)
+
+
+def load_corpus_pipeline_config() -> dict[str, Any]:
+    try:
+        pipeline = json.loads(CORPUS_PIPELINE_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Cannot load corpus pipeline config {CORPUS_PIPELINE_CONFIG}: {exc}"
+        ) from exc
+    if (
+        pipeline.get("schema_version") != 3
+        or pipeline.get("pipeline_version") != "formosan-mt-corpus-v3"
+    ):
+        raise SystemExit("Unsupported corpus pipeline configuration")
+    return pipeline
 
 
 def sha256_file(path: Path) -> str:
@@ -81,8 +112,24 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
     revision = str(profile.get("base_model", {}).get("revision") or "")
     if len(revision) != 40:
         raise SystemExit("Experiment profile must pin a full base-model revision")
-    if profile.get("splits", {}).get("tiers") != ["in_domain_hard"]:
+    splits = profile.get("splits", {})
+    if splits.get("tiers") != ["in_domain_hard"]:
         raise SystemExit("Experiment profile must use only the in_domain_hard tier")
+    pipeline = load_corpus_pipeline_config()
+    pipeline_splits = pipeline.get("splits", {})
+    mismatches = {
+        field: {
+            "profile": splits.get(field),
+            "corpus_pipeline": pipeline_splits.get(field),
+        }
+        for field in SHARED_SPLIT_FIELDS
+        if splits.get(field) != pipeline_splits.get(field)
+    }
+    if mismatches:
+        raise SystemExit(
+            "Experiment and corpus split policies differ: "
+            + json.dumps(mismatches, sort_keys=True)
+        )
     if tokenizer.get("setup_splits") != ["train"]:
         raise SystemExit("Tokenizer setup must use training rows only")
     if tokenizer.get("training_columns") != [
@@ -96,6 +143,16 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         value = training.get(name)
         if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
             raise SystemExit(f"Experiment profile has invalid {name}")
+    if training.get("validation_metadata_mode") not in {"default", "oracle"}:
+        raise SystemExit("Experiment profile has invalid validation_metadata_mode")
+    if training.get("effective_batch_size") != (
+        training.get("batch_size", 0) * training.get("grad_accum_steps", 0)
+    ):
+        raise SystemExit("Experiment profile effective batch size is inconsistent")
+    if "default" not in profile.get("generation_defaults", {}).get(
+        "metadata_modes", []
+    ):
+        raise SystemExit("Headline generation must include default metadata")
     return profile
 
 

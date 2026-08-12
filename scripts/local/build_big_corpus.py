@@ -143,27 +143,33 @@ def require_gloss_free(
         "translation_kind",
         pd.Series("", index=frame.index),
     )
-    reasons = [
-        target_gloss_reason(
+    contaminated_count = 0
+    sample_positions: list[int] = []
+    for position, (target, translation_kind) in enumerate(
+        zip(
+            frame[target_column].astype(str),
+            translation_kinds,
+            strict=True,
+        )
+    ):
+        reason = target_gloss_reason(
             target,
             translation_kind=translation_kind,
             target_language=target_language,
         )
-        for target, translation_kind in zip(
-            frame[target_column].astype(str),
-            translation_kinds,
-        )
-    ]
-    contaminated = [index for index, reason in enumerate(reasons) if reason]
-    if contaminated:
-        sample_frame = frame.iloc[contaminated[:5]]
+        if reason:
+            contaminated_count += 1
+            if len(sample_positions) < 5:
+                sample_positions.append(position)
+    if contaminated_count:
+        sample_frame = frame.iloc[sample_positions]
         sample = (
             sample_frame["source_record_id"].astype(str).tolist()
             if "source_record_id" in sample_frame
             else [str(index) for index in sample_frame.index]
         )
         raise SystemExit(
-            f"{path} contains {len(contaminated):,} accepted gloss targets; "
+            f"{path} contains {contaminated_count:,} accepted gloss targets; "
             f"first source_record_id values: {sample}"
         )
 
@@ -393,6 +399,7 @@ def write_combined(chinese: pd.DataFrame, english: pd.DataFrame, path: Path) -> 
         for key, target in zip(
             english_work["_source_join_key"],
             english_work["english_sentence"],
+            strict=True,
         ):
             if str(target).strip():
                 english_lookup.setdefault(str(key), str(target))

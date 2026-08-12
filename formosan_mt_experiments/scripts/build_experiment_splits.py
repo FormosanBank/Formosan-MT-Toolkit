@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 from columnar_cache import write_columnar_cache
+from experiment_config import load_corpus_pipeline_config
 from mt_common import (
     EASY_BUCKETS,
     add_normalized_columns,
@@ -30,7 +31,8 @@ from mt_common import (
     write_json,
 )
 
-TIER = "in_domain_hard"
+SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
+TIER = SPLIT_DEFAULTS["headline_tier"]
 
 
 @dataclass(frozen=True)
@@ -1237,16 +1239,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
     parser.add_argument("--target-col")
     parser.add_argument("--output-prefix")
-    parser.add_argument("--train-ratio", type=float, default=0.90)
-    parser.add_argument("--val-ratio", type=float, default=0.025)
-    parser.add_argument("--test-ratio", type=float, default=0.075)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--min-formosan-tokens", type=int, default=4)
-    parser.add_argument("--min-target-tokens", type=int, default=4)
-    parser.add_argument("--min-test-rows", type=int, default=0)
-    parser.add_argument("--min-validate-rows", type=int, default=0)
+    parser.add_argument("--train-ratio", type=float, default=SPLIT_DEFAULTS["train_ratio"])
+    parser.add_argument("--val-ratio", type=float, default=SPLIT_DEFAULTS["validate_ratio"])
+    parser.add_argument("--test-ratio", type=float, default=SPLIT_DEFAULTS["test_ratio"])
+    parser.add_argument("--seed", type=int, default=SPLIT_DEFAULTS["seed"])
+    parser.add_argument(
+        "--min-formosan-tokens",
+        type=int,
+        default=SPLIT_DEFAULTS["min_formosan_tokens"],
+    )
+    parser.add_argument(
+        "--min-target-tokens",
+        type=int,
+        default=SPLIT_DEFAULTS["min_target_tokens"],
+    )
+    parser.add_argument("--min-test-rows", type=int, default=SPLIT_DEFAULTS["min_test_rows"])
+    parser.add_argument(
+        "--min-validate-rows",
+        type=int,
+        default=SPLIT_DEFAULTS["min_validate_rows"],
+    )
     parser.add_argument("--selection-attempts", type=int, default=200)
-    parser.add_argument("--ngram-jaccard-threshold", type=float, default=0.82)
+    parser.add_argument(
+        "--ngram-jaccard-threshold",
+        type=float,
+        default=SPLIT_DEFAULTS["character_ngram_jaccard_threshold"],
+    )
     parser.add_argument("--registry-in", type=Path)
     parser.add_argument(
         "--tiers",

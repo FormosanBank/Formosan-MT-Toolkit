@@ -161,6 +161,10 @@ pairwise split labels and builds the model-facing split. It:
    benchmark is selected, rather than shrinking the evaluation set;
 7. fails if language or source-corpus ratios miss their deterministic targets.
 
+`config/corpus_pipeline.json` is the canonical split policy. Corpus builds,
+independent validation, and model profiles load the same values; profile drift
+fails before training.
+
 The denominator is the deduplicated set of evaluation-eligible sentence rows.
 This includes valid human and synthetic sentences but excludes lexical data,
 which cannot be used in the benchmark. Document overlap is reported as a

@@ -46,6 +46,7 @@
     "min_test_rows": 0,
     "min_validate_rows": 0,
     "character_ngram_jaccard_threshold": 0.82,
+    "source_ratio_tolerance": 0.02,
     "min_formosan_tokens": 4,
     "min_target_tokens": 4,
     "lexical_eval": false,

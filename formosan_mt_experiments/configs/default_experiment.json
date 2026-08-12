@@ -1,37 +1,18 @@
 {
   "schema_version": 3,
-  "recipe_id": "nllb200-spm8k-directional-v4",
+  "recipe_id": "nllb200-spm8k-directional-v5",
   "model_family": "nllb",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
     "id": "formosan-mt-standard-v3",
-    "sha256": "4bbded87eb4833b2d1cd5a88a1f2b059560416e0e69ecfa55433a77f418c903e",
+    "sha256": "3c93c1abecfc68c72e3bb1d547fbe0bdebb14bb74e7a5d3c5c519bd18d34bf6f",
     "namespace": "formosan-mt"
   },
-  "project_root": ".",
-  "corpus_variants": ["public_no_bible", "private_no_bible"],
   "base_model": {
     "name": "facebook/nllb-200-distilled-600M",
     "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d"
   },
-  "primary_input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_{target}_in_domain_hard.csv",
-  "targets": {
-    "english": {
-      "input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_en_in_domain_hard.csv",
-      "target_col": "english_sentence",
-      "directions": ["f2en", "en2f"],
-      "selected_recipe": "NLLB-200 SPM8k directional"
-    },
-    "chinese": {
-      "input_pattern": "corpus_builds/{corpus_name}/pivot_corpora_final/big_corpus_zh_in_domain_hard.csv",
-      "target_col": "chinese_sentence",
-      "directions": ["f2zh", "zh2f"],
-      "selected_recipe": "NLLB-200 SPM8k directional"
-    }
-  },
   "splits": {
-    "english_output_dir": "formosan_mt_experiments/data/splits_en_v1",
-    "chinese_output_dir": "formosan_mt_experiments/data/splits_zh_v1",
     "train_ratio": 0.9,
     "validate_ratio": 0.025,
     "test_ratio": 0.075,
@@ -76,6 +57,7 @@
     "generation_eval_samples_per_language": 128,
     "generation_eval_batch_size": 16,
     "validation_beam": 2,
+    "validation_metadata_mode": "default",
     "best_metric": "chrF2",
     "early_stopping_patience": 5,
     "early_stopping_min_delta": 0.05,

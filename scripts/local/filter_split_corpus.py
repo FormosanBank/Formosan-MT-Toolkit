@@ -193,6 +193,7 @@ def filter_rule_counts(rows: pd.DataFrame) -> dict[str, int]:
     for disposition, reason in zip(
         rows["disposition"].astype(str),
         rows["disposition_reason"].astype(str),
+        strict=True,
     ):
         rule = reason.strip() or "unspecified"
         counts[f"{disposition.strip() or 'unknown'}:{rule}"] += 1

@@ -533,6 +533,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 "source_language": lang.code,
                 "qc_revision": args.qc_revision,
                 "skip_validation": args.skip_qc_validation,
+                "pipeline_config_sha256": sha256_file(PIPELINE_CONFIG_PATH),
             },
             [
                 script("scripts/local/clean_xml.py"),
@@ -567,7 +568,10 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         qc_payload = require_json_manifest(
             qc_manifest,
             stage=f"{lang.code} QC",
-            expected={"source_language": lang.code},
+            expected={
+                "source_language": lang.code,
+                "pipeline_version": PIPELINE_CONFIG["pipeline_version"],
+            },
         )
         qc_revision = qc_payload.get("formosanbank_qc", {}).get("revision")
         if qc_revision != args.qc_revision:
@@ -1120,6 +1124,7 @@ def build_hard_splits(
             "min_test_rows": args.min_test_rows,
             "min_validate_rows": args.min_validate_rows,
             "ngram_jaccard_threshold": args.ngram_jaccard_threshold,
+            "source_ratio_tolerance": args.source_ratio_tolerance,
             "tiers": args.tiers,
             "pipeline_config_sha256": sha256_file(PIPELINE_CONFIG_PATH),
         },
@@ -1130,6 +1135,7 @@ def build_hard_splits(
             script("formosan_mt_experiments/scripts/experiment_config.py"),
             script("formosan_mt_experiments/scripts/mt_common.py"),
             script("formosan_mt_experiments/scripts/columnar_cache.py"),
+            script("formosan_mt_experiments/configs/default_experiment.json"),
         ],
     )
     cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, "hard_splits", key)
@@ -1216,6 +1222,8 @@ def build_hard_splits(
                     str(args.min_formosan_tokens),
                     "--min-target-tokens",
                     str(args.min_target_tokens),
+                    "--source-ratio-tolerance",
+                    str(args.source_ratio_tolerance),
                     "--report",
                     str(out_dir / "validation_in_domain_hard.json"),
                 ],
@@ -1382,6 +1390,7 @@ def write_manifest(
                 "validate": args.min_validate_rows,
             },
             "hard_split_character_ngram_jaccard_threshold": args.ngram_jaccard_threshold,
+            "hard_split_source_ratio_tolerance": args.source_ratio_tolerance,
             "with_pivot": args.with_pivot,
             "pivot_read_cache_dirs": [str(path) for path in pivot_read_cache_dirs(args, paths)],
             "keep_redactions": args.keep_redactions,
@@ -1672,6 +1681,11 @@ def parse_args() -> argparse.Namespace:
         default=PIPELINE_CONFIG["splits"]["character_ngram_jaccard_threshold"],
     )
     parser.add_argument(
+        "--source-ratio-tolerance",
+        type=float,
+        default=PIPELINE_CONFIG["splits"]["source_ratio_tolerance"],
+    )
+    parser.add_argument(
         "--tiers",
         default=PIPELINE_CONFIG["splits"]["headline_tier"],
     )
@@ -1692,6 +1706,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--min-validate-rows must be >= 0")
     if not 0.5 <= args.ngram_jaccard_threshold <= 1.0:
         raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
+    if not 0 <= args.source_ratio_tolerance <= 1.0:
+        raise SystemExit("--source-ratio-tolerance must be in [0, 1]")
     if args.tiers != PIPELINE_CONFIG["splits"]["headline_tier"]:
         raise SystemExit(
             "Corpus pipeline v3 supports only "
