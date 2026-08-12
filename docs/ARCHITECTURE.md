@@ -104,7 +104,12 @@ manifest.
 HTML-entity, and whitespace normalization. It does not run English Moses rules
 on Formosan/Chinese, NFKC the model text, or delete parenthetical spans.
 Language/script, redaction, identity, markup, repetition, and broad fertility
-checks quarantine or reject questionable rows. Exact pairs are deduplicated,
+checks quarantine or reject questionable rows. Targets explicitly marked as
+`gloss` or `interlinear-gloss` are rejected. Unlabelled English targets are
+quarantined only when multiple recognized grammatical tags occur in
+interlinear separators such as `.`, `-`, or `=`. Ordinary parenthetical text,
+hyphenation, acronyms, literal translations, and free translations are
+preserved. Exact pairs are deduplicated,
 and every input row is conserved as accepted, rejected, quarantined, or
 deduplicated in a ledger. This stage never assigns data splits.
 

@@ -511,6 +511,15 @@ def validate_splits(
             & split.isin(EVAL_SPLITS)
         ).sum()
     )
+    translation_kind = keyed.get(
+        "translation_kind",
+        pd.Series("", index=keyed.index),
+    ).astype(str).str.strip().str.casefold().str.replace(
+        r"[\s_]+", "-", regex=True
+    )
+    gloss_translation_rows = int(
+        translation_kind.isin({"gloss", "interlinear-gloss"}).sum()
+    )
     candidate = evaluation_candidate_mask(
         keyed,
         min_formosan_tokens=min_formosan_tokens,
@@ -643,6 +652,7 @@ def validate_splits(
         and lexical_eval_rows == 0
         and non_sentence_eval_rows == 0
         and lexical_like_eval_rows == 0
+        and gloss_translation_rows == 0
         and duplicate_pairs == 0
         and bool(train_eval["ok"])
         and bool(validate_test["ok"])
@@ -665,6 +675,7 @@ def validate_splits(
         "lexical_eval_rows": lexical_eval_rows,
         "non_sentence_eval_rows": non_sentence_eval_rows,
         "lexical_like_eval_rows": lexical_like_eval_rows,
+        "gloss_translation_rows": gloss_translation_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
         "validate_test_cross_language_diagnostic": (
@@ -870,7 +881,8 @@ def main() -> None:
     print(
         "  eval: "
         f"synthetic={split_validation['synthetic_eval_rows']:,}, "
-        f"lexical-like={split_validation['lexical_like_eval_rows']:,}"
+        f"lexical-like={split_validation['lexical_like_eval_rows']:,}, "
+        f"gloss={split_validation['gloss_translation_rows']:,}"
     )
     print(
         "  train/eval conflicts: "

@@ -41,6 +41,7 @@ from clean_xml import (  # noqa: E402
 from corpus_quality import (  # noqa: E402
     apply_quality_rules,
     deduplicate_pairs,
+    has_annotation_gloss_structure,
     normalize_dataframe,
     normalize_text,
 )
@@ -1408,6 +1409,72 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertEqual(len(rejected), 2)
         self.assertEqual(counts["rejected:source_annotation_marker"], 1)
         self.assertEqual(counts["rejected:source_artifact_marker"], 1)
+
+    def test_target_glosses_are_removed_without_touching_normal_prose(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("mi'o mici bonu to tacumu."),
+                "row_id": "labelled-gloss",
+                "ami": "mi'o mici bonu to tacumu.",
+                "english": "AV.REAL=1SG AV-want eat.AV NTOP banana",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "interlinear-gloss",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("mo mosi to ca'hu to pooyoyo."),
+                "row_id": "unlabelled-annotation",
+                "ami": "mo mosi to ca'hu to pooyoyo.",
+                "english": (
+                    "Father put pants on the chair. "
+                    "(actor=TOP, AV verb, AV AUX mo)"
+                ),
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("hay ci aki anini."),
+                "row_id": "normal-parenthetical",
+                "ami": "hay ci aki anini.",
+                "english": "Aki is here (today).",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("maolah ci aki to ISO 639."),
+                "row_id": "normal-acronym",
+                "ami": "maolah ci aki to ISO 639.",
+                "english": "Aki uses the ISO-639 language code.",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Stories/example.xml",
+            },
+        ]
+        frame = pd.DataFrame(rows)
+        normalized, _ = normalize_dataframe(frame, "ami", "english")
+        accepted, rejected, counts = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(set(accepted["row_id"]), {"normal-parenthetical", "normal-acronym"})
+        reasons = dict(zip(rejected["row_id"], rejected["disposition_reason"]))
+        self.assertEqual(reasons["labelled-gloss"], "target_gloss_translation")
+        self.assertEqual(reasons["unlabelled-annotation"], "target_annotation_gloss")
+        self.assertEqual(counts["rejected:target_gloss_translation"], 1)
+        self.assertEqual(counts["quarantine:target_annotation_gloss"], 1)
+        self.assertTrue(has_annotation_gloss_structure("catch (AF-Imp)"))
+        self.assertFalse(has_annotation_gloss_structure("Aki is here (today)."))
+        self.assertFalse(has_annotation_gloss_structure("The ISO-639 language code."))
 
     def test_quality_and_dedupe_conserve_every_input_row(self) -> None:
         frame = pd.DataFrame(

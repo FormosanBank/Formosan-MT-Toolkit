@@ -7,7 +7,7 @@
     "qc_revision": "acc3ec9f3137a59b9661e446a750ee1606720394"
   },
   "cleaning": {
-    "profile": "formosan-mt-v3",
+    "profile": "formosan-mt-v3.1",
     "unicode_normalization": "NFC",
     "require_standard_form": true,
     "preserve_structural_row_type": true,

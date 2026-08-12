@@ -51,6 +51,20 @@ LEXICAL_PATH_HINTS = (
     "學習詞表",
     "learning_vocabulary",
 )
+NON_TRANSLATION_KINDS = frozenset({"gloss", "interlinear-gloss"})
+GLOSS_TAGS = frozenset(
+    """
+    ABS ACC ACT AF APPL AUX AV CAU CAUS CN COMP CONJ CONV COP COS
+    COSHAB CV DAT DEM DEON DIST ERG EVI EVID EXCL FILL FIN FOC FUT
+    GEN HAB IMP INCL INST INTR IPFV IRR LNK LOC LOCNMLZ LV NAV NCM
+    NEG NFUT NFIN NIA NMLZ NOM NPST NTOP OBL PART PASS PERF PF PFV
+    PI PIV PL PLN PN POSS PPN PRF PROG PROS PROX PRS PRT PST PV REAL
+    RED REL RL RV SG STA STAT SUB TOP TR UV VBLZ VCL
+    """.split()
+)
+GLOSS_PART_RE = re.compile(r"[.=_-]+")
+PERSON_NUMBER_GLOSS_RE = re.compile(r"^[123](?:SG|PL)(?:INCL|EXCL)?$")
+GLOSS_TOKEN_EDGE_PUNCTUATION = "()[]{}<>,;:!?\"“”‘’'"
 
 
 @dataclass(frozen=True)
@@ -140,6 +154,35 @@ def script_counts(value: str) -> dict[str, int]:
     }
 
 
+def normalized_translation_kind(value: object) -> str:
+    return re.sub(r"[\s_]+", "-", str(value or "").strip().casefold())
+
+
+def has_annotation_gloss_structure(value: str) -> bool:
+    """Detect unlabelled interlinear notation without matching normal prose."""
+    gloss_hits = 0
+    separated_tokens = 0
+    tokens = value.split()
+    for raw_token in tokens:
+        token = raw_token.strip(GLOSS_TOKEN_EDGE_PUNCTUATION)
+        parts = [part for part in GLOSS_PART_RE.split(token) if part]
+        token_hits = sum(
+            part in GLOSS_TAGS or PERSON_NUMBER_GLOSS_RE.fullmatch(part) is not None
+            for part in parts
+        )
+        if not token_hits:
+            continue
+        gloss_hits += token_hits
+        if GLOSS_PART_RE.search(token):
+            separated_tokens += 1
+
+    return (
+        separated_tokens >= 2
+        or (separated_tokens >= 1 and gloss_hits >= 2)
+        or (separated_tokens >= 1 and len(tokens) <= 3)
+    )
+
+
 def fertility_reason(
     source: str,
     target: str,
@@ -182,6 +225,9 @@ def quality_decision(
         return QualityDecision("rejected", "source_artifact_marker")
     if "*" in source:
         return QualityDecision("rejected", "source_annotation_marker")
+    translation_kind = normalized_translation_kind(row.get("translation_kind", ""))
+    if translation_kind in NON_TRANSLATION_KINDS:
+        return QualityDecision("rejected", "target_gloss_translation")
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
@@ -202,6 +248,8 @@ def quality_decision(
         return QualityDecision("rejected", "presentation_scaffolding")
     if TARGET_META_RE.match(target):
         return QualityDecision("rejected", "target_meta_label_only")
+    if target_language == "english" and has_annotation_gloss_structure(target):
+        return QualityDecision("quarantine", "target_annotation_gloss")
 
     target_scripts = script_counts(target)
     if target_language == "english":
@@ -287,6 +335,7 @@ def apply_quality_rules(
                 "mt_normalization_reason",
                 "formosan_mt_standard",
                 "contains_unclear",
+                "translation_kind",
             ]
         )
     )

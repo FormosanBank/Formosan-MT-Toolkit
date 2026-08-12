@@ -633,6 +633,23 @@ class LeakageTests(unittest.TestCase):
         self.assertTrue(provenance["ok"], provenance)
         self.assertTrue(validation["ok"], validation)
 
+        contaminated = output.copy()
+        contaminated["translation_kind"] = ""
+        contaminated.loc[contaminated.index[0], "translation_kind"] = (
+            "interlinear-gloss"
+        )
+        contaminated_validation = validate_splits(
+            contaminated,
+            target_col="english_sentence",
+            min_test_ratio=0.075,
+            min_validate_ratio=0.025,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+        )
+        self.assertFalse(contaminated_validation["ok"])
+        self.assertEqual(contaminated_validation["gloss_translation_rows"], 1)
+
     def test_hard_split_is_deterministic_for_identical_input(self) -> None:
         keyed = add_normalized_columns(
             self.hard_split_fixture(),

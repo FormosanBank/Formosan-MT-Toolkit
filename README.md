@@ -98,6 +98,8 @@ Production builds fail unless all of these conditions hold:
 - existing nonempty `kindOf="standard"` tiers are preserved;
 - model text comes from the separate, versioned `formosan-mt` namespace;
 - malformed, missing, rejected, quarantined, and deduplicated rows are logged;
+- explicit interlinear gloss targets and high-confidence annotation-bearing target
+  structures are excluded from model corpora;
 - DeepL completion is explicit and every provider response is validated;
 - lexemes, morphemes, lexical source corpora, and short lexical-like rows are
   training-only;
