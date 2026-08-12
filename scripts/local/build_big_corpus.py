@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+from corpus_quality import target_gloss_reason
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
 PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
@@ -131,6 +132,42 @@ def ensure_metadata(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def require_gloss_free(
+    frame: pd.DataFrame,
+    *,
+    target_column: str,
+    target_language: str,
+    path: Path,
+) -> None:
+    translation_kinds = frame.get(
+        "translation_kind",
+        pd.Series("", index=frame.index),
+    )
+    reasons = [
+        target_gloss_reason(
+            target,
+            translation_kind=translation_kind,
+            target_language=target_language,
+        )
+        for target, translation_kind in zip(
+            frame[target_column].astype(str),
+            translation_kinds,
+        )
+    ]
+    contaminated = [index for index, reason in enumerate(reasons) if reason]
+    if contaminated:
+        sample_frame = frame.iloc[contaminated[:5]]
+        sample = (
+            sample_frame["source_record_id"].astype(str).tolist()
+            if "source_record_id" in sample_frame
+            else [str(index) for index in sample_frame.index]
+        )
+        raise SystemExit(
+            f"{path} contains {len(contaminated):,} accepted gloss targets; "
+            f"first source_record_id values: {sample}"
+        )
+
+
 def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]:
     language = match.group("lang")
     target = match.group("target")
@@ -168,6 +205,12 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
             f"{path} language mismatch: filename={language}, rows={sorted(languages)}"
         )
     frame = frame.rename(columns={raw_target: target_column})
+    require_gloss_free(
+        frame,
+        target_column=target_column,
+        target_language="english" if target == "en" else "chinese",
+        path=path,
+    )
     return target, ensure_metadata(frame)
 
 
@@ -199,6 +242,13 @@ def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
         frame["formosan_mt_standard"].astype(str)
     ).all():
         raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
+    target_column = "english_sentence" if has_english else "chinese_sentence"
+    require_gloss_free(
+        frame,
+        target_column=target_column,
+        target_language="english" if has_english else "chinese",
+        path=path,
+    )
     return ("en" if has_english else "zh"), ensure_metadata(frame)
 
 

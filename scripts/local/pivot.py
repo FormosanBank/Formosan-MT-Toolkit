@@ -28,13 +28,21 @@ import re
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 import requests
-from corpus_quality import exact_key, normalize_text, quality_decision
+from corpus_quality import (
+    LEXICAL_PATH_HINTS,
+    exact_key,
+    normalize_text,
+    quality_decision,
+    target_gloss_reason,
+    target_units,
+    token_count,
+)
 from dotenv import load_dotenv
 from pipeline_common import (
     atomic_write_json,
@@ -50,6 +58,7 @@ DEEPL_MAX_TEXTS_PER_REQUEST = 50
 DEEPL_MAX_REQUEST_BYTES = 128 * 1024
 DEFAULT_SAFE_REQUEST_BYTES = 120 * 1024
 PROVIDER = "deepl"
+PIVOT_POLICY = load_pipeline_config()["pivot"]
 
 BASE_COLUMNS = [
     "row_id",
@@ -59,6 +68,7 @@ BASE_COLUMNS = [
     "formosan_mt_standard",
     "standard_namespace",
     "mt_normalization_status",
+    "mt_normalization_confidence",
     "mt_eval_eligible",
     "mt_standard_profile",
     "mt_standard_profile_sha256",
@@ -109,6 +119,8 @@ class DirectionStats:
     source_rows: int = 0
     original_rows: int = 0
     candidate_rows: int = 0
+    ineligible_source_rows: int = 0
+    candidate_exclusion_counts: dict[str, int] = field(default_factory=dict)
     empty_source_rows: int = 0
     cached_unique_before: int = 0
     missing_unique_before: int = 0
@@ -155,6 +167,56 @@ class TranslationJob:
     key: str
     text: str
     chars: int
+
+
+def bool_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y"}
+
+
+def pivot_candidate_reason(row: Mapping[str, Any], direction: Direction) -> str:
+    """Return why a row must not be sent to DeepL, or an empty string."""
+    row_type = str(row.get("row_type") or "").strip().casefold()
+    allowed_types = {
+        str(value).strip().casefold()
+        for value in PIVOT_POLICY["eligible_row_types"]
+    }
+    if row_type not in allowed_types:
+        return "non_sentence"
+
+    source_path = str(row.get("source") or "").casefold()
+    if PIVOT_POLICY["exclude_lexical_sources"] and any(
+        hint in source_path for hint in LEXICAL_PATH_HINTS
+    ):
+        return "lexical_source"
+
+    if PIVOT_POLICY["require_mt_eval_eligible"] and not bool_value(
+        row.get("mt_eval_eligible")
+    ):
+        return "mt_ineligible"
+    if str(row.get("mt_normalization_confidence") or "").strip().casefold() == "ambiguous":
+        return "ambiguous_standardization"
+
+    formosan = str(row.get("formosan_sentence") or "").strip()
+    if token_count(formosan) < int(PIVOT_POLICY["min_formosan_tokens"]):
+        return "short_formosan"
+
+    source_text = str(row.get(direction.source_text_col) or "").strip()
+    source_language = "chinese" if direction.deepl_source_lang == "ZH" else "english"
+    if target_units(source_text, source_language) < int(PIVOT_POLICY["min_source_units"]):
+        return "short_pivot_source"
+
+    gloss_reason = target_gloss_reason(
+        source_text,
+        translation_kind=row.get("translation_kind", ""),
+        target_language=source_language,
+    )
+    if gloss_reason:
+        return gloss_reason
+    return ""
 
 
 @dataclass
@@ -652,6 +714,13 @@ def candidate_jobs(
     seen_overlap: set[tuple[str, str]] = set()
 
     for _, row in df.iterrows():
+        exclusion = pivot_candidate_reason(row, direction)
+        if exclusion:
+            stats.ineligible_source_rows += 1
+            stats.candidate_exclusion_counts[exclusion] = (
+                stats.candidate_exclusion_counts.get(exclusion, 0) + 1
+            )
+            continue
         stats.candidate_rows += 1
         f_key = formosan_key(row)
         if skip_target_overlaps and f_key[0] and f_key[1] and f_key in target_keys:
@@ -762,6 +831,7 @@ def translate_direction(
     )
     print(
         f"{direction.name}: {stats.candidate_rows:,} candidate rows, "
+        f"{stats.ineligible_source_rows:,} ineligible rows, "
         f"{stats.target_overlap_rows_skipped:,} target-overlap rows skipped, "
         f"{stats.cached_unique_before:,} cached unique translations, "
         f"{len(jobs):,} missing unique translations, {planned_chars:,} chars planned"
@@ -1066,6 +1136,8 @@ def write_pivot_output(
             unit="row",
             disable=args.quiet,
         ):
+            if pivot_candidate_reason(row, direction):
+                continue
             source_text = str(row.get(direction.source_text_col, "")).strip()
             formosan = str(row.get("formosan_sentence", "")).strip()
             lang_code = str(row.get("lang_code", "")).strip()
@@ -1228,6 +1300,7 @@ def write_manifest(
             "dedupe": args.dedupe,
             "dry_run": args.dry_run,
             "skip_translation": args.skip_translation,
+            "eligibility_policy": PIVOT_POLICY,
         },
         "deepl_usage_at_start": usage,
         "stats": stats_payload,

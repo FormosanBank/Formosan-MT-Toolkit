@@ -31,7 +31,12 @@
   },
   "pivot": {
     "require_complete": true,
-    "synthetic_eval": true
+    "synthetic_eval": true,
+    "eligible_row_types": ["sentence"],
+    "require_mt_eval_eligible": true,
+    "exclude_lexical_sources": true,
+    "min_formosan_tokens": 4,
+    "min_source_units": 4
   },
   "splits": {
     "seed": 42,

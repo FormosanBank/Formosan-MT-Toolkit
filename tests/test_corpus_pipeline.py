@@ -23,6 +23,7 @@ import fetch_xml  # noqa: E402
 from build_big_corpus import (  # noqa: E402
     discover_inputs,
     estimated_output_bytes,
+    require_gloss_free,
     write_csv_atomic,
 )
 from build_mt_corpus import (  # noqa: E402
@@ -79,6 +80,7 @@ from pivot import (  # noqa: E402
     load_cache,
     load_cache_chain,
     make_cache_key,
+    pivot_candidate_reason,
     synthetic_row,
     write_pivot_output,
 )
@@ -1476,6 +1478,22 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertFalse(has_annotation_gloss_structure("Aki is here (today)."))
         self.assertFalse(has_annotation_gloss_structure("The ISO-639 language code."))
 
+    def test_aggregate_gate_refuses_gloss_contamination(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "source_record_id": ["bad-gloss"],
+                "english_sentence": ["catch (AF-Imp)"],
+                "translation_kind": [""],
+            }
+        )
+        with self.assertRaises(SystemExit):
+            require_gloss_free(
+                frame,
+                target_column="english_sentence",
+                target_language="english",
+                path=Path("fixture.csv"),
+            )
+
     def test_quality_and_dedupe_conserve_every_input_row(self) -> None:
         frame = pd.DataFrame(
             [
@@ -1544,13 +1562,13 @@ class PivotContractTests(unittest.TestCase):
     def source_row(self) -> pd.Series:
         return pd.Series(
             {
-                **mt_contract_fields("malu."),
+                **mt_contract_fields("mako ko tawki niyam."),
                 "row_id": "human-row",
                 "source_record_id": "source-row",
                 "content_sha256": "old",
                 "lang_code": "ami",
-                "formosan_sentence": "malu.",
-                "chinese_sentence": "很好。",
+                "formosan_sentence": "mako ko tawki niyam.",
+                "chinese_sentence": "今天真的很好。",
                 "source": "FormosanBank/Corpora/Test/XML/sample.xml",
                 "kindOf": "standard",
                 "dialect": "Coastal",
@@ -1611,7 +1629,7 @@ class PivotContractTests(unittest.TestCase):
             self.source_row(),
             {
                 "translation": "It is good.",
-                "text": "很好。",
+                "text": "今天真的很好。",
                 "detected_source_language": "ZH",
                 "model_type_used": "quality_optimized",
             },
@@ -1631,7 +1649,7 @@ class PivotContractTests(unittest.TestCase):
             self.source_row(),
             {
                 "translation": "這是錯的。",
-                "text": "很好。",
+                "text": "今天真的很好。",
                 "detected_source_language": "ZH",
             },
             self.direction(),
@@ -1672,7 +1690,7 @@ class PivotContractTests(unittest.TestCase):
                 provider="deepl",
                 source_lang="ZH",
                 target_lang="EN-US",
-                text="很好。",
+                text="今天真的很好。",
                 split_sentences="0",
                 preserve_formatting=True,
                 model_type="prefer_quality_optimized",
@@ -1691,7 +1709,7 @@ class PivotContractTests(unittest.TestCase):
                 cache={
                     key: {
                         "translation": "這是錯的。",
-                        "text": "很好。",
+                        "text": "今天真的很好。",
                         "detected_source_language": "ZH",
                     }
                 },
@@ -1754,6 +1772,25 @@ class PivotContractTests(unittest.TestCase):
             self.assertFalse(
                 (output_dir / "big_corpus_en_pivot.csv").exists()
             )
+
+    def test_pivot_eligibility_excludes_lexical_and_short_rows(self) -> None:
+        sentence = self.source_row()
+        self.assertEqual(pivot_candidate_reason(sentence, self.direction()), "")
+
+        lexeme = sentence.copy()
+        lexeme["row_type"] = "lexeme"
+        self.assertEqual(
+            pivot_candidate_reason(lexeme, self.direction()),
+            "non_sentence",
+        )
+
+        short = sentence.copy()
+        short["formosan_sentence"] = "malu."
+        short["formosan_mt_standard"] = "malu."
+        self.assertEqual(
+            pivot_candidate_reason(short, self.direction()),
+            "short_formosan",
+        )
 
     def test_training_bundle_includes_hashed_pivot_ledgers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

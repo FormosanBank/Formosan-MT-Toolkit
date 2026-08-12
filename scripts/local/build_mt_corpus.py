@@ -930,6 +930,7 @@ def build_aggregates(
         {"inputs": file_inventory(inputs, paths.root)},
         [
             script("scripts/local/build_big_corpus.py"),
+            script("scripts/local/corpus_quality.py"),
             script("scripts/local/pipeline_common.py"),
         ],
     )

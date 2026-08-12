@@ -245,7 +245,9 @@ def format_pivot_summary(manifest_path: Path) -> str:
     parts = []
     for item in stats:
         parts.append(
-            f"{item.get('direction')}: synthetic={_count(item.get('synthetic_rows_written'))}, "
+            f"{item.get('direction')}: eligible={_count(item.get('candidate_rows'))}, "
+            f"excluded={_count(item.get('ineligible_source_rows'))}, "
+            f"synthetic={_count(item.get('synthetic_rows_written'))}, "
             f"quarantined={_count(item.get('synthetic_rows_quarantined'))}, "
             f"missing={_count(item.get('synthetic_rows_missing'))}"
         )

@@ -183,6 +183,20 @@ def has_annotation_gloss_structure(value: str) -> bool:
     )
 
 
+def target_gloss_reason(
+    value: object,
+    *,
+    translation_kind: object,
+    target_language: str,
+) -> str:
+    """Return a stable rejection reason for explicit or unlabelled glosses."""
+    if normalized_translation_kind(translation_kind) in NON_TRANSLATION_KINDS:
+        return "target_gloss_translation"
+    if target_language == "english" and has_annotation_gloss_structure(str(value)):
+        return "target_annotation_gloss"
+    return ""
+
+
 def fertility_reason(
     source: str,
     target: str,
@@ -225,9 +239,14 @@ def quality_decision(
         return QualityDecision("rejected", "source_artifact_marker")
     if "*" in source:
         return QualityDecision("rejected", "source_annotation_marker")
-    translation_kind = normalized_translation_kind(row.get("translation_kind", ""))
-    if translation_kind in NON_TRANSLATION_KINDS:
-        return QualityDecision("rejected", "target_gloss_translation")
+    gloss_reason = target_gloss_reason(
+        target,
+        translation_kind=row.get("translation_kind", ""),
+        target_language=target_language,
+    )
+    if gloss_reason:
+        disposition = "rejected" if gloss_reason == "target_gloss_translation" else "quarantine"
+        return QualityDecision(disposition, gloss_reason)
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
@@ -248,9 +267,6 @@ def quality_decision(
         return QualityDecision("rejected", "presentation_scaffolding")
     if TARGET_META_RE.match(target):
         return QualityDecision("rejected", "target_meta_label_only")
-    if target_language == "english" and has_annotation_gloss_structure(target):
-        return QualityDecision("quarantine", "target_annotation_gloss")
-
     target_scripts = script_counts(target)
     if target_language == "english":
         if target_scripts["kana_hangul"]:

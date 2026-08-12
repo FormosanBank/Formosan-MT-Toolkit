@@ -32,6 +32,17 @@ def load_pipeline_config() -> dict[str, Any]:
     exposure = value.get("exposure_audit", {})
     if exposure.get("tool") != "tame-mt" or exposure.get("version") != "0.2.2":
         raise RuntimeError("Corpus pipeline must pin tame-mt==0.2.2")
+    pivot = value.get("pivot", {})
+    if (
+        pivot.get("eligible_row_types") != ["sentence"]
+        or pivot.get("require_mt_eval_eligible") is not True
+        or pivot.get("exclude_lexical_sources") is not True
+        or not isinstance(pivot.get("min_formosan_tokens"), int)
+        or pivot["min_formosan_tokens"] < 1
+        or not isinstance(pivot.get("min_source_units"), int)
+        or pivot["min_source_units"] < 1
+    ):
+        raise RuntimeError("Corpus pipeline has an invalid sentence-only pivot policy")
     return value
 
 
