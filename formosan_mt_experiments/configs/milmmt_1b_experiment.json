@@ -1,0 +1,87 @@
+{
+  "schema_version": 3,
+  "recipe_id": "milmmt46-1b-v1-directional-v1",
+  "model_family": "milmmt",
+  "corpus_pipeline_version": "formosan-mt-corpus-v3",
+  "mt_standardization": {
+    "id": "formosan-mt-standard-v3",
+    "sha256": "3c93c1abecfc68c72e3bb1d547fbe0bdebb14bb74e7a5d3c5c519bd18d34bf6f",
+    "namespace": "formosan-mt"
+  },
+  "base_model": {
+    "name": "xiaomi-research/MiLMMT-46-1B-v1.0",
+    "revision": "4fc480b6c58dec29c159dcdf9fde0f6d5c354995"
+  },
+  "upstream_code": {
+    "repository": "https://github.com/xiaomi-research/gemmax",
+    "revision": "9bffa89ca7f6fa44072144171992dd82d52a8e9c"
+  },
+  "splits": {
+    "train_ratio": 0.9,
+    "validate_ratio": 0.025,
+    "test_ratio": 0.075,
+    "min_test_rows": 0,
+    "min_validate_rows": 0,
+    "min_formosan_tokens": 4,
+    "min_target_tokens": 4,
+    "source_ratio_tolerance": 0.02,
+    "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
+    "character_ngram_jaccard_threshold": 0.82,
+    "tiers": ["in_domain_hard"],
+    "headline_tier": "in_domain_hard"
+  },
+  "tokenizer": {
+    "mode": "native"
+  },
+  "prompt": {
+    "format": "xiaomi_translation_v1",
+    "use_metadata": false
+  },
+  "training_defaults": {
+    "steps": 20000,
+    "batch_size": 2,
+    "grad_accum_steps": 16,
+    "effective_batch_size": 32,
+    "max_length": 512,
+    "learning_rate": 0.00002,
+    "warmup_steps": 200,
+    "weight_decay": 0.01,
+    "optimizer": "adamw",
+    "lr_scheduler": "inverse_sqrt",
+    "alpha": 0.5,
+    "use_tags": false,
+    "domain_tag_dropout": 0.0,
+    "dialect_tag_dropout": 0.0,
+    "precision": "bf16",
+    "load_dtype": "bf16",
+    "gradient_checkpointing": true,
+    "label_smoothing": 0.0,
+    "save_interval": 0,
+    "log_interval": 50,
+    "generation_eval_interval": 1000,
+    "generation_eval_samples_per_language": 64,
+    "generation_eval_batch_size": 8,
+    "validation_beam": 1,
+    "validation_metadata_mode": "default",
+    "best_metric": "chrF2",
+    "early_stopping_patience": 4,
+    "early_stopping_min_delta": 0.05,
+    "early_stopping_start_step": 4000,
+    "f2en_easy_source_weight": 0.05,
+    "en2f_easy_source_weight": 0.15,
+    "f2zh_easy_source_weight": 0.05,
+    "zh2f_easy_source_weight": 0.15
+  },
+  "generation_defaults": {
+    "beam": 1,
+    "max_length": 512,
+    "max_new_tokens": 256,
+    "min_new_tokens": 1,
+    "no_repeat_ngram_size": 0,
+    "repetition_penalty": 1.0,
+    "length_penalty": 1.0,
+    "metadata_modes": ["default"],
+    "bootstrap_samples": 0,
+    "bootstrap_seed": 42
+  }
+}

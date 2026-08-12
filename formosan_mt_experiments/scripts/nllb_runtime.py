@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
+import torch
 from mt_common import (
     DOMAIN_BUCKETS,
     build_prefix,
@@ -17,7 +18,7 @@ from mt_common import (
     source_bucket,
     target_lid_for,
 )
-from transformers import NllbTokenizer
+from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
 
 MODEL_FAMILY = "nllb"
 
@@ -110,6 +111,14 @@ def load_tokenizer(path: Path):
     return NllbTokenizer.from_pretrained(path, use_fast=False)
 
 
+def load_model(path: Path, *, dtype: torch.dtype):
+    return AutoModelForSeq2SeqLM.from_pretrained(
+        path,
+        dtype=dtype,
+        low_cpu_mem_usage=True,
+    )
+
+
 def task_spec(
     language: str,
     direction: str,
@@ -140,6 +149,23 @@ def source_prefix(
     if not use_tags:
         return ""
     return build_prefix(row, direction, target_lang=target_lang)
+
+
+def format_source(
+    row: Mapping,
+    source_text: str,
+    direction: str,
+    *,
+    target_lang: str,
+    use_tags: bool,
+) -> str:
+    prefix = source_prefix(
+        row,
+        direction,
+        target_lang=target_lang,
+        use_tags=use_tags,
+    )
+    return f"{prefix} {source_text}".strip()
 
 
 def ensure_source_prefix_tokens(
@@ -211,3 +237,78 @@ def configure_model(model, tokenizer) -> None:
 def validate_task(tokenizer, task: TaskSpec) -> None:
     token_id(tokenizer, task.source_lid)
     token_id(tokenizer, task.target_lid)
+
+
+def encode_batch(
+    tokenizer,
+    source_texts: list[str],
+    target_texts: list[str],
+    task: TaskSpec,
+    *,
+    max_length: int,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    prepare_source(tokenizer, task)
+    encoded = tokenizer(
+        source_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_attention_mask=True,
+        return_token_type_ids=False,
+    )
+    prepare_target(tokenizer, task)
+    labels = tokenizer(
+        text_target=target_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+    )["input_ids"]
+    labels[labels == tokenizer.pad_token_id] = -100
+    return (
+        {key: value.to(device) for key, value in encoded.items()},
+        labels.to(device),
+    )
+
+
+@torch.no_grad()
+def generate_batch(
+    model,
+    tokenizer,
+    source_texts: list[str],
+    task: TaskSpec,
+    *,
+    max_length: int,
+    max_new_tokens: int,
+    min_new_tokens: int,
+    num_beams: int,
+    no_repeat_ngram_size: int,
+    repetition_penalty: float,
+    length_penalty: float,
+    device: torch.device,
+) -> list[str]:
+    prepare_source(tokenizer, task)
+    encoded = tokenizer(
+        source_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_token_type_ids=False,
+    )
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    generated = model.generate(
+        **encoded,
+        num_beams=num_beams,
+        max_new_tokens=max_new_tokens,
+        min_new_tokens=min_new_tokens,
+        no_repeat_ngram_size=no_repeat_ngram_size,
+        repetition_penalty=repetition_penalty,
+        length_penalty=length_penalty,
+        **generation_kwargs(tokenizer, task),
+    )
+    return tokenizer.batch_decode(generated, skip_special_tokens=True)

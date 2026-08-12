@@ -51,6 +51,8 @@ def build_job_graph(
     ):
         if label in job_ids:
             graph["setup"][language] = job_ids[label]
+    if "setup_milmmt" in job_ids:
+        graph["setup"]["shared"] = job_ids["setup_milmmt"]
 
     for direction in DIRECTIONS:
         evaluations = {
@@ -59,9 +61,7 @@ def build_job_graph(
             if (label := f"eval_{direction}_{checkpoint}") in job_ids
         }
         if not evaluations:
-            raise ValueError(
-                f"Submission state has no evaluation for direction {direction}"
-            )
+            raise ValueError(f"Submission state has no evaluation for direction {direction}")
         bootstrap = {
             checkpoint: job_ids[label]
             for checkpoint in evaluations
@@ -97,26 +97,15 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
         "validation": {
             "ok": bool(validation["ok"]),
             "exact_overlap": sum(train_evaluation["exact_overlap"].values()),
-            "skeleton_overlap": sum(
-                train_evaluation["skeleton_overlap"].values()
-            ),
-            "one_edit_conflicts": sum(
-                train_evaluation["one_edit_conflicting_rows"].values()
-            ),
-            "character_ngram_conflicts": sum(
-                train_evaluation["character_ngram_conflicting_rows"].values()
-            ),
+            "skeleton_overlap": sum(train_evaluation["skeleton_overlap"].values()),
+            "one_edit_conflicts": sum(train_evaluation["one_edit_conflicting_rows"].values()),
+            "character_ngram_conflicts": sum(train_evaluation["character_ngram_conflicting_rows"].values()),
             "document_overlap": int(train_evaluation["document_overlap"]),
             "lexeme_eval_rows": int(validation["lexical_eval_rows"]),
-            "lexical_like_eval_rows": int(
-                validation.get("lexical_like_eval_rows", 0)
-            ),
+            "lexical_like_eval_rows": int(validation.get("lexical_like_eval_rows", 0)),
             "per_language_ratio_failures": len(validation["ratio_failures"]),
             "per_source_ratio_failures": sum(
-                len(values)
-                for values in validation.get(
-                    "source_ratio_failures", {}
-                ).values()
+                len(values) for values in validation.get("source_ratio_failures", {}).values()
             ),
         },
     }
@@ -128,14 +117,12 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "experiment_id": (
-            f"{profile['recipe_id']}_{args.corpus_name}_{args.run_stamp}"
-        ),
+        "experiment_id": (f"{profile['recipe_id']}_{args.corpus_name}_{args.run_stamp}"),
         "status": "submitted",
         "run_stamp": args.run_stamp,
         "corpus_name": args.corpus_name,
         "recipe_id": profile["recipe_id"],
-        "model_family": "nllb",
+        "model_family": profile["model_family"],
         "base_model": profile["base_model"],
         "source_git_commit": args.git_commit,
         "code": build_code_inventory(

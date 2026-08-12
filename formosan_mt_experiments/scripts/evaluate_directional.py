@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+import milmmt_runtime as milmmt
 import nllb_runtime as nllb
 import numpy as np
 import pandas as pd
@@ -32,7 +33,6 @@ from mt_common import (
     target_col_for,
     target_language_from_direction,
     token_count,
-    with_tagged_columns,
     write_json,
 )
 from mt_metrics import (
@@ -40,13 +40,19 @@ from mt_metrics import (
     score_translations,
 )
 from tqdm.auto import tqdm
-from transformers import AutoModelForSeq2SeqLM
 
 LOAD_DTYPES = {
     "bf16": torch.bfloat16,
     "fp16": torch.float16,
     "fp32": torch.float32,
 }
+
+
+def runtime_for(profile: dict):
+    return {
+        "nllb": nllb,
+        "milmmt": milmmt,
+    }[profile["model_family"]]
 
 
 def read_complete_manifest(path: Path, label: str) -> dict:
@@ -79,53 +85,29 @@ def validate_evaluation_contract(
         "training run contract",
     )
     if not manifest_contains_hash(corpus, input_hash):
-        raise SystemExit(
-            "Evaluation CSV checksum is absent from corpus manifest"
-        )
+        raise SystemExit("Evaluation CSV checksum is absent from corpus manifest")
     if validation.get("input_sha256") != input_hash:
-        raise SystemExit(
-            "Validation report does not match evaluation CSV"
-        )
+        raise SystemExit("Validation report does not match evaluation CSV")
     if (
         run_contract.get("input", {}).get("sha256") != input_hash
         or run_contract.get("recipe_id") != profile["recipe_id"]
-        or run_contract.get("model_family") != "nllb"
-        or run_contract.get("profile", {}).get("sha256")
-        != profile_record(args.profile)["sha256"]
-        or run_contract.get("mt_standardization")
-        != profile["mt_standardization"]
+        or run_contract.get("model_family") != profile["model_family"]
+        or run_contract.get("profile", {}).get("sha256") != profile_record(args.profile)["sha256"]
+        or run_contract.get("mt_standardization") != profile["mt_standardization"]
     ):
-        raise SystemExit(
-            "Training run contract does not match evaluation inputs"
-        )
-    checkpoint_metadata_path = (
-        args.model / "experiment_metadata.json"
-    )
+        raise SystemExit("Training run contract does not match evaluation inputs")
+    checkpoint_metadata_path = args.model / "experiment_metadata.json"
     if not checkpoint_metadata_path.is_file():
-        raise SystemExit(
-            f"Checkpoint has no experiment metadata: "
-            f"{checkpoint_metadata_path}"
-        )
-    checkpoint_metadata = json.loads(
-        checkpoint_metadata_path.read_text(encoding="utf-8")
-    )
-    if (
-        checkpoint_metadata.get("run_contract_sha256")
-        != stable_hash(run_contract)
-    ):
-        raise SystemExit(
-            "Checkpoint was not created under the supplied run contract"
-        )
+        raise SystemExit(f"Checkpoint has no experiment metadata: {checkpoint_metadata_path}")
+    checkpoint_metadata = json.loads(checkpoint_metadata_path.read_text(encoding="utf-8"))
+    if checkpoint_metadata.get("run_contract_sha256") != stable_hash(run_contract):
+        raise SystemExit("Checkpoint was not created under the supplied run contract")
     return {
         "input_sha256": input_hash,
         "corpus_manifest_sha256": sha256_file(args.corpus_manifest),
-        "validation_report_sha256": sha256_file(
-            args.validation_report
-        ),
+        "validation_report_sha256": sha256_file(args.validation_report),
         "run_contract_sha256": stable_hash(run_contract),
-        "checkpoint_metadata_sha256": sha256_file(
-            checkpoint_metadata_path
-        ),
+        "checkpoint_metadata_sha256": sha256_file(checkpoint_metadata_path),
     }
 
 
@@ -143,11 +125,7 @@ def length_bin(tokens: int) -> str:
 
 def lexical_units(text: object, is_chinese: bool) -> list[str]:
     if is_chinese:
-        return [
-            character
-            for character in str(text)
-            if not character.isspace()
-        ]
+        return [character for character in str(text) if not character.isspace()]
     return str(text).casefold().split()
 
 
@@ -159,25 +137,14 @@ def word_oov_rates(
     target_col: str,
     target_lang: str,
 ) -> pd.Series:
-    train = full[
-        full["split"].astype(str).str.lower().eq("train")
-    ]
-    column = (
-        "formosan_sentence"
-        if is_formosan_to_target(direction)
-        else target_col
-    )
-    is_chinese = (
-        column == target_col
-        and target_lang == "chinese"
-    )
+    train = full[full["split"].astype(str).str.lower().eq("train")]
+    column = "formosan_sentence" if is_formosan_to_target(direction) else target_col
+    is_chinese = column == target_col and target_lang == "chinese"
     vocabularies: dict[str, set[str]] = {}
     for language, subset in train.groupby("lang_code"):
         vocabulary: set[str] = set()
         for text in subset[column].astype(str):
-            vocabulary.update(
-                lexical_units(text, is_chinese=is_chinese)
-            )
+            vocabulary.update(lexical_units(text, is_chinese=is_chinese))
         vocabularies[str(language)] = vocabulary
     rates = []
     for _, row in evaluation.iterrows():
@@ -189,10 +156,7 @@ def word_oov_rates(
             str(row["lang_code"]),
             set(),
         )
-        rates.append(
-            sum(unit not in vocabulary for unit in units)
-            / max(len(units), 1)
-        )
+        rates.append(sum(unit not in vocabulary for unit in units) / max(len(units), 1))
     return pd.Series(rates, index=evaluation.index)
 
 
@@ -203,10 +167,7 @@ def formosan_fragmentation(
     values = []
     for text in evaluation["formosan_sentence"].astype(str):
         words = [word for word in text.split() if word]
-        pieces = sum(
-            len(tokenizer.tokenize(word))
-            for word in words
-        )
+        pieces = sum(len(tokenizer.tokenize(word)) for word in words)
         values.append(pieces / max(len(words), 1))
     return pd.Series(values, index=evaluation.index)
 
@@ -216,8 +177,9 @@ def metadata_frame(
     tokenizer,
     *,
     mode: str,
+    runtime=nllb,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    return nllb.normalize_control_metadata(
+    return runtime.normalize_control_metadata(
         evaluation,
         tokenizer,
         mode=mode,
@@ -230,10 +192,11 @@ def generate(
     model,
     texts: list[str],
     *,
-    task: nllb.TaskSpec,
+    task,
     device: torch.device,
     args: argparse.Namespace,
     description: str,
+    runtime=nllb,
 ) -> list[str]:
     order = np.argsort([-len(text) for text in texts])
     restore = np.argsort(order)
@@ -247,33 +210,20 @@ def generate(
     )
     for start in range(0, len(sorted_texts), args.batch_size):
         batch = sorted_texts[start : start + args.batch_size]
-        nllb.prepare_source(tokenizer, task)
-        encoded = tokenizer(
-            batch,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=args.max_length,
-            return_token_type_ids=False,
-        )
-        encoded = {
-            key: value.to(device)
-            for key, value in encoded.items()
-        }
-        generated = model.generate(
-            **encoded,
-            num_beams=args.beam,
-            max_new_tokens=args.max_new_tokens,
-            min_new_tokens=args.min_new_tokens,
-            no_repeat_ngram_size=args.no_repeat_ngram_size,
-            repetition_penalty=args.repetition_penalty,
-            length_penalty=args.length_penalty,
-            **nllb.generation_kwargs(tokenizer, task),
-        )
         outputs.extend(
-            tokenizer.batch_decode(
-                generated,
-                skip_special_tokens=True,
+            runtime.generate_batch(
+                model,
+                tokenizer,
+                batch,
+                task,
+                max_length=args.max_length,
+                max_new_tokens=args.max_new_tokens,
+                min_new_tokens=args.min_new_tokens,
+                num_beams=args.beam,
+                no_repeat_ngram_size=args.no_repeat_ngram_size,
+                repetition_penalty=args.repetition_penalty,
+                length_penalty=args.length_penalty,
+                device=device,
             )
         )
         progress.update(len(batch))
@@ -289,50 +239,49 @@ def generate_mode(
     mode: str,
     device: torch.device,
     args: argparse.Namespace,
+    runtime=nllb,
 ) -> tuple[pd.Series, dict[str, int]]:
     metadata, fallback = metadata_frame(
         evaluation,
         tokenizer,
         mode=mode,
+        runtime=runtime,
     )
     if args.validate_tags:
-        nllb.ensure_source_prefix_tokens(
+        runtime.ensure_source_prefix_tokens(
             tokenizer,
             metadata,
             args.direction,
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-    tagged = with_tagged_columns(
-        metadata,
-        args.direction,
-        target_col=args.target_col,
-        target_lang=args.target_lang,
-        use_tags=args.use_tags,
-        prefix_builder=lambda row: nllb.source_prefix(
-            row,
-            args.direction,
-            target_lang=args.target_lang,
-            use_tags=args.use_tags,
-        ),
-    )
     hypotheses = pd.Series("", index=evaluation.index, dtype="object")
-    for language, subset in tagged.groupby(
+    for language, subset in metadata.groupby(
         "lang_code",
         sort=True,
     ):
         if language not in FORMOSAN_CODES:
             continue
-        task = nllb.task_spec(
+        task = runtime.task_spec(
             language,
             args.direction,
             target_lang=args.target_lang,
         )
-        nllb.validate_task(tokenizer, task)
+        runtime.validate_task(tokenizer, task)
         if is_formosan_to_target(args.direction):
-            source = subset["formosan_sentence"].astype(str).tolist()
+            source_column = "formosan_sentence"
         else:
-            source = subset[args.target_col].astype(str).tolist()
+            source_column = args.target_col
+        source = [
+            runtime.format_source(
+                row,
+                str(row[source_column]),
+                args.direction,
+                target_lang=args.target_lang,
+                use_tags=args.use_tags,
+            )
+            for row in subset.to_dict(orient="records")
+        ]
         hypotheses.loc[subset.index] = generate(
             tokenizer,
             model,
@@ -341,6 +290,7 @@ def generate_mode(
             device=device,
             args=args,
             description=f"{language} {args.direction} {mode}",
+            runtime=runtime,
         )
     return hypotheses, fallback
 
@@ -411,7 +361,7 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
     parser.add_argument(
         "--use-tags",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=bool(profile["training_defaults"].get("use_tags", True)),
     )
     parser.add_argument(
         "--validate-tags",
@@ -487,13 +437,12 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
 
 def main() -> None:
     args, profile = parse_args()
+    runtime = runtime_for(profile)
     args.target_lang = normalize_target_language(
         args.target_lang,
         args.target_col,
     )
-    args.target_col = args.target_col or target_col_for(
-        args.target_lang
-    )
+    args.target_col = args.target_col or target_col_for(args.target_lang)
     if (
         target_language_from_direction(
             args.direction,
@@ -501,39 +450,23 @@ def main() -> None:
         )
         != args.target_lang
     ):
-        raise SystemExit(
-            f"Direction {args.direction} does not target "
-            f"{args.target_lang}"
-        )
-    modes = [
-        value.strip().lower()
-        for value in args.metadata_modes.split(",")
-        if value.strip()
-    ]
+        raise SystemExit(f"Direction {args.direction} does not target {args.target_lang}")
+    modes = [value.strip().lower() for value in args.metadata_modes.split(",") if value.strip()]
     if not args.use_tags:
         modes = ["default"]
     if not modes or set(modes) - {"default", "oracle"}:
-        raise SystemExit(
-            "--metadata-modes must contain default and/or oracle"
-        )
+        raise SystemExit("--metadata-modes must contain default and/or oracle")
     if "default" not in modes:
-        raise SystemExit(
-            "Headline evaluation requires default metadata mode"
-        )
+        raise SystemExit("Headline evaluation requires default metadata mode")
     contract = validate_evaluation_contract(args, profile)
 
     full = read_parallel_csv(args.input, target_col=args.target_col)
     full["source_bucket"] = full["source"].map(source_bucket)
     if "source_corpus" not in full:
         full["source_corpus"] = full["source"].map(source_corpus)
-    if (
-        "kindOf" not in full
-        or not full["kindOf"].astype(str).str.lower().eq("standard").all()
-    ):
+    if "kindOf" not in full or not full["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Evaluation input contains non-standard rows")
-    evaluation = full[
-        full["split"].astype(str).str.lower().eq(args.split)
-    ].copy()
+    evaluation = full[full["split"].astype(str).str.lower().eq(args.split)].copy()
     if evaluation.empty:
         raise SystemExit(f"No rows with split={args.split}")
     if not evaluation["row_type"].astype(str).eq("sentence").all():
@@ -560,23 +493,15 @@ def main() -> None:
             ]
         ).sort_index()
 
-    tokenizer = nllb.load_tokenizer(args.tokenizer)
-    model = AutoModelForSeq2SeqLM.from_pretrained(
+    tokenizer = runtime.load_tokenizer(args.tokenizer)
+    model = runtime.load_model(
         args.model,
         dtype=LOAD_DTYPES[args.load_dtype],
-        low_cpu_mem_usage=True,
     )
-    nllb.configure_model(model, tokenizer)
+    runtime.configure_model(model, tokenizer)
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        raise SystemExit(
-            "Tokenizer and model vocabulary sizes differ; "
-            "load matching checkpoint artifacts."
-        )
-    device_name = (
-        "cuda"
-        if args.device == "auto" and torch.cuda.is_available()
-        else args.device
-    )
+        raise SystemExit("Tokenizer and model vocabulary sizes differ; load matching checkpoint artifacts.")
+    device_name = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device_name == "auto":
         device_name = "cpu"
     device = torch.device(device_name)
@@ -589,9 +514,7 @@ def main() -> None:
         target_col=args.target_col,
         target_lang=args.target_lang,
     )
-    evaluation["_formosan_pieces_per_word"] = (
-        formosan_fragmentation(tokenizer, evaluation)
-    )
+    evaluation["_formosan_pieces_per_word"] = formosan_fragmentation(tokenizer, evaluation)
     mode_hypotheses: dict[str, pd.Series] = {}
     metadata_fallbacks: dict[str, dict[str, int]] = {}
     for mode in modes:
@@ -602,6 +525,7 @@ def main() -> None:
             mode=mode,
             device=device,
             args=args,
+            runtime=runtime,
         )
         mode_hypotheses[mode] = hypotheses
         metadata_fallbacks[mode] = fallback
@@ -627,9 +551,7 @@ def main() -> None:
             "ref": reference,
             "hyp": mode_hypotheses["default"],
             "src_oov_rate": evaluation["_src_oov_rate"],
-            "formosan_pieces_per_word": evaluation[
-                "_formosan_pieces_per_word"
-            ],
+            "formosan_pieces_per_word": evaluation["_formosan_pieces_per_word"],
         },
         index=evaluation.index,
     )
@@ -638,8 +560,7 @@ def main() -> None:
     predictions["src_tokens"] = [
         (
             cjk_token_count(text)
-            if args.target_lang == "chinese"
-            and not is_formosan_to_target(args.direction)
+            if args.target_lang == "chinese" and not is_formosan_to_target(args.direction)
             else token_count(text)
         )
         for text in predictions["src"]
@@ -647,21 +568,13 @@ def main() -> None:
     predictions["ref_tokens"] = [
         (
             cjk_token_count(text)
-            if args.target_lang == "chinese"
-            and is_formosan_to_target(args.direction)
+            if args.target_lang == "chinese" and is_formosan_to_target(args.direction)
             else token_count(text)
         )
         for text in predictions["ref"]
     ]
-    predictions["length_bin"] = predictions["src_tokens"].map(
-        length_bin
-    )
-    bleu_tokenize = (
-        "zh"
-        if args.target_lang == "chinese"
-        and is_formosan_to_target(args.direction)
-        else "13a"
-    )
+    predictions["length_bin"] = predictions["src_tokens"].map(length_bin)
+    bleu_tokenize = "zh" if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else "13a"
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(args.output_csv, index=False)
     print(f"predictions checkpoint: {args.output_csv}")
@@ -684,7 +597,7 @@ def main() -> None:
         "complete": False,
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
-        "model_family": nllb.MODEL_FAMILY,
+        "model_family": runtime.MODEL_FAMILY,
         "contract": contract,
         "input": str(args.input),
         "model": str(args.model),
@@ -700,11 +613,7 @@ def main() -> None:
         "metadata_modes": mode_metrics,
         "metadata_fallbacks": metadata_fallbacks,
         "bootstrap_95_ci": {
-            "status": (
-                "pending"
-                if args.bootstrap_samples > 0
-                else "skipped"
-            ),
+            "status": ("pending" if args.bootstrap_samples > 0 else "skipped"),
             "samples": args.bootstrap_samples,
             "seed": args.bootstrap_seed,
         },
@@ -757,17 +666,15 @@ def main() -> None:
     print(f"metrics checkpoint: {args.output_json}")
 
     if args.bootstrap_samples > 0:
-        metrics["bootstrap_95_ci"] = (
-            bootstrap_confidence_intervals(
-                predictions["hyp_default"].tolist(),
-                predictions["ref"].tolist(),
-                strata=predictions["lang_code"].tolist(),
-                samples=args.bootstrap_samples,
-                seed=args.bootstrap_seed,
-                workers=args.bootstrap_workers,
-                lowercase=args.lowercase_bleu,
-                bleu_tokenize=bleu_tokenize,
-            )
+        metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals(
+            predictions["hyp_default"].tolist(),
+            predictions["ref"].tolist(),
+            strata=predictions["lang_code"].tolist(),
+            samples=args.bootstrap_samples,
+            seed=args.bootstrap_seed,
+            workers=args.bootstrap_workers,
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
         )
         metrics["bootstrap_95_ci"]["status"] = "complete"
         write_json(args.output_json, metrics)

@@ -1,7 +1,7 @@
 # Formosan MT Experiments
 
-This package trains and evaluates directional NLLB-200 models from a completed
-corpus pipeline v3 bundle.
+This package trains and evaluates directional NLLB-200 and MiLMMT models from
+a completed corpus pipeline v3 bundle.
 
 ## Directions
 
@@ -12,7 +12,7 @@ corpus pipeline v3 bundle.
 | `f2zh` | Formosan | Traditional Chinese |
 | `zh2f` | Traditional Chinese | Formosan |
 
-Inputs are prefixed with target, source-language, domain, and dialect controls:
+NLLB inputs use target, source-language, domain, and dialect controls:
 
 ```text
 <to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra.
@@ -58,6 +58,32 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 NLLB generation starts the decoder with EOS and selects the target with
 `forced_bos_token_id`. `scripts/nllb_runtime.py` owns this runtime contract.
 
+`configs/milmmt_1b_experiment.json` is the experimental MiLMMT recipe:
+
+| Setting | Value |
+|---|---:|
+| Base model | MiLMMT-46-1B-v1.0, pinned revision |
+| Tokenizer | Native Gemma 3 tokenizer |
+| Objective | Full-parameter response-only causal SFT |
+| Max updates | 20,000 |
+| Microbatch / accumulation | 2 / 16 |
+| Maximum length | 512 |
+| Learning rate | `2e-5` |
+| Optimizer / schedule | AdamW / inverse square root |
+| Precision | bf16 |
+| Generation | Greedy |
+
+MiLMMT follows its official language-name prompt. Formosan names are learned
+during fine-tuning because the released model does not claim native Formosan
+support. The initial recipe intentionally omits metadata context and does not
+merge the NLLB SPM8k vocabulary.
+
+The recipe is based on the
+[MiLMMT model card](https://huggingface.co/xiaomi-research/MiLMMT-46-1B-v1.0),
+[GemmaX training code](https://github.com/xiaomi-research/gemmax), and the
+[MiLMMT post-training paper](https://arxiv.org/abs/2608.10812). It adapts the
+official supervised fine-tuning stage, not the multi-model GRPO stage.
+
 ## Slurm Submission
 
 The Slurm launchers are portable examples. Configure paths for the target
@@ -87,15 +113,23 @@ RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
   slurm/submit_directional_experiment.sh
 ```
 
-The launcher queues two CPU validators, two tokenizer/model setup jobs, four trainers,
-and a `best/` checkpoint evaluation for each trainer. A fixed `RUN_STAMP` is idempotent:
-active or completed jobs are reused, while terminal failures are resubmitted.
-Training resumes only when corpus, code, profile, and setup hashes match.
+For MiLMMT, add:
+
+```bash
+PROFILE="$EXP_DIR/configs/milmmt_1b_experiment.json"
+```
+
+The launcher queues two CPU validators, the profile's model setup, four
+trainers, and a `best/` checkpoint evaluation for each trainer. NLLB has one
+train-only SPM setup per target corpus; MiLMMT has one shared pinned base-model
+snapshot. A fixed `RUN_STAMP` is idempotent: active or completed jobs are
+reused, while terminal failures are resubmitted. Training resumes only when
+corpus, code, profile, and setup hashes match.
 
 Resource defaults can be overridden with `VALIDATE_*`, `SETUP_*`, `TRAIN_*`,
-and `EVAL_*` environment variables. NLLB expects a 40GB-or-larger GPU. The
-Slurm files assume a `miniconda` module and `formosan_mt` environment; adapt
-those two setup lines to the cluster environment when needed.
+and `EVAL_*` environment variables. Both profiles expect a 40GB-or-larger GPU.
+The Slurm files assume a `miniconda` module and `formosan_mt` environment;
+adapt those two setup lines to the cluster environment when needed.
 
 ## Metrics And Checkpoints
 
@@ -127,6 +161,8 @@ confidence-interval job; the GPU is not held while resampling.
 | `audit_corpus_exposure.py` | Exact TAME-MT exposure reports. |
 | `setup_formosan_nllb200.py` | NLLB SentencePiece and embedding setup. |
 | `nllb_runtime.py` | NLLB language controls and generation behavior. |
+| `setup_milmmt.py` | Pinned MiLMMT snapshot verification. |
+| `milmmt_runtime.py` | MiLMMT prompts, causal loss, and generation. |
 | `train_directional.py` | Sampling, optimization, validation, and resume. |
 | `evaluate_directional.py` | Selected-checkpoint test evaluation. |
 | `bootstrap_predictions.py` | Optional CPU confidence intervals. |

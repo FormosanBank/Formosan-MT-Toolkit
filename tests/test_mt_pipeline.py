@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
+import milmmt_runtime as milmmt  # noqa: E402
 import nllb_runtime as nllb  # noqa: E402
 from audit_corpus_exposure import (  # noqa: E402
     audit_direction,
@@ -34,6 +35,7 @@ from build_experiment_splits import (  # noqa: E402
 from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import (  # noqa: E402
     DEFAULT_PROFILE,
+    MILMMT_PROFILE,
     SHARED_SPLIT_FIELDS,
     load_corpus_pipeline_config,
     load_profile,
@@ -112,14 +114,9 @@ def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:
     output["source_standard_sha256"] = output["mt_standard_sha256"]
     output["mt_normalization_status"] = "accepted"
     output["mt_normalization_confidence"] = "unchanged"
-    output["mt_eval_eligible"] = (
-        output.get("pivot_origin", pd.Series("original", index=output.index))
-        .astype(str)
-        .eq("original")
-        & output.get("row_type", pd.Series("sentence", index=output.index))
-        .astype(str)
-        .eq("sentence")
-    )
+    output["mt_eval_eligible"] = output.get("pivot_origin", pd.Series("original", index=output.index)).astype(str).eq(
+        "original"
+    ) & output.get("row_type", pd.Series("sentence", index=output.index)).astype(str).eq("sentence")
     output["mt_normalization_reason"] = ""
     output["mt_standard_profile"] = MT_STANDARD_PROFILE["profile_id"]
     output["mt_standard_profile_sha256"] = MT_STANDARD_PROFILE_HASH
@@ -170,11 +167,8 @@ class FakeTokenizer:
         return self.vocab.get(value, self.unk_token_id)
 
     def convert_ids_to_tokens(self, value: int) -> str:
-        return next(
-            token
-            for token, token_id in self.vocab.items()
-            if token_id == value
-        )
+        return next(token for token, token_id in self.vocab.items() if token_id == value)
+
 
 class NllbRuntimeTests(unittest.TestCase):
     def test_inference_uses_the_pinned_mt_standardizer(self) -> None:
@@ -196,18 +190,12 @@ class NllbRuntimeTests(unittest.TestCase):
                 return self.vocab.get(token, self.unk_token_id)
 
             def convert_ids_to_tokens(self, token_id):
-                return next(
-                    token
-                    for token, value in self.vocab.items()
-                    if value == token_id
-                )
+                return next(token for token, value in self.vocab.items() if value == token_id)
 
         tokenizer = NllbTokenizer()
         model = SimpleNamespace(
             config=SimpleNamespace(decoder_start_token_id=None),
-            generation_config=SimpleNamespace(
-                decoder_start_token_id=None
-            ),
+            generation_config=SimpleNamespace(decoder_start_token_id=None),
         )
         nllb.configure_model(model, tokenizer)
         task = nllb.task_spec(
@@ -268,9 +256,7 @@ class NllbRuntimeTests(unittest.TestCase):
 
     def test_tag_validation_uses_nllb_runtime(self) -> None:
         tokenizer = FakeTokenizer()
-        frame = pd.DataFrame(
-            [{"source": "fixture.xml", "lang_code": "ami"}]
-        )
+        frame = pd.DataFrame([{"source": "fixture.xml", "lang_code": "ami"}])
         with (
             mock.patch(
                 "validate_experiment.nllb.load_tokenizer",
@@ -362,41 +348,82 @@ class NllbRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(counts, {"domain": 1, "dialect": 1})
 
+
+class MilmmtRuntimeTests(unittest.TestCase):
+    def test_official_prompt_covers_all_directions(self) -> None:
+        row = {
+            "lang_code": "ami",
+            "source_bucket": "narrative",
+            "dialect": "Coastal",
+        }
+        expected = {
+            ("f2en", "english"): ("Amis", "English"),
+            ("en2f", "english"): ("English", "Amis"),
+            ("f2zh", "chinese"): ("Amis", "Chinese (Traditional)"),
+            ("zh2f", "chinese"): ("Chinese (Traditional)", "Amis"),
+        }
+        for (direction, target_lang), (source_name, target_name) in expected.items():
+            prompt = milmmt.format_source(
+                row,
+                "sample",
+                direction,
+                target_lang=target_lang,
+                use_tags=False,
+            )
+            self.assertEqual(
+                prompt,
+                f"Translate this from {source_name} to {target_name}:\n{source_name}: sample\n{target_name}:",
+            )
+
+    def test_causal_labels_mask_the_prompt(self) -> None:
+        class Tokenizer:
+            pad_token_id = 0
+            eos_token_id = 1
+
+            def __call__(self, text, **_kwargs):
+                return {"input_ids": [ord(character) + 2 for character in text]}
+
+        tokenizer = Tokenizer()
+        task = milmmt.task_spec("ami", "f2en", target_lang="english")
+        encoded, labels = milmmt.encode_batch(
+            tokenizer,
+            ["prompt"],
+            ["answer"],
+            task,
+            max_length=32,
+            device=torch.device("cpu"),
+        )
+        target = [ord(character) + 2 for character in "answer"] + [1]
+        self.assertEqual(labels[0, -len(target) :].tolist(), target)
+        self.assertTrue((labels[0, : -len(target)] == -100).all())
+        self.assertEqual(encoded["attention_mask"].sum().item(), 13)
+
+
 class LeakageTests(unittest.TestCase):
     def test_source_bucket_uses_only_coarse_domains(self) -> None:
         self.assertEqual(
-            source_bucket(
-                "FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"
-            ),
+            source_bucket("FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"),
             "narrative",
         )
         self.assertEqual(
-            source_bucket(
-                "Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"
-            ),
+            source_bucket("Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"),
             "linguistic",
         )
         self.assertEqual(
             source_bucket("Formosan-Glosbe/Final_XML/Amis/entries.xml"),
             "dictionary",
         )
-        tokens = special_tokens_from_corpus(
-            pd.DataFrame({"source_bucket": ["Formosan-Zheng-ACL-2024"]})
-        )
+        tokens = special_tokens_from_corpus(pd.DataFrame({"source_bucket": ["Formosan-Zheng-ACL-2024"]}))
         self.assertNotIn("<dom_formosan_zheng_acl_2024>", tokens)
         self.assertIn("<dom_unknown>", tokens)
 
     def test_source_corpus_preserves_exact_public_and_private_identity(self) -> None:
         self.assertEqual(
-            source_corpus(
-                "FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"
-            ),
+            source_corpus("FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"),
             "NTUFormosanCorpus",
         )
         self.assertEqual(
-            source_corpus(
-                "Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"
-            ),
+            source_corpus("Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"),
             "Formosan-Zheng-ACL-2024",
         )
         self.assertEqual(
@@ -423,16 +450,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             attempts=20,
         )
-        validation_rows = sum(
-            candidate.eligible_rows
-            for candidate in candidates
-            if candidate.group_id in validation
-        )
-        remaining = [
-            candidate
-            for candidate in candidates
-            if candidate.group_id not in validation
-        ]
+        validation_rows = sum(candidate.eligible_rows for candidate in candidates if candidate.group_id in validation)
+        remaining = [candidate for candidate in candidates if candidate.group_id not in validation]
         test = choose_groups(
             remaining,
             98,
@@ -440,19 +459,13 @@ class LeakageTests(unittest.TestCase):
             seed=43,
             attempts=20,
         )
-        test_rows = sum(
-            candidate.eligible_rows
-            for candidate in remaining
-            if candidate.group_id in test
-        )
+        test_rows = sum(candidate.eligible_rows for candidate in remaining if candidate.group_id in test)
 
         self.assertGreaterEqual(validation_rows, 33)
         self.assertGreaterEqual(test_rows, 98)
 
     def test_one_character_variants_conflict_with_evaluation(self) -> None:
-        evaluation = pd.DataFrame(
-            {"lang_code": ["ami"], "text": ["malikoda"]}, index=[100]
-        )
+        evaluation = pd.DataFrame({"lang_code": ["ami"], "text": ["malikoda"]}, index=[100])
         training = pd.DataFrame(
             {
                 "lang_code": ["ami", "ami", "ami", "ami", "bnn"],
@@ -522,10 +535,7 @@ class LeakageTests(unittest.TestCase):
 
     def test_word_list_sources_are_not_evaluation_candidates(self) -> None:
         row = self.hard_split_fixture().iloc[[0]].copy()
-        row["source"] = (
-            "Formosan-ILRDF-42-Language-Practice-Word-Lists/"
-            "Final_XML/Atayal/word-list.xml"
-        )
+        row["source"] = "Formosan-ILRDF-42-Language-Practice-Word-Lists/Final_XML/Atayal/word-list.xml"
         row["formosan_sentence"] = "one two three four"
         row["english_sentence"] = "first second third fourth"
         normalized = add_normalized_columns(
@@ -545,22 +555,16 @@ class LeakageTests(unittest.TestCase):
         rows = []
         for document in range(60):
             for sentence in range(3):
-                digest = hashlib.sha256(
-                    f"{document}:{sentence}".encode()
-                ).hexdigest()
+                digest = hashlib.sha256(f"{document}:{sentence}".encode()).hexdigest()
                 rows.append(
                     {
                         "row_id": f"human-{document}-{sentence}",
                         "source_record_id": f"record-{document}-{sentence}",
                         "lang_code": "ami",
                         "formosan_sentence": (
-                            f"{digest[:8]} {digest[8:16]} {digest[16:24]} "
-                            f"{digest[24:32]} {digest[32:40]}"
+                            f"{digest[:8]} {digest[8:16]} {digest[16:24]} {digest[24:32]} {digest[32:40]}"
                         ),
-                        "english_sentence": (
-                            f"{digest[40:48]} {digest[48:56]} sentence "
-                            f"{document} number {sentence}"
-                        ),
+                        "english_sentence": (f"{digest[40:48]} {digest[48:56]} sentence {document} number {sentence}"),
                         "source": f"FormosanBank/Corpora/Test/XML/doc-{document}.xml",
                         "repository": "FormosanBank",
                         "repository_commit": "a" * 40,
@@ -648,9 +652,7 @@ class LeakageTests(unittest.TestCase):
 
         contaminated = output.copy()
         contaminated["translation_kind"] = ""
-        contaminated.loc[contaminated.index[0], "translation_kind"] = (
-            "interlinear-gloss"
-        )
+        contaminated.loc[contaminated.index[0], "translation_kind"] = "interlinear-gloss"
         contaminated_validation = validate_splits(
             contaminated,
             target_col="english_sentence",
@@ -692,12 +694,12 @@ class LeakageTests(unittest.TestCase):
         raw = self.hard_split_fixture()
         document_numbers = raw["source"].str.extract(r"doc-(\d+)")[0]
         first_source = document_numbers.fillna("0").astype(int).lt(30)
-        raw.loc[first_source, "source"] = raw.loc[
-            first_source, "source"
-        ].str.replace("/Test/", "/SourceA/", regex=False)
-        raw.loc[~first_source, "source"] = raw.loc[
-            ~first_source, "source"
-        ].str.replace("/Test/", "/SourceB/", regex=False)
+        raw.loc[first_source, "source"] = raw.loc[first_source, "source"].str.replace(
+            "/Test/", "/SourceA/", regex=False
+        )
+        raw.loc[~first_source, "source"] = raw.loc[~first_source, "source"].str.replace(
+            "/Test/", "/SourceB/", regex=False
+        )
         keyed = add_normalized_columns(
             raw,
             target_col="english_sentence",
@@ -761,32 +763,17 @@ class LeakageTests(unittest.TestCase):
     def test_near_synthetic_training_rows_are_excluded_not_eval(self) -> None:
         raw = self.hard_split_fixture()
         near_synthetic = []
-        human = raw[
-            raw["pivot_origin"].eq("original")
-            & raw["row_type"].eq("sentence")
-        ]
+        human = raw[raw["pivot_origin"].eq("original") & raw["row_type"].eq("sentence")]
         for _, row in human.iterrows():
             near_synthetic.append(
                 {
                     **row.to_dict(),
                     "row_id": f"near-{row['row_id']}",
-                    "source_record_id": (
-                        f"near-{row['source_record_id']}"
-                    ),
-                    "formosan_sentence": (
-                        f"{row['formosan_sentence']}x"
-                    ),
-                    "english_sentence": (
-                        f"{row['english_sentence']}x"
-                    ),
-                    "source": (
-                        "FormosanBank/Corpora/Pivot/XML/"
-                        f"near-{row['row_id']}.xml"
-                    ),
-                    "xml_path": (
-                        "Corpora/Pivot/XML/"
-                        f"near-{row['row_id']}.xml"
-                    ),
+                    "source_record_id": (f"near-{row['source_record_id']}"),
+                    "formosan_sentence": (f"{row['formosan_sentence']}x"),
+                    "english_sentence": (f"{row['english_sentence']}x"),
+                    "source": (f"FormosanBank/Corpora/Pivot/XML/near-{row['row_id']}.xml"),
+                    "xml_path": (f"Corpora/Pivot/XML/near-{row['row_id']}.xml"),
                     "xml_id": f"near-{row['xml_id']}",
                     "pivot_origin": "synthetic",
                 }
@@ -821,17 +808,9 @@ class LeakageTests(unittest.TestCase):
             report["excluded_near_duplicate_train_rows"],
             0,
         )
-        self.assertTrue(
-            excluded["exclusion_reason"]
-            .eq("near_duplicate_of_evaluation")
-            .any()
-        )
-        evaluation = output[
-            output["split"].isin({"test", "validate"})
-        ]
-        self.assertFalse(
-            evaluation["pivot_origin"].eq("synthetic").any()
-        )
+        self.assertTrue(excluded["exclusion_reason"].eq("near_duplicate_of_evaluation").any())
+        evaluation = output[output["split"].isin({"test", "validate"})]
+        self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
         language = report["languages"]["ami"]
         self.assertGreaterEqual(
             language["test_fraction_of_eligible_sentences"],
@@ -944,9 +923,7 @@ class LeakageTests(unittest.TestCase):
             0,
         )
         self.assertEqual(
-            validation[
-                "validate_test_cross_language_diagnostic"
-            ]["exact_overlap"]["target"],
+            validation["validate_test_cross_language_diagnostic"]["exact_overlap"]["target"],
             1,
         )
 
@@ -1015,14 +992,30 @@ class TokenizerSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "split policies differ"):
                 load_profile(path)
 
-    def test_experiment_profile_rejects_non_nllb_family(self) -> None:
+    def test_experiment_profile_rejects_unsupported_family(self) -> None:
         profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
         profile["model_family"] = "unsupported"
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "profile.json"
             path.write_text(json.dumps(profile), encoding="utf-8")
-            with self.assertRaisesRegex(SystemExit, "must use NLLB"):
+            with self.assertRaisesRegex(SystemExit, "unsupported model_family"):
                 load_profile(path)
+
+    def test_milmmt_recipe_is_pinned_to_native_greedy_sft(self) -> None:
+        profile = load_profile(MILMMT_PROFILE)
+        self.assertEqual(profile["model_family"], "milmmt")
+        self.assertEqual(
+            profile["base_model"],
+            {
+                "name": "xiaomi-research/MiLMMT-46-1B-v1.0",
+                "revision": "4fc480b6c58dec29c159dcdf9fde0f6d5c354995",
+            },
+        )
+        self.assertEqual(profile["tokenizer"], {"mode": "native"})
+        self.assertEqual(profile["training_defaults"]["optimizer"], "adamw")
+        self.assertEqual(profile["training_defaults"]["lr_scheduler"], "inverse_sqrt")
+        self.assertFalse(profile["training_defaults"]["use_tags"])
+        self.assertEqual(profile["generation_defaults"]["beam"], 1)
 
     def test_embedding_realignment_uses_token_identity(self) -> None:
         class Tokenizer:
@@ -1233,9 +1226,7 @@ class ExperimentManifestTests(unittest.TestCase):
             )
             split_validation = {
                 "ok": True,
-                "ratios_by_language": {
-                    "ami": {"train": 90, "test": 8, "validate": 2}
-                },
+                "ratios_by_language": {"ami": {"train": 90, "test": 8, "validate": 2}},
                 "synthetic_eval_rows": 0,
                 "train_evaluation": {
                     "exact_overlap": {"formosan": 0, "target": 0, "pair": 0},
@@ -1279,10 +1270,9 @@ class ExperimentManifestTests(unittest.TestCase):
             self.assertEqual(len(files), 8)
 
     def test_submitter_uses_scratch_logs_and_handles_completed_trainers(self) -> None:
-        submitter = (
-            ROOT
-            / "formosan_mt_experiments/slurm/submit_directional_experiment.sh"
-        ).read_text(encoding="utf-8")
+        submitter = (ROOT / "formosan_mt_experiments/slurm/submit_directional_experiment.sh").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(
             'LOGS_DIR="${LOGS_DIR:-${SCRATCH}/formosan_mt_experiments/logs/${RUN_STAMP}}"',
             submitter,
@@ -1298,26 +1288,16 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn('--time="${EVAL_TIME:-08:00:00}"', submitter)
         self.assertNotIn("for checkpoint in final best", submitter)
 
-        bootstrap = (
-            ROOT
-            / "formosan_mt_experiments/slurm/bootstrap_metrics.sl"
-        ).read_text(encoding="utf-8")
+        bootstrap = (ROOT / "formosan_mt_experiments/slurm/bootstrap_metrics.sl").read_text(encoding="utf-8")
         self.assertIn("--cpus-per-task=8", bootstrap)
         self.assertNotIn("--gres", bootstrap)
 
     def test_evaluator_checkpoints_outputs_before_bootstrap(self) -> None:
-        evaluator = (
-            ROOT
-            / "formosan_mt_experiments/scripts/evaluate_directional.py"
-        ).read_text(encoding="utf-8")
-        predictions_write = evaluator.index(
-            "predictions.to_csv(args.output_csv, index=False)"
-        )
+        evaluator = (ROOT / "formosan_mt_experiments/scripts/evaluate_directional.py").read_text(encoding="utf-8")
+        predictions_write = evaluator.index("predictions.to_csv(args.output_csv, index=False)")
         completed = evaluator.index('metrics["complete"] = True')
         metrics_write = evaluator.index("write_json(args.output_json, metrics)")
-        bootstrap = evaluator.index(
-            "bootstrap_confidence_intervals("
-        )
+        bootstrap = evaluator.index("bootstrap_confidence_intervals(")
 
         self.assertLess(predictions_write, completed)
         self.assertLess(completed, metrics_write)
@@ -1330,14 +1310,10 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertEqual(defaults["bootstrap_samples"], 0)
 
     def test_nllb_setup_checksum_is_computed_then_enforced(self) -> None:
-        submitter = (
-            ROOT
-            / "formosan_mt_experiments/slurm/submit_directional_experiment.sh"
-        ).read_text(encoding="utf-8")
-        setup = (
-            ROOT
-            / "formosan_mt_experiments/slurm/setup_spm_sweep.sl"
-        ).read_text(encoding="utf-8")
+        submitter = (ROOT / "formosan_mt_experiments/slurm/submit_directional_experiment.sh").read_text(
+            encoding="utf-8"
+        )
+        setup = (ROOT / "formosan_mt_experiments/slurm/setup_spm_sweep.sl").read_text(encoding="utf-8")
         self.assertIn(
             'setup_sha="$(sha256sum "${NLLB_SETUP_IMPLEMENTATION}"',
             submitter,
@@ -1359,6 +1335,14 @@ class ExperimentManifestTests(unittest.TestCase):
         )
         self.assertIn(
             "formosan_mt_experiments/scripts/nllb_runtime.py",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/scripts/milmmt_runtime.py",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/scripts/setup_milmmt.py",
             repository_paths,
         )
         self.assertIn(
@@ -1420,19 +1404,13 @@ class ExperimentManifestTests(unittest.TestCase):
                 "TER": 90.3,
                 "empty_output_rate": 0.0,
             },
-            "by_language": {
-                "ami": {"samples": 100, "BLEU": 9.1, "chrF2": 27.2, "TER": 90.3}
-            },
+            "by_language": {"ami": {"samples": 100, "BLEU": 9.1, "chrF2": 27.2, "TER": 90.3}},
             "headline_metadata_mode": "default",
             "profile": {"sha256": "b" * 64},
         }
         metadata = {
             "step": 210000,
-            "validation": {
-                "generation": {
-                    "global": {"BLEU": 8.0, "chrF2": 25.0, "TER": 92.0}
-                }
-            },
+            "validation": {"generation": {"global": {"BLEU": 8.0, "chrF2": 25.0, "TER": 92.0}}},
         }
         manifest = {
             "corpora": {
@@ -1527,6 +1505,20 @@ class ExperimentManifestTests(unittest.TestCase):
         )
         self.assertEqual(graph["setup"], {})
 
+    def test_submission_graph_records_shared_milmmt_setup(self) -> None:
+        job_ids = {
+            "validate_en": 1,
+            "validate_zh": 2,
+            "setup_milmmt": 3,
+        }
+        next_id = 4
+        for direction in ("f2en", "en2f", "f2zh", "zh2f"):
+            job_ids[f"train_{direction}"] = next_id
+            job_ids[f"eval_{direction}_best"] = next_id + 1
+            next_id += 2
+        graph = build_job_graph(job_ids)
+        self.assertEqual(graph["setup"], {"shared": 3})
+
     def test_submission_state_rejects_non_numeric_job_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -1535,6 +1527,7 @@ class ExperimentManifestTests(unittest.TestCase):
             (state / "validate_zh.id").write_text("not-a-job\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 read_job_ids(state)
+
 
 if __name__ == "__main__":
     unittest.main()

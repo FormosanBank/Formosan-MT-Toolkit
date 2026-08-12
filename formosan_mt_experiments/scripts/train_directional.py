@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Directional multilingual NLLB fine-tuning for Formosan MT."""
+"""Directional multilingual fine-tuning for Formosan MT."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+import milmmt_runtime as milmmt
 import nllb_runtime as nllb
 import numpy as np
 import pandas as pd
@@ -40,7 +41,6 @@ from mt_common import (
     source_bucket,
     target_col_for,
     target_language_from_direction,
-    with_tagged_columns,
     write_json,
 )
 from mt_metrics import score_translations
@@ -48,8 +48,8 @@ from torch.amp import GradScaler, autocast
 from tqdm.auto import trange
 from transformers import (
     Adafactor,
-    AutoModelForSeq2SeqLM,
     get_constant_schedule_with_warmup,
+    get_inverse_sqrt_schedule,
 )
 
 LOAD_DTYPES = {
@@ -59,9 +59,17 @@ LOAD_DTYPES = {
 }
 
 
+def runtime_for(profile: dict):
+    return {
+        "nllb": nllb,
+        "milmmt": milmmt,
+    }[profile["model_family"]]
+
+
 def prepare_data(
     args,
     tokenizer,
+    runtime=nllb,
 ) -> tuple[dict, dict, dict]:
     df = read_parallel_csv(args.input, target_col=args.target_col)
     if "split" not in df.columns:
@@ -72,9 +80,7 @@ def prepare_data(
         raise SystemExit("Training CSV must contain only kindOf=standard rows")
     if "row_id" not in df or df["row_id"].astype(str).duplicated().any():
         raise SystemExit("Training CSV must contain unique stable row_id values")
-    unknown_splits = sorted(
-        set(df["split"]) - {"train", "validate", "test"}
-    )
+    unknown_splits = sorted(set(df["split"]) - {"train", "validate", "test"})
     if unknown_splits:
         raise SystemExit(f"Training CSV has unknown splits: {unknown_splits}")
 
@@ -88,10 +94,7 @@ def prepare_data(
         val["mt_eval_eligible"],
         context="training validation rows:mt_eval_eligible",
     )
-    if (
-        not val_mt_eligible.all()
-        or val["mt_normalization_confidence"].astype(str).eq("ambiguous").any()
-    ):
+    if not val_mt_eligible.all() or val["mt_normalization_confidence"].astype(str).eq("ambiguous").any():
         raise SystemExit("Validation contains MT-ineligible or ambiguous-normalization rows")
 
     validation_metadata_fallback = {
@@ -103,46 +106,31 @@ def prepare_data(
         "dialect_fallback_rows": 0,
     }
     if args.use_tags:
-        train, training_metadata_fallback = nllb.normalize_control_metadata(
+        train, training_metadata_fallback = runtime.normalize_control_metadata(
             train,
             tokenizer,
             mode="oracle",
         )
-        val, validation_metadata_fallback = nllb.normalize_control_metadata(
+        val, validation_metadata_fallback = runtime.normalize_control_metadata(
             val,
             tokenizer,
             mode=args.validation_metadata_mode,
         )
     if args.use_tags and args.validate_tags:
-        nllb.ensure_source_prefix_tokens(
+        runtime.ensure_source_prefix_tokens(
             tokenizer,
             train,
             args.direction,
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-        nllb.ensure_source_prefix_tokens(
+        runtime.ensure_source_prefix_tokens(
             tokenizer,
             val,
             args.direction,
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-    tagged_val = with_tagged_columns(
-        val,
-        args.direction,
-        target_col=args.target_col,
-        target_lang=args.target_lang,
-        use_tags=args.use_tags,
-        prefix_builder=lambda row: nllb.source_prefix(
-            row,
-            args.direction,
-            target_lang=args.target_lang,
-            use_tags=args.use_tags,
-        ),
-    )
-
-    val = tagged_val.copy()
     pivot_origin = val.get(
         "pivot_origin",
         pd.Series("original", index=val.index),
@@ -167,12 +155,23 @@ def prepare_data(
             train_sub["tgt_text"] = train_sub["formosan_sentence"].astype(str)
             val_sub["src_text"] = val_sub[args.target_col].astype(str)
             val_sub["tgt_text"] = val_sub["formosan_sentence"].astype(str)
-        task = nllb.task_spec(
+        source_column = "formosan_sentence" if is_formosan_to_target(args.direction) else args.target_col
+        val_sub["src_text"] = [
+            runtime.format_source(
+                row,
+                str(row[source_column]),
+                args.direction,
+                target_lang=args.target_lang,
+                use_tags=args.use_tags,
+            )
+            for row in val_sub.to_dict(orient="records")
+        ]
+        task = runtime.task_spec(
             lang,
             args.direction,
             target_lang=args.target_lang,
         )
-        nllb.validate_task(tokenizer, task)
+        runtime.validate_task(tokenizer, task)
         train_by_lang[lang] = {
             "df": train_sub.reset_index(drop=True),
             "task": task,
@@ -185,67 +184,58 @@ def prepare_data(
 
     if not train_by_lang:
         raise SystemExit("No supported Formosan languages found in train rows.")
-    return train_by_lang, val_by_lang, {
-        "input_rows": int(len(df)),
-        "train_rows": int(len(train)),
-        "validate_rows": int(len(val)),
-        "direction": args.direction,
-        "model_family": nllb.MODEL_FAMILY,
-        "target_lang": args.target_lang,
-        "target_col": args.target_col,
-        "use_tags": bool(args.use_tags),
-        "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
-        "validation_metadata_fallback": validation_metadata_fallback,
-        "validation_metadata_mode": args.validation_metadata_mode,
-        "training_metadata_fallback": training_metadata_fallback,
-        "domain_tag_dropout": float(args.domain_tag_dropout),
-        "dialect_tag_dropout": float(args.dialect_tag_dropout),
-        "synthetic_train_rows": int(
-            train.get(
-                "pivot_origin",
-                pd.Series("original", index=train.index),
-            )
-            .astype(str)
-            .eq("synthetic")
-            .sum()
-        ),
-        "synthetic_validate_rows": int(pivot_origin.eq("synthetic").sum()),
-        "human_validate_rows": int((~pivot_origin.eq("synthetic")).sum()),
-        "train_by_language": {k: int(len(v["df"])) for k, v in train_by_lang.items()},
-        "validate_by_language": {k: int(len(v["df"])) for k, v in val_by_lang.items()},
-    }
+    return (
+        train_by_lang,
+        val_by_lang,
+        {
+            "input_rows": int(len(df)),
+            "train_rows": int(len(train)),
+            "validate_rows": int(len(val)),
+            "direction": args.direction,
+            "model_family": runtime.MODEL_FAMILY,
+            "target_lang": args.target_lang,
+            "target_col": args.target_col,
+            "use_tags": bool(args.use_tags),
+            "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
+            "validation_metadata_fallback": validation_metadata_fallback,
+            "validation_metadata_mode": args.validation_metadata_mode,
+            "training_metadata_fallback": training_metadata_fallback,
+            "domain_tag_dropout": float(args.domain_tag_dropout),
+            "dialect_tag_dropout": float(args.dialect_tag_dropout),
+            "synthetic_train_rows": int(
+                train.get(
+                    "pivot_origin",
+                    pd.Series("original", index=train.index),
+                )
+                .astype(str)
+                .eq("synthetic")
+                .sum()
+            ),
+            "synthetic_validate_rows": int(pivot_origin.eq("synthetic").sum()),
+            "human_validate_rows": int((~pivot_origin.eq("synthetic")).sum()),
+            "train_by_language": {k: int(len(v["df"])) for k, v in train_by_lang.items()},
+            "validate_by_language": {k: int(len(v["df"])) for k, v in val_by_lang.items()},
+        },
+    )
 
 
 def encode_batch(
     tokenizer,
     src_texts,
     tgt_texts,
-    task: nllb.TaskSpec,
+    task,
     max_length,
     device,
+    runtime=nllb,
 ):
-    nllb.prepare_source(tokenizer, task)
-    enc = tokenizer(
+    return runtime.encode_batch(
+        tokenizer,
         list(src_texts),
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
+        list(tgt_texts),
+        task,
         max_length=max_length,
-        return_attention_mask=True,
-        return_token_type_ids=False,
+        device=device,
     )
-    nllb.prepare_target(tokenizer, task)
-    labels = tokenizer(
-        text_target=list(tgt_texts),
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        return_attention_mask=False,
-        return_token_type_ids=False,
-    )["input_ids"]
-    labels[labels == tokenizer.pad_token_id] = -100
-    return {k: v.to(device) for k, v in enc.items()}, labels.to(device)
 
 
 def row_probabilities(df: pd.DataFrame, easy_source_weight: float) -> np.ndarray:
@@ -261,6 +251,7 @@ def training_source_texts(
     batch: pd.DataFrame,
     *,
     args,
+    runtime=nllb,
 ) -> tuple[list[str], dict[str, int]]:
     """Build training inputs with independent, reproducible metadata dropout."""
     if args.use_tags:
@@ -270,24 +261,22 @@ def training_source_texts(
         domain_mask = np.zeros(len(batch), dtype=bool)
         dialect_mask = np.zeros(len(batch), dtype=bool)
 
-    source_column = (
-        "formosan_sentence"
-        if is_formosan_to_target(args.direction)
-        else args.target_col
-    )
+    source_column = "formosan_sentence" if is_formosan_to_target(args.direction) else args.target_col
     texts: list[str] = []
     for index, row in enumerate(batch.to_dict(orient="records")):
         if domain_mask[index]:
             row["source_bucket"] = "unknown"
         if dialect_mask[index]:
             row["dialect"] = "default"
-        prefix = nllb.source_prefix(
-            row,
-            args.direction,
-            target_lang=args.target_lang,
-            use_tags=args.use_tags,
+        texts.append(
+            runtime.format_source(
+                row,
+                str(row[source_column]),
+                args.direction,
+                target_lang=args.target_lang,
+                use_tags=args.use_tags,
+            )
         )
-        texts.append(f"{prefix} {row[source_column]}".strip())
     return texts, {
         "domain": int(domain_mask.sum()),
         "dialect": int(dialect_mask.sum()),
@@ -301,6 +290,7 @@ def evaluate_loss(
     val_by_lang,
     args,
     device,
+    runtime=nllb,
 ) -> dict:
     model.eval()
     lang_losses = {}
@@ -319,6 +309,7 @@ def evaluate_loss(
                 info["task"],
                 args.max_length,
                 device,
+                runtime,
             )
             outputs = model(input_ids=enc["input_ids"], attention_mask=enc["attention_mask"], labels=labels)
             tokens = int((labels != -100).sum().item())
@@ -371,6 +362,7 @@ def evaluate_generation(
     val_by_lang,
     args,
     device,
+    runtime=nllb,
 ) -> dict:
     training_use_cache = getattr(model.config, "use_cache", None)
     if training_use_cache is not None:
@@ -387,23 +379,22 @@ def evaluate_generation(
         task = info["task"]
         for start in range(0, len(df), args.generation_batch_size):
             batch = df.iloc[start : start + args.generation_batch_size]
-            nllb.prepare_source(tokenizer, task)
-            enc = tokenizer(
-                batch["src_text"].astype(str).tolist(),
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=args.max_length,
-                return_token_type_ids=False,
+            lang_hypotheses.extend(
+                runtime.generate_batch(
+                    model,
+                    tokenizer,
+                    batch["src_text"].astype(str).tolist(),
+                    task,
+                    max_length=args.max_length,
+                    max_new_tokens=args.validation_max_new_tokens,
+                    min_new_tokens=1,
+                    num_beams=args.validation_beam,
+                    no_repeat_ngram_size=0,
+                    repetition_penalty=1.0,
+                    length_penalty=1.0,
+                    device=device,
+                )
             )
-            enc = {key: value.to(device) for key, value in enc.items()}
-            generated = model.generate(
-                **enc,
-                num_beams=args.validation_beam,
-                max_new_tokens=args.validation_max_new_tokens,
-                **nllb.generation_kwargs(tokenizer, task),
-            )
-            lang_hypotheses.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
         by_language[lang] = {"samples": len(df)} | score_translations(
             lang_hypotheses,
             lang_references,
@@ -519,9 +510,7 @@ def verify_setup_artifacts(
                 raise SystemExit(f"Missing setup {section} artifact: {path}")
             actual = sha256_file(path)
             if actual != record.get("sha256"):
-                raise SystemExit(
-                    f"Setup {section} checksum mismatch for {path}"
-                )
+                raise SystemExit(f"Setup {section} checksum mismatch for {path}")
 
 
 def build_run_contract(args, profile: dict) -> dict:
@@ -531,31 +520,21 @@ def build_run_contract(args, profile: dict) -> dict:
         args.corpus_manifest,
         "corpus build manifest",
     )
-    if (
-        corpus_manifest.get("pipeline_version")
-        != profile["corpus_pipeline_version"]
-    ):
+    if corpus_manifest.get("pipeline_version") != profile["corpus_pipeline_version"]:
         raise SystemExit("Corpus pipeline version does not match the recipe")
     expected_mt_standard = profile["mt_standardization"]
     if corpus_manifest.get("mt_standardization") != expected_mt_standard:
         raise SystemExit("Corpus manifest does not match the recipe MT-standard profile")
-    if (
-        corpus_manifest.get("pipeline_config", {}).get("sha256")
-        != sha256_file(CORPUS_PIPELINE_CONFIG)
-    ):
+    if corpus_manifest.get("pipeline_config", {}).get("sha256") != sha256_file(CORPUS_PIPELINE_CONFIG):
         raise SystemExit("Corpus manifest does not match the current pipeline configuration")
     if not manifest_contains_hash(corpus_manifest, input_hash):
-        raise SystemExit(
-            "Training CSV checksum is absent from the corpus build manifest"
-        )
+        raise SystemExit("Training CSV checksum is absent from the corpus build manifest")
     validation = read_complete_manifest(
         args.validation_report,
         "corpus validation report",
     )
     if validation.get("input_sha256") != input_hash:
-        raise SystemExit(
-            "Corpus validation report does not match the training CSV"
-        )
+        raise SystemExit("Corpus validation report does not match the training CSV")
     split_validation = validation.get("split_validation", {})
     expected_split_policy = profile["splits"]
     expected_minimums = {
@@ -565,43 +544,36 @@ def build_run_contract(args, profile: dict) -> dict:
         "min_validate_rows": expected_split_policy["min_validate_rows"],
     }
     if (
-        validation.get("profile", {}).get("sha256")
-        != expected_profile["sha256"]
+        validation.get("profile", {}).get("sha256") != expected_profile["sha256"]
         or split_validation.get("minimum_ratios") != expected_minimums
-        or split_validation.get("ngram_jaccard_threshold")
-        != expected_split_policy["character_ngram_jaccard_threshold"]
-        or split_validation.get("source_ratio_tolerance")
-        != expected_split_policy["source_ratio_tolerance"]
+        or split_validation.get("ngram_jaccard_threshold") != expected_split_policy["character_ngram_jaccard_threshold"]
+        or split_validation.get("source_ratio_tolerance") != expected_split_policy["source_ratio_tolerance"]
     ):
         raise SystemExit("Corpus validation did not use the current experiment split policy")
-    if (
-        validation.get("provenance_validation", {}).get("mt_standardization")
-        != {key: expected_mt_standard[key] for key in ("id", "sha256")}
-    ):
+    if validation.get("provenance_validation", {}).get("mt_standardization") != {
+        key: expected_mt_standard[key] for key in ("id", "sha256")
+    }:
         raise SystemExit("Corpus validation does not match the recipe MT-standard profile")
     setup = read_complete_manifest(
         args.setup_manifest,
         "model setup manifest",
     )
-    setup_inputs = setup.get("inputs")
-    if not isinstance(setup_inputs, list):
-        setup_inputs = [setup.get("input", {})]
-    setup_has_input = any(
-        record.get("sha256") == input_hash
-        for record in setup_inputs
-        if isinstance(record, dict)
-    )
-    if (
+    setup_matches = (
         setup.get("recipe_id") != profile["recipe_id"]
-        or setup.get("model_family") != "nllb"
-        or setup.get("profile", {}).get("sha256")
-        != expected_profile["sha256"]
-        or not setup_has_input
+        or setup.get("model_family") != profile["model_family"]
+        or setup.get("profile", {}).get("sha256") != expected_profile["sha256"]
         or setup.get("mt_standardization") != expected_mt_standard
-    ):
-        raise SystemExit(
-            "NLLB setup manifest does not match the corpus or profile"
-        )
+    )
+    if setup_matches:
+        raise SystemExit("Model setup manifest does not match the experiment profile")
+    if profile["model_family"] == "nllb":
+        setup_inputs = setup.get("inputs")
+        if not isinstance(setup_inputs, list):
+            setup_inputs = [setup.get("input", {})]
+        if not any(record.get("sha256") == input_hash for record in setup_inputs if isinstance(record, dict)):
+            raise SystemExit("NLLB setup manifest does not match the training corpus")
+    elif setup.get("base_model") != profile["base_model"]:
+        raise SystemExit("MiLMMT setup manifest has the wrong base model")
     verify_setup_artifacts(
         setup,
         args.tokenizer,
@@ -646,8 +618,7 @@ def build_run_contract(args, profile: dict) -> dict:
         "repository": git_record(),
         "dependencies": dependency_versions(),
         "hyperparameters": {
-            key: str(value) if isinstance(value, Path) else value
-            for key, value in hyperparameters.items()
+            key: str(value) if isinstance(value, Path) else value for key, value in hyperparameters.items()
         },
     }
 
@@ -661,9 +632,7 @@ def write_or_verify_run_contract(
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if stable_hash(existing) != digest:
-            raise SystemExit(
-                f"Existing run contract does not match this invocation: {path}"
-            )
+            raise SystemExit(f"Existing run contract does not match this invocation: {path}")
     else:
         write_json(path, contract)
     return digest
@@ -678,6 +647,7 @@ def main() -> None:
     )
     known, _ = preliminary.parse_known_args()
     profile = load_profile(known.profile)
+    runtime = runtime_for(profile)
     defaults = profile["training_defaults"]
     parser = argparse.ArgumentParser(parents=[preliminary])
     parser.add_argument("--input", type=Path, required=True)
@@ -690,7 +660,11 @@ def main() -> None:
     parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
     parser.add_argument("--target-col", default=None)
     parser.add_argument("--direction", choices=direction_choices(), required=True)
-    parser.add_argument("--use-tags", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--use-tags",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("use_tags", True)),
+    )
     parser.add_argument("--validate-tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--steps", type=int, default=defaults["steps"], help="Optimizer update steps.")
     parser.add_argument("--batch-size", type=int, default=defaults["batch_size"])
@@ -700,7 +674,9 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=defaults["warmup_steps"])
     parser.add_argument("--weight-decay", type=float, default=defaults["weight_decay"])
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--alpha", type=float, default=defaults["alpha"], help="Language sampling exponent p(lang) ∝ n^alpha.")
+    parser.add_argument(
+        "--alpha", type=float, default=defaults["alpha"], help="Language sampling exponent p(lang) ∝ n^alpha."
+    )
     parser.add_argument("--easy-source-weight", type=float, default=None)
     parser.add_argument(
         "--domain-tag-dropout",
@@ -725,7 +701,12 @@ def main() -> None:
         default=bool(defaults.get("gradient_checkpointing", False)),
     )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    parser.add_argument("--save-interval", type=int, default=defaults["save_interval"], help="Checkpoint interval. Use 0 to keep only best/final.")
+    parser.add_argument(
+        "--save-interval",
+        type=int,
+        default=defaults["save_interval"],
+        help="Checkpoint interval. Use 0 to keep only best/final.",
+    )
     parser.add_argument("--eval-interval", type=int, default=defaults["generation_eval_interval"])
     parser.add_argument("--log-interval", type=int, default=defaults["log_interval"])
     parser.add_argument("--eval-samples", type=int, default=defaults["generation_eval_samples_per_language"])
@@ -744,7 +725,12 @@ def main() -> None:
         default=defaults["best_metric"],
         help="Validation metric used for best checkpoint selection and early stopping.",
     )
-    parser.add_argument("--early-stopping-patience", type=int, default=defaults["early_stopping_patience"], help="Evaluations without improvement; 0 disables.")
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=defaults["early_stopping_patience"],
+        help="Evaluations without improvement; 0 disables.",
+    )
     parser.add_argument("--early-stopping-min-delta", type=float, default=defaults["early_stopping_min_delta"])
     parser.add_argument("--early-stopping-start-step", type=int, default=defaults["early_stopping_start_step"])
     parser.add_argument("--resume-from", default="auto", help="Checkpoint directory, 'auto', or 'none'.")
@@ -756,14 +742,11 @@ def main() -> None:
     direction_target = target_language_from_direction(args.direction, args.target_lang)
     if direction_target != args.target_lang:
         raise SystemExit(
-            f"--direction {args.direction!r} targets {direction_target}, "
-            f"but --target-lang is {args.target_lang!r}."
+            f"--direction {args.direction!r} targets {direction_target}, but --target-lang is {args.target_lang!r}."
         )
 
     if args.easy_source_weight is None:
-        args.easy_source_weight = float(
-            defaults[f"{args.direction}_easy_source_weight"]
-        )
+        args.easy_source_weight = float(defaults[f"{args.direction}_easy_source_weight"])
     if args.eval_interval <= 0:
         raise SystemExit("--eval-interval must be positive because best-model selection requires validation.")
     if args.eval_samples <= 0:
@@ -803,32 +786,27 @@ def main() -> None:
         resume_path = None
     load_path = resume_path or args.model
     checkpoint_contract = {
-        "model_family": nllb.MODEL_FAMILY,
+        "model_family": runtime.MODEL_FAMILY,
         "recipe_id": profile["recipe_id"],
         "mt_standardization": profile["mt_standardization"],
     }
-    tokenizer = nllb.load_tokenizer(resume_path or args.tokenizer)
-    model = AutoModelForSeq2SeqLM.from_pretrained(
+    tokenizer = runtime.load_tokenizer(resume_path or args.tokenizer)
+    model = runtime.load_model(
         load_path,
         dtype=LOAD_DTYPES[args.load_dtype],
-        low_cpu_mem_usage=True,
     )
-    nllb.configure_model(model, tokenizer)
+    runtime.configure_model(model, tokenizer)
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        raise SystemExit(
-            "Tokenizer and model vocabulary sizes differ; "
-            "load matching setup artifacts."
-        )
+        raise SystemExit("Tokenizer and model vocabulary sizes differ; load matching setup artifacts.")
     if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model.config, "use_cache"):
             model.config.use_cache = False
 
     train_by_lang, val_by_lang, data_report = prepare_data(
         args,
         tokenizer,
+        runtime,
     )
     write_json(args.output_dir / "data_report.json", data_report)
     write_json(args.output_dir / "validation_sample_manifest.json", validation_sample_manifest(val_by_lang, args))
@@ -838,26 +816,38 @@ def main() -> None:
         serializable_args
         | {
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model_family": nllb.MODEL_FAMILY,
+            "model_family": runtime.MODEL_FAMILY,
             "run_contract_sha256": contract_sha256,
             "trainable_parameters": sum(
-                parameter.numel()
-                for parameter in model.parameters()
-                if parameter.requires_grad
+                parameter.numel() for parameter in model.parameters() if parameter.requires_grad
             ),
         },
     )
 
     model.to(device).train()
-    optimizer = Adafactor(
-        model.parameters(),
-        lr=args.learning_rate,
-        scale_parameter=False,
-        relative_step=False,
-        warmup_init=False,
-        weight_decay=args.weight_decay,
-    )
-    scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps)
+    if runtime.MODEL_FAMILY == "nllb":
+        optimizer = Adafactor(
+            model.parameters(),
+            lr=args.learning_rate,
+            scale_parameter=False,
+            relative_step=False,
+            warmup_init=False,
+            weight_decay=args.weight_decay,
+        )
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=args.warmup_steps,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+        scheduler = get_inverse_sqrt_schedule(
+            optimizer,
+            num_warmup_steps=args.warmup_steps,
+        )
     use_amp = args.precision in {"bf16", "fp16"} and device.type == "cuda"
     amp_dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
     scaler = GradScaler("cuda", enabled=(args.precision == "fp16" and device.type == "cuda"))
@@ -912,6 +902,7 @@ def main() -> None:
             source_texts, dropout_counts = training_source_texts(
                 batch,
                 args=args,
+                runtime=runtime,
             )
             for name, count in dropout_counts.items():
                 interval_metadata_dropout[name] += count
@@ -922,6 +913,7 @@ def main() -> None:
                 info["task"],
                 args.max_length,
                 device,
+                runtime,
             )
             with autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 outputs = model(
@@ -972,7 +964,9 @@ def main() -> None:
                 "updates_per_second": float(args.log_interval / elapsed),
                 "elapsed_seconds": float(elapsed),
                 "metadata_dropout_rows": dict(interval_metadata_dropout),
-                "cuda_max_memory_gb": float(torch.cuda.max_memory_allocated() / 2**30) if device.type == "cuda" else 0.0,
+                "cuda_max_memory_gb": float(torch.cuda.max_memory_allocated() / 2**30)
+                if device.type == "cuda"
+                else 0.0,
             }
             train_log.write(json.dumps(record) + "\n")
             train_log.flush()
@@ -991,6 +985,7 @@ def main() -> None:
                 val_by_lang,
                 args,
                 device,
+                runtime,
             )
             metrics["generation"] = evaluate_generation(
                 model,
@@ -998,6 +993,7 @@ def main() -> None:
                 val_by_lang,
                 args,
                 device,
+                runtime,
             )
             metrics["step"] = step
             current_value = metric_value(metrics, args.best_metric)
@@ -1056,8 +1052,7 @@ def main() -> None:
             if args.early_stopping_patience > 0 and bad_evaluations >= args.early_stopping_patience:
                 stopped_early = True
                 print(
-                    f"[early-stop] step={step} best_step={best_step} "
-                    f"best_{args.best_metric}={best_value}",
+                    f"[early-stop] step={step} best_step={best_step} best_{args.best_metric}={best_value}",
                     flush=True,
                 )
                 break

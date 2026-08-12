@@ -3,8 +3,8 @@
 Formosan MT Toolkit builds leakage-controlled Formosan-English and
 Formosan-Traditional Chinese corpora from the public
 [FormosanBank](https://github.com/FormosanBank/FormosanBank) XML collection.
-It also contains reproducible directional NLLB-200 training and evaluation
-code.
+It also contains reproducible directional NLLB-200 and MiLMMT training and
+evaluation code.
 
 The supported workflow is corpus pipeline v3. It keeps the supplied XML
 `kindOf="standard"` tier, derives a separate model-facing standardization,
@@ -123,15 +123,15 @@ The `formosan_mt_experiments/` package trains four unidirectional models:
 
 | Direction | Input | Output |
 |---|---|---|
-| `f2en` | tagged Formosan | English |
-| `en2f` | tagged English | Formosan |
-| `f2zh` | tagged Formosan | Traditional Chinese |
-| `zh2f` | tagged Traditional Chinese | Formosan |
+| `f2en` | Formosan | English |
+| `en2f` | English | Formosan |
+| `f2zh` | Formosan | Traditional Chinese |
+| `zh2f` | Traditional Chinese | Formosan |
 
-The supported profile uses the established 8k Formosan SentencePiece extension.
-Prefixes put direction and language first, use a fixed coarse domain
-vocabulary, and apply 25% independent domain/dialect dropout during training
-so unknown/default tags are learned conditions.
+The default profile uses NLLB-200 with the established 8k Formosan
+SentencePiece extension and metadata controls. An experimental MiLMMT-46 1B
+profile uses Xiaomi's native tokenizer and translation prompt with
+response-only causal loss.
 
 On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
 shared data root and submit from `formosan_mt_experiments/`:
@@ -142,6 +142,15 @@ export PROJECT_DATA=/shared/formosan_parallel_corpora
 export SCRATCH=/scratch/$USER/formosan_mt
 
 CORPUS_NAME=public_no_bible \
+RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
+  slurm/submit_directional_experiment.sh
+```
+
+Select MiLMMT explicitly:
+
+```bash
+CORPUS_NAME=public_no_bible \
+PROFILE="$EXP_DIR/configs/milmmt_1b_experiment.json" \
 RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
   slurm/submit_directional_experiment.sh
 ```
@@ -157,7 +166,7 @@ defaults. See [Experiment Training](formosan_mt_experiments/README.md).
 | `build_corpora.sh` | Stable public entrypoint. |
 | `config/` | Versioned MT standardization policy. |
 | `scripts/local/` | Acquisition, QC, extraction, filtering, pivoting, and release orchestration. |
-| `formosan_mt_experiments/` | Split validation, NLLB setup, training, evaluation, and Slurm launchers. |
+| `formosan_mt_experiments/` | Split validation, model setup, training, evaluation, and Slurm launchers. |
 | `tests/` | Corpus, training, inference, and provenance contract tests. |
 
 Corpus rows, downloaded XML, credentials, paid caches, private repository
