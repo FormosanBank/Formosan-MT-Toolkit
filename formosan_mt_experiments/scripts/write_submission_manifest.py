@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from experiment_config import load_profile
 from training_code_inventory import build_code_inventory
 
 DIRECTIONS = ("f2en", "en2f", "f2zh", "zh2f")
@@ -26,10 +27,7 @@ def read_job_ids(state_dir: Path) -> dict[str, int]:
 
 def build_job_graph(
     job_ids: dict[str, int],
-    model_family: str = "nllb",
 ) -> dict[str, Any]:
-    if model_family not in {"nllb", "madlad400"}:
-        raise ValueError(f"Unsupported model family: {model_family}")
     required = {
         "validate_en",
         "validate_zh",
@@ -47,16 +45,12 @@ def build_job_graph(
         "setup": {},
         "directions": {},
     }
-    if model_family == "madlad400":
-        if "setup_madlad400" in job_ids:
-            graph["setup"]["shared"] = job_ids["setup_madlad400"]
-    else:
-        for language, label in (
-            ("english", "setup_en_spm8192"),
-            ("chinese", "setup_zh_spm8192"),
-        ):
-            if label in job_ids:
-                graph["setup"][language] = job_ids[label]
+    for language, label in (
+        ("english", "setup_en_spm8192"),
+        ("chinese", "setup_zh_spm8192"),
+    ):
+        if label in job_ids:
+            graph["setup"][language] = job_ids[label]
 
     for direction in DIRECTIONS:
         evaluations = {
@@ -130,10 +124,7 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
 
 def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     corpus_dir = args.project_data / args.corpus_name
-    profile = json.loads(args.profile.read_text(encoding="utf-8"))
-    model_family = str(
-        profile.get("model_family") or "nllb"
-    ).strip().lower()
+    profile = load_profile(args.profile)
     return {
         "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -144,7 +135,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "run_stamp": args.run_stamp,
         "corpus_name": args.corpus_name,
         "recipe_id": profile["recipe_id"],
-        "model_family": model_family,
+        "model_family": "nllb",
         "base_model": profile["base_model"],
         "source_git_commit": args.git_commit,
         "code": build_code_inventory(
@@ -157,10 +148,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "split_policy": profile["splits"],
         "training": profile["training_defaults"],
         "generation": profile["generation_defaults"],
-        "jobs": build_job_graph(
-            read_job_ids(args.state_dir),
-            model_family=model_family,
-        ),
+        "jobs": build_job_graph(read_job_ids(args.state_dir)),
     }
 
 

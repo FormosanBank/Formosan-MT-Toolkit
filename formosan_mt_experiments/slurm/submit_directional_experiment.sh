@@ -15,21 +15,16 @@ import re
 import sys
 
 profile = json.load(open(sys.argv[1], encoding="utf-8"))
-family = str(profile.get("model_family") or "nllb").strip().lower()
+if profile.get("model_family") != "nllb":
+    raise SystemExit("Only NLLB experiment profiles are supported")
 recipe = str(profile["recipe_id"])
 slug = re.sub(r"[^a-z0-9]+", "_", recipe.lower()).strip("_")
-print(family)
 print(recipe)
 print(slug)
 PY
 )
-MODEL_FAMILY="${profile_values[0]}"
-RECIPE_ID="${profile_values[1]}"
-RECIPE_SLUG="${profile_values[2]}"
-case "${MODEL_FAMILY}" in
-  nllb|madlad400) ;;
-  *) echo "Unsupported model family: ${MODEL_FAMILY}" >&2; exit 1 ;;
-esac
+RECIPE_ID="${profile_values[0]}"
+RECIPE_SLUG="${profile_values[1]}"
 
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data/${CORPUS_NAME}}"
 RUNS_DIR="${RUNS_DIR:-${SCRATCH}/formosan_mt_experiments/runs/${CORPUS_NAME}}"
@@ -44,7 +39,6 @@ EVAL_SL="${EVAL_SL:-${EXP_DIR}/slurm/evaluate_directional.sl}"
 BOOTSTRAP_SL="${BOOTSTRAP_SL:-${EXP_DIR}/slurm/bootstrap_metrics.sl}"
 VALIDATE_SL="${VALIDATE_SL:-${EXP_DIR}/slurm/validate_corpus.sl}"
 NLLB_SETUP_SL="${NLLB_SETUP_SL:-${EXP_DIR}/slurm/setup_spm_sweep.sl}"
-MADLAD_SETUP_SL="${MADLAD_SETUP_SL:-${EXP_DIR}/slurm/setup_madlad400.sl}"
 NLLB_SETUP_IMPLEMENTATION="${NLLB_SETUP_IMPLEMENTATION:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
 
 case "${SUBMIT_BOOTSTRAP:-0}" in
@@ -159,7 +153,7 @@ submit_validation() {
   local target_lang="$1"
   local short="$2"
   submit_job "validate_${short}" \
-    --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${short}_validate" \
+    --job-name="nllb_${CORPUS_NAME}_${short}_validate" \
     --partition="${VALIDATE_PARTITION:-short}" \
     --time="${VALIDATE_TIME:-02:00:00}" \
     --cpus-per-task="${VALIDATE_CPUS:-8}" \
@@ -177,14 +171,6 @@ nllb_setup_paths() {
     "${root}/formosan_multilingual_nllb_spm8192_setup_manifest.json"
 }
 
-madlad_setup_paths() {
-  local root="${DATA_DIR}/${RECIPE_SLUG}/setup"
-  printf '%s|%s|%s' \
-    "${root}/tokenizer" \
-    "${root}/model" \
-    "${root}/setup_manifest.json"
-}
-
 setup_complete() {
   local tokenizer="$1"
   local model="$2"
@@ -194,12 +180,12 @@ setup_complete() {
     && -f "${model}/config.json" \
     && -f "${manifest}" ]] || return 1
   compgen -G "${model}/model*.safetensors" > /dev/null || return 1
-  python - "${manifest}" "${PROFILE}" "${MODEL_FAMILY}" "$@" <<'PY'
+  python - "${manifest}" "${PROFILE}" "$@" <<'PY'
 import hashlib
 import json
 import sys
 
-manifest_path, profile_path, family, *inputs = sys.argv[1:]
+manifest_path, profile_path, *inputs = sys.argv[1:]
 value = json.load(open(manifest_path, encoding="utf-8"))
 profile_hash = hashlib.sha256(open(profile_path, "rb").read()).hexdigest()
 input_hashes = {
@@ -214,10 +200,9 @@ recorded_hashes = {
     for record in records
     if isinstance(record, dict)
 }
-actual_family = str(value.get("model_family") or "nllb")
 ok = (
     value.get("complete") is True
-    and actual_family == family
+    and value.get("model_family") == "nllb"
     and value.get("profile", {}).get("sha256") == profile_hash
     and input_hashes <= recorded_hashes
 )
@@ -254,48 +239,13 @@ submit_nllb_setup() {
   submit_job "setup_${short}_spm8192" "${args[@]}"
 }
 
-submit_madlad_setup() {
-  local paths tokenizer model manifest root dependency
-  paths="$(madlad_setup_paths)"
-  IFS='|' read -r tokenizer model manifest <<<"${paths}"
-  root="$(dirname "${tokenizer}")"
-  if setup_complete \
-    "${tokenizer}" \
-    "${model}" \
-    "${manifest}" \
-    "${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_en_in_domain_hard.csv" \
-    "${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_zh_in_domain_hard.csv"; then
-    echo "setup_madlad400=already_exists ${root}"
-    return
-  fi
-  dependency="$(dependency_for validate_en validate_zh)"
-  local args=(
-    --job-name="madlad_${CORPUS_NAME}_setup"
-    --partition="${SETUP_PARTITION:-short}"
-    --time="${SETUP_TIME:-12:00:00}"
-    --cpus-per-task="${SETUP_CPUS:-16}"
-    --mem="${SETUP_MEM:-128G}"
-  )
-  [[ -z "${dependency}" ]] || args+=("${dependency}")
-  args+=(
-    --export="$(common_export english),OUT_DIR=${root}"
-    "${MADLAD_SETUP_SL}"
-  )
-  submit_job setup_madlad400 "${args[@]}"
-}
-
 submit_direction() {
   local target_lang="$1"
   local short="$2"
   local direction="$3"
   local paths tokenizer model setup_manifest setup_label
-  if [[ "${MODEL_FAMILY}" == "nllb" ]]; then
-    paths="$(nllb_setup_paths "${short}")"
-    setup_label="setup_${short}_spm8192"
-  else
-    paths="$(madlad_setup_paths)"
-    setup_label="setup_madlad400"
-  fi
+  paths="$(nllb_setup_paths "${short}")"
+  setup_label="setup_${short}_spm8192"
   IFS='|' read -r tokenizer model setup_manifest <<<"${paths}"
 
   local validation_report="${PROJECT_DATA}/${CORPUS_NAME}/provenance/validate_${short}_in_domain_hard_runtime.json"
@@ -303,20 +253,12 @@ submit_direction() {
   local dependency
   dependency="$(dependency_for "validate_${short}" "${setup_label}")"
 
-  local default_constraint default_mem default_time default_eval_batch
-  if [[ "${MODEL_FAMILY}" == "madlad400" ]]; then
-    default_constraint="vr80g|vr144g"
-    default_mem="160G"
-    default_time="2-00:00:00"
-    default_eval_batch="1"
-  else
-    default_constraint="vr40g|vr80g|vr144g"
-    default_mem="128G"
-    default_time="2-00:00:00"
-    default_eval_batch="16"
-  fi
+  local default_constraint="vr40g|vr80g|vr144g"
+  local default_mem="128G"
+  local default_time="2-00:00:00"
+  local default_eval_batch="16"
   local train_args=(
-    --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}"
+    --job-name="nllb_${CORPUS_NAME}_${direction}"
     --partition="${TRAIN_PARTITION:-medium}"
     --time="${TRAIN_TIME:-${default_time}}"
     --gres="${TRAIN_GRES:-gpu:1}"
@@ -359,7 +301,7 @@ submit_direction() {
     esac
     local report_dir="${REPORTS_DIR}/${RECIPE_SLUG}_${direction}_${checkpoint}_${RUN_STAMP}"
     local eval_args=(
-      --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}_eval_${checkpoint}"
+      --job-name="nllb_${CORPUS_NAME}_${direction}_eval_${checkpoint}"
       --partition="${EVAL_PARTITION:-medium}"
       --time="${EVAL_TIME:-08:00:00}"
       --gres="${EVAL_GRES:-gpu:1}"
@@ -378,7 +320,7 @@ submit_direction() {
       local bootstrap_dependency
       bootstrap_dependency="$(dependency_for "eval_${direction}_${checkpoint}")"
       local bootstrap_args=(
-        --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}_bootstrap_${checkpoint}"
+        --job-name="nllb_${CORPUS_NAME}_${direction}_bootstrap_${checkpoint}"
         --partition="${BOOTSTRAP_PARTITION:-short}"
         --time="${BOOTSTRAP_TIME:-08:00:00}"
         --cpus-per-task="${BOOTSTRAP_CPUS:-8}"
@@ -396,19 +338,15 @@ submit_direction() {
 
 echo "RUN_STAMP=${RUN_STAMP}"
 echo "CORPUS_NAME=${CORPUS_NAME}"
-echo "MODEL_FAMILY=${MODEL_FAMILY}"
+echo "MODEL_FAMILY=nllb"
 echo "RECIPE_ID=${RECIPE_ID}"
 echo "STATE_DIR=${STATE_DIR}"
 echo "LOGS_DIR=${LOGS_DIR}"
 
 submit_validation english en
 submit_validation chinese zh
-if [[ "${MODEL_FAMILY}" == "nllb" ]]; then
-  submit_nllb_setup english en
-  submit_nllb_setup chinese zh
-else
-  submit_madlad_setup
-fi
+submit_nllb_setup english en
+submit_nllb_setup chinese zh
 
 submit_direction english en f2en
 submit_direction english en en2f

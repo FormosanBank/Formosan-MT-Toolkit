@@ -10,6 +10,7 @@ import unicodedata
 from collections import Counter
 from pathlib import Path
 
+import nllb_runtime as nllb
 import pandas as pd
 from experiment_config import (
     DEFAULT_PROFILE,
@@ -18,7 +19,6 @@ from experiment_config import (
     profile_record,
     sha256_file,
 )
-from model_backends import get_backend
 from mt_common import (
     add_normalized_columns,
     bool_series,
@@ -715,16 +715,14 @@ def validate_tags(
     tokenizer_dir: Path,
     direction: str,
     target_lang: str,
-    profile: dict,
 ) -> dict[str, object]:
-    backend = get_backend(profile)
-    tokenizer = backend.load_tokenizer(tokenizer_dir)
+    tokenizer = nllb.load_tokenizer(tokenizer_dir)
     work = frame.copy()
     work["source_bucket"] = work["source"].map(source_bucket)
     tags: set[str] = set()
     for _, row in work.iterrows():
         tags.update(
-            backend.source_prefix(
+            nllb.source_prefix(
                 row,
                 direction,
                 target_lang=target_lang,
@@ -741,7 +739,7 @@ def validate_tags(
             bad.append(token)
     return {
         "ok": not bad,
-        "model_family": backend.family,
+        "model_family": nllb.MODEL_FAMILY,
         "direction": direction,
         "checked_tags": len(tags),
         "bad_tags": bad,
@@ -877,7 +875,6 @@ def main() -> None:
             args.tokenizer,
             args.direction,
             target_lang,
-            load_profile(args.profile),
         )
         report["complete"] = bool(
             report["complete"]

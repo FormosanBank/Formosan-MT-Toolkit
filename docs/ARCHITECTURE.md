@@ -213,7 +213,7 @@ Three language pipelines run concurrently by default. `--language-workers 1`
 disables concurrency, and `--no-stage-cache` forces a cold rebuild without
 weakening any QC, split, validation, or exposure gate.
 
-### 9. NLLB And MADLAD Training
+### 9. NLLB Training
 
 `setup_tokenizer_sweep.py` and `setup_formosan_nllb200.py` learn the auxiliary
 8k SPM from V3 MT-standard Formosan training text only. They load a pinned
@@ -235,12 +235,10 @@ diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures, stratified
 bootstrap confidence intervals, exact/empty/length diagnostics, and
 language/source/dialect/length slices.
 
-NLLB and MADLAD share `train_directional.py`, `evaluate_directional.py`, and
-the same V3 corpus gate. `model_backends.py` owns only the family-specific
-tokenizer, prompt, decoder-start, and target-selection behavior. Every setup,
-run, checkpoint, and evaluation contract records the exact MT-standard profile
-ID and SHA-256. Published Formosan-source models include the same normalizer
-and profile used during corpus construction.
+`nllb_runtime.py` owns NLLB tokenizer state, language controls, decoder start,
+and target selection. Every setup, run, checkpoint, and evaluation contract
+records the exact MT-standard profile ID and SHA-256. Published Formosan-source
+models include the same normalizer and profile used during corpus construction.
 
 ## Data Products
 

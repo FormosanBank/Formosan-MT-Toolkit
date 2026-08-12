@@ -1,8 +1,7 @@
 # Formosan MT Experiments
 
-This package trains and evaluates directional NLLB-200 and MADLAD-400 models
-from a completed corpus pipeline v3 bundle. It is model-family aware but shares
-one data, sampling, metrics, provenance, and checkpoint contract.
+This package trains and evaluates directional NLLB-200 models from a completed
+corpus pipeline v3 bundle.
 
 ## Directions
 
@@ -16,16 +15,8 @@ one data, sampling, metrics, provenance, and checkpoint contract.
 Inputs are prefixed with target, source-language, domain, and dialect controls:
 
 ```text
-# NLLB
 <to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra.
-
-# MADLAD
-<2en> <to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra.
 ```
-
-MADLAD uses its first input token for target selection. The native English and
-Traditional Chinese selectors are retained, while the 15 Formosan selectors
-and metadata controls are added during setup.
 
 ## Required Corpus Contract
 
@@ -64,23 +55,8 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 | Precision | bf16 |
 | Selection metric | chrF2 |
 
-`configs/madlad400_3b_native.json` is the MADLAD-400 3B recipe:
-
-| Setting | Value |
-|---|---:|
-| Base model | MADLAD-400 3B MT, pinned revision |
-| Tokenizer | Native 256k SentencePiece plus controls |
-| Max updates | 50,000 |
-| Microbatch / accumulation | 1 / 32 |
-| Maximum length | 384 |
-| Learning rate | `1e-5` |
-| Precision / load dtype | bf16 / bf16 |
-| Gradient checkpointing | enabled |
-| Selection metric | chrF2 |
-
 NLLB generation starts the decoder with EOS and selects the target with
-`forced_bos_token_id`. MADLAD preserves decoder start ID 0 and never uses NLLB
-forced-BOS behavior. `scripts/model_backends.py` enforces these differences.
+`forced_bos_token_id`. `scripts/nllb_runtime.py` owns this runtime contract.
 
 ## Slurm Submission
 
@@ -105,31 +81,19 @@ $PROJECT_DATA/<corpus-name>/
   provenance/mt_build_manifest.json
 ```
 
-Submit NLLB:
-
 ```bash
 CORPUS_NAME=public_no_bible \
 RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
   slurm/submit_directional_experiment.sh
 ```
 
-Submit MADLAD:
-
-```bash
-CORPUS_NAME=public_no_bible \
-PROFILE="$EXP_DIR/configs/madlad400_3b_native.json" \
-RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
-  slurm/submit_directional_experiment.sh
-```
-
-The launcher queues two CPU validators, family-specific setup, four trainers,
+The launcher queues two CPU validators, two tokenizer/model setup jobs, four trainers,
 and a `best/` checkpoint evaluation for each trainer. A fixed `RUN_STAMP` is idempotent:
 active or completed jobs are reused, while terminal failures are resubmitted.
 Training resumes only when corpus, code, profile, and setup hashes match.
 
 Resource defaults can be overridden with `VALIDATE_*`, `SETUP_*`, `TRAIN_*`,
-and `EVAL_*` environment variables. NLLB expects a 40GB-or-larger GPU. MADLAD
-expects an 80GB-or-larger GPU with the supplied full-finetuning profile. The
+and `EVAL_*` environment variables. NLLB expects a 40GB-or-larger GPU. The
 Slurm files assume a `miniconda` module and `formosan_mt` environment; adapt
 those two setup lines to the cluster environment when needed.
 
@@ -162,8 +126,7 @@ confidence-interval job; the GPU is not held while resampling.
 | `validate_experiment.py` | Independent corpus and leakage gate. |
 | `audit_corpus_exposure.py` | Exact TAME-MT exposure reports. |
 | `setup_formosan_nllb200.py` | NLLB SentencePiece and embedding setup. |
-| `setup_formosan_madlad400.py` | MADLAD controls and embedding/head resize. |
-| `model_backends.py` | Model-family prompts and generation behavior. |
+| `nllb_runtime.py` | NLLB language controls and generation behavior. |
 | `train_directional.py` | Sampling, optimization, validation, and resume. |
 | `evaluate_directional.py` | Selected-checkpoint test evaluation. |
 | `bootstrap_predictions.py` | Optional CPU confidence intervals. |

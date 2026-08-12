@@ -46,13 +46,6 @@ NLLB_REPOS = {
     "zh2f": "nllb200-zh-formosan-spm8k",
 }
 
-MADLAD_REPOS = {
-    "f2en": "madlad400-3b-formosan-en",
-    "en2f": "madlad400-3b-en-formosan",
-    "f2zh": "madlad400-3b-formosan-zh",
-    "zh2f": "madlad400-3b-zh-formosan",
-}
-
 REQUIRED_FILES = {
     "config.json",
     "experiment_metadata.json",
@@ -73,12 +66,8 @@ def recipe_slug(recipe_id: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", recipe_id.lower()).strip("_")
 
 
-def repo_name(family: str, direction: str) -> str:
-    return (
-        NLLB_REPOS
-        if family == "nllb"
-        else MADLAD_REPOS
-    )[direction]
+def repo_name(direction: str) -> str:
+    return NLLB_REPOS[direction]
 
 
 def validate_checkpoint(path: Path) -> list[Path]:
@@ -166,63 +155,6 @@ print(translate({spec.source_example!r}, "ami"))
 ```"""
 
 
-def madlad_usage(spec: Direction) -> str:
-    major_selector = "<2en>" if spec.target_lang == "english" else "<2zh_Hant>"
-    major_tag = "eng" if spec.target_lang == "english" else "zh"
-    if spec.code.startswith("f2"):
-        selector = repr(major_selector)
-        controls = f"<to_{major_tag}> <src_{{lang_code}}>"
-    else:
-        selector = 'f"<2{lang_code}>"'
-        controls = f"<to_{{lang_code}}> <src_{major_tag}>"
-    normalization_import = (
-        "from formosan_mt_inference import normalize_formosan\n"
-        if spec.code.startswith("f2")
-        else ""
-    )
-    normalization_line = (
-        "    text = normalize_formosan(text, lang_code)\n"
-        if spec.code.startswith("f2")
-        else ""
-    )
-    return f"""```python
-import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-{normalization_import}
-
-model_id = "REPLACE_MODEL_ID"
-tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
-model = AutoModelForSeq2SeqLM.from_pretrained(
-    model_id,
-    dtype=torch.bfloat16,
-)
-model.to("cuda" if torch.cuda.is_available() else "cpu")
-
-def translate(text, lang_code, source_bucket="unknown", dialect="default"):
-{normalization_line.rstrip()}
-    target = {selector}
-    source_bucket = source_bucket if source_bucket in {DOMAIN_BUCKETS!r} else "unknown"
-    domain_tag = f"<dom_{{source_bucket}}>"
-    if tokenizer.convert_tokens_to_ids(domain_tag) == tokenizer.unk_token_id:
-        domain_tag = "<dom_unknown>"
-    dialect_tag = f"<dialect_{{dialect}}>"
-    if tokenizer.convert_tokens_to_ids(dialect_tag) == tokenizer.unk_token_id:
-        dialect_tag = "<dialect_default>"
-    prompt = (
-        f"{{target}} {controls} {{domain_tag}} {{dialect_tag}} {{text}}"
-    )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    output = model.generate(
-        **inputs,
-        max_new_tokens=256,
-        num_beams=4,
-    )
-    return tokenizer.batch_decode(output, skip_special_tokens=True)[0]
-
-print(translate({spec.source_example!r}, "ami"))
-```"""
-
-
 def corpus_record(manifest: dict, target_lang: str) -> dict:
     corpora = manifest["corpora"]
     if target_lang in corpora:
@@ -244,7 +176,6 @@ def render_card(
     *,
     spec: Direction,
     repo_id: str,
-    family: str,
     profile: dict,
     metrics: dict,
     metadata: dict,
@@ -253,11 +184,7 @@ def render_card(
 ) -> str:
     global_metrics = metrics["global"]
     corpus = corpus_record(manifest, spec.target_lang)
-    usage = (
-        nllb_usage(spec)
-        if family == "nllb"
-        else madlad_usage(spec)
-    ).replace("REPLACE_MODEL_ID", repo_id)
+    usage = nllb_usage(spec).replace("REPLACE_MODEL_ID", repo_id)
     by_language = "\n".join(
         f"| `{code}` | {metrics['by_language'][code]['samples']:,} | "
         f"{metrics['by_language'][code]['BLEU']:.2f} | "
@@ -270,12 +197,7 @@ def render_card(
     selected = validation.get("generation", {}).get("global", {})
     base = profile["base_model"]["name"]
     base_revision = profile["base_model"]["revision"]
-    family_tag = "nllb-200" if family == "nllb" else "madlad-400"
-    tokenizer_note = (
-        "Formosan-aware 8k SentencePiece extension"
-        if family == "nllb"
-        else "native MADLAD 256k SentencePiece plus Formosan target/control tokens"
-    )
+    tokenizer_note = "Formosan-aware 8k SentencePiece extension"
     languages = (*FORMOSAN_CODES, "en" if spec.target_lang == "english" else "zh")
     language_yaml = "\n".join(f"- {code}" for code in languages)
     headline_mode = metrics.get("headline_metadata_mode", "default")
@@ -309,7 +231,7 @@ language:
 {language_yaml}
 tags:
 - translation
-- {family_tag}
+- nllb-200
 - formosan-languages
 - low-resource
 metrics:
@@ -469,7 +391,6 @@ def prepare_direction(
     manifest: dict,
     run_stamp: str,
 ) -> dict:
-    family = profile["model_family"]
     slug = recipe_slug(profile["recipe_id"])
     source = (
         args.artifact_root
@@ -490,12 +411,12 @@ def prepare_direction(
     if (
         metrics.get("direction") != spec.code
         or metadata.get("direction") != spec.code
-        or metrics.get("model_family", family) != family
+        or metrics.get("model_family") != "nllb"
         or metrics.get("mt_standardization") != expected_mt_standard
         or metadata.get("mt_standardization") != expected_mt_standard
     ):
         raise RuntimeError(
-            f"Direction/family/MT-standard mismatch for {spec.code}"
+            f"Direction/NLLB/MT-standard mismatch for {spec.code}"
         )
     expected_test_rows = int(
         corpus_record(manifest, spec.target_lang)["splits"]["test"]
@@ -506,7 +427,7 @@ def prepare_direction(
             f"{metrics.get('samples')} != {expected_test_rows}"
         )
 
-    name = repo_name(family, spec.code)
+    name = repo_name(spec.code)
     repo_id = f"{args.organization}/{name}"
     corpus = corpus_record(manifest, spec.target_lang)
     output = args.output_root / name
@@ -563,7 +484,6 @@ def prepare_direction(
         render_card(
             spec=spec,
             repo_id=repo_id,
-            family=family,
             profile=profile,
             metrics=metrics,
             metadata=metadata,

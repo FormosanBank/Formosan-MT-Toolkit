@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
+import nllb_runtime as nllb  # noqa: E402
 from audit_corpus_exposure import (  # noqa: E402
     audit_direction,
     build_tame_config,
@@ -38,7 +39,6 @@ from experiment_config import (  # noqa: E402
     load_profile,
 )
 from formosan_mt_inference import normalize_formosan  # noqa: E402
-from model_backends import get_backend, normalize_control_metadata  # noqa: E402
 from mt_common import (  # noqa: E402
     add_normalized_columns,
     evaluation_candidate_mask,
@@ -59,17 +59,14 @@ from mt_standardization import (
 from pivot import discover_api_key_envs, parse_api_key_envs  # noqa: E402
 from publish_huggingface_models import (  # noqa: E402
     DIRECTIONS,
-    madlad_usage,
     nllb_usage,
     public_metrics,
     render_card,
     validate_checkpoint,
 )
-from setup_formosan_madlad400 import resize_and_initialize  # noqa: E402
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
 from train_directional import metric_improved, training_source_texts  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
-from transformers import T5Config, T5ForConditionalGeneration  # noqa: E402
 from validate_experiment import (  # noqa: E402
     validate_provenance,
     validate_splits,
@@ -154,13 +151,6 @@ class FakeTokenizer:
             "<pad>",
             "</s>",
             "<unk>",
-            "<2mi>",
-            "<2ms>",
-            "<2id>",
-            "<2haw>",
-            "<2sm>",
-            "<2to>",
-            "<2ami>",
             "<to_eng>",
         ]
         self.vocab = {token: index for index, token in enumerate(values)}
@@ -186,11 +176,7 @@ class FakeTokenizer:
             if token_id == value
         )
 
-    def __call__(self, *_args, **_kwargs) -> dict[str, list[int]]:
-        return {"input_ids": [self.vocab["<2mi>"]]}
-
-
-class ModelBackendTests(unittest.TestCase):
+class NllbRuntimeTests(unittest.TestCase):
     def test_inference_uses_the_pinned_mt_standardizer(self) -> None:
         self.assertEqual(normalize_formosan("ma-ku", "ami"), "maku")
         with self.assertRaisesRegex(ValueError, "not safe"):
@@ -216,7 +202,6 @@ class ModelBackendTests(unittest.TestCase):
                     if value == token_id
                 )
 
-        backend = get_backend("nllb")
         tokenizer = NllbTokenizer()
         model = SimpleNamespace(
             config=SimpleNamespace(decoder_start_token_id=None),
@@ -224,14 +209,14 @@ class ModelBackendTests(unittest.TestCase):
                 decoder_start_token_id=None
             ),
         )
-        backend.configure_model(model, tokenizer)
-        task = backend.task_spec(
+        nllb.configure_model(model, tokenizer)
+        task = nllb.task_spec(
             "ami",
             "f2en",
             target_lang="english",
         )
         self.assertEqual(
-            backend.generation_kwargs(tokenizer, model, task),
+            nllb.generation_kwargs(tokenizer, task),
             {
                 "forced_bos_token_id": 11,
                 "decoder_start_token_id": 2,
@@ -240,22 +225,33 @@ class ModelBackendTests(unittest.TestCase):
             },
         )
 
-    def test_madlad_prefixes_cover_all_directions(self) -> None:
-        backend = get_backend("madlad400")
+    def test_nllb_controls_cover_all_directions(self) -> None:
         row = {
             "lang_code": "ami",
             "source_bucket": "narrative",
             "dialect": "Coastal",
         }
         expected = {
-            ("f2en", "english"): "<2en> <to_eng> <src_ami> <dom_narrative> <dialect_coastal>",
-            ("en2f", "english"): "<2ami> <to_ami> <src_eng> <dom_narrative> <dialect_coastal>",
-            ("f2zh", "chinese"): "<2zh_Hant> <to_zh> <src_ami> <dom_narrative> <dialect_coastal>",
-            ("zh2f", "chinese"): "<2ami> <to_ami> <src_zh> <dom_narrative> <dialect_coastal>",
+            ("f2en", "english"): (
+                "<to_eng> <src_ami> <dom_narrative> <dialect_coastal>",
+                ("ami_Latn", "eng_Latn"),
+            ),
+            ("en2f", "english"): (
+                "<to_ami> <src_eng> <dom_narrative> <dialect_coastal>",
+                ("eng_Latn", "ami_Latn"),
+            ),
+            ("f2zh", "chinese"): (
+                "<to_zh> <src_ami> <dom_narrative> <dialect_coastal>",
+                ("ami_Latn", "zho_Hant"),
+            ),
+            ("zh2f", "chinese"): (
+                "<to_ami> <src_zh> <dom_narrative> <dialect_coastal>",
+                ("zho_Hant", "ami_Latn"),
+            ),
         }
-        for (direction, target_lang), prefix in expected.items():
+        for (direction, target_lang), (prefix, lids) in expected.items():
             self.assertEqual(
-                backend.source_prefix(
+                nllb.source_prefix(
                     row,
                     direction,
                     target_lang=target_lang,
@@ -263,59 +259,37 @@ class ModelBackendTests(unittest.TestCase):
                 ),
                 prefix,
             )
+            task = nllb.task_spec(
+                "ami",
+                direction,
+                target_lang=target_lang,
+            )
+            self.assertEqual((task.source_lid, task.target_lid), lids)
 
-    def test_madlad_generation_never_forces_nllb_bos(self) -> None:
-        backend = get_backend("madlad400")
-        model = SimpleNamespace(
-            config=SimpleNamespace(
-                decoder_start_token_id=0,
-                pad_token_id=1,
-                eos_token_id=2,
-            ),
-            generation_config=SimpleNamespace(),
-        )
+    def test_tag_validation_uses_nllb_runtime(self) -> None:
         tokenizer = FakeTokenizer()
-        backend.configure_model(model, tokenizer)
-        task = backend.task_spec(
-            "ami",
-            "en2f",
-            target_lang="english",
-        )
-        kwargs = backend.generation_kwargs(tokenizer, model, task)
-        self.assertEqual(
-            kwargs,
-            {
-                "decoder_start_token_id": 0,
-                "eos_token_id": 2,
-                "pad_token_id": 1,
-            },
-        )
-        self.assertNotIn("forced_bos_token_id", kwargs)
-
-    def test_tag_validation_uses_selected_backend(self) -> None:
-        tokenizer = FakeTokenizer()
-        backend = SimpleNamespace(
-            family="madlad400",
-            load_tokenizer=mock.Mock(return_value=tokenizer),
-            source_prefix=mock.Mock(return_value="<2ami> <to_eng>"),
-        )
         frame = pd.DataFrame(
             [{"source": "fixture.xml", "lang_code": "ami"}]
         )
-        with mock.patch(
-            "validate_experiment.get_backend",
-            return_value=backend,
+        with (
+            mock.patch(
+                "validate_experiment.nllb.load_tokenizer",
+                return_value=tokenizer,
+            ) as load_tokenizer,
+            mock.patch(
+                "validate_experiment.nllb.source_prefix",
+                return_value="<to_eng>",
+            ),
         ):
             report = validate_tags(
                 frame,
                 Path("tokenizer"),
                 "en2f",
                 "english",
-                {"model_family": "madlad400"},
             )
         self.assertTrue(report["ok"])
-        self.assertEqual(report["model_family"], "madlad400")
-        backend.load_tokenizer.assert_called_once_with(Path("tokenizer"))
+        self.assertEqual(report["model_family"], "nllb")
+        load_tokenizer.assert_called_once_with(Path("tokenizer"))
 
     def test_unseen_evaluation_metadata_falls_back_to_setup_tokens(self) -> None:
         tokenizer = FakeTokenizer()
@@ -333,7 +307,7 @@ class ModelBackendTests(unittest.TestCase):
                 "dialect": ["Coastal", "Held Out", ""],
             }
         )
-        normalized, report = normalize_control_metadata(
+        normalized, report = nllb.normalize_control_metadata(
             frame,
             tokenizer,
         )
@@ -377,7 +351,6 @@ class ModelBackendTests(unittest.TestCase):
         ):
             texts, counts = training_source_texts(
                 batch,
-                backend=get_backend("nllb"),
                 args=args,
             )
         self.assertEqual(
@@ -388,33 +361,6 @@ class ModelBackendTests(unittest.TestCase):
             ],
         )
         self.assertEqual(counts, {"domain": 1, "dialect": 1})
-
-    def test_madlad_resize_updates_untied_input_and_output_vocab(self) -> None:
-        tokenizer = FakeTokenizer()
-        model = T5ForConditionalGeneration(
-            T5Config(
-                vocab_size=10,
-                d_model=8,
-                d_ff=16,
-                num_layers=1,
-                num_decoder_layers=1,
-                num_heads=2,
-                decoder_start_token_id=0,
-                pad_token_id=1,
-                eos_token_id=2,
-                tie_word_embeddings=False,
-            )
-        )
-        report = resize_and_initialize(
-            model,
-            tokenizer,
-            ["<2ami>", "<to_eng>"],
-            old_size=10,
-        )
-        self.assertEqual(report["new_vocab_size"], 12)
-        self.assertEqual(model.get_input_embeddings().num_embeddings, 12)
-        self.assertEqual(model.get_output_embeddings().out_features, 12)
-
 
 class LeakageTests(unittest.TestCase):
     def test_source_bucket_uses_only_coarse_domains(self) -> None:
@@ -1054,15 +1000,11 @@ class TokenizerSetupTests(unittest.TestCase):
 
     def test_experiment_profiles_match_canonical_split_policy(self) -> None:
         pipeline_splits = load_corpus_pipeline_config()["splits"]
-        for profile_path in (
-            DEFAULT_PROFILE,
-            ROOT / "formosan_mt_experiments/configs/madlad400_3b_native.json",
-        ):
-            profile_splits = load_profile(profile_path)["splits"]
-            self.assertEqual(
-                {field: profile_splits[field] for field in SHARED_SPLIT_FIELDS},
-                {field: pipeline_splits[field] for field in SHARED_SPLIT_FIELDS},
-            )
+        profile_splits = load_profile(DEFAULT_PROFILE)["splits"]
+        self.assertEqual(
+            {field: profile_splits[field] for field in SHARED_SPLIT_FIELDS},
+            {field: pipeline_splits[field] for field in SHARED_SPLIT_FIELDS},
+        )
 
     def test_experiment_profile_rejects_split_policy_drift(self) -> None:
         profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
@@ -1073,15 +1015,14 @@ class TokenizerSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "split policies differ"):
                 load_profile(path)
 
-    def test_madlad_profile_uses_native_train_only_tokenizer(self) -> None:
-        profile = load_profile(
-            ROOT
-            / "formosan_mt_experiments/configs/madlad400_3b_native.json"
-        )
-        self.assertEqual(profile["model_family"], "madlad400")
-        self.assertEqual(profile["tokenizer"]["mode"], "native")
-        self.assertEqual(profile["tokenizer"]["setup_splits"], ["train"])
-        self.assertTrue(profile["training_defaults"]["gradient_checkpointing"])
+    def test_experiment_profile_rejects_non_nllb_family(self) -> None:
+        profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+        profile["model_family"] = "unsupported"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "must use NLLB"):
+                load_profile(path)
 
     def test_embedding_realignment_uses_token_identity(self) -> None:
         class Tokenizer:
@@ -1384,16 +1325,9 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("if args.bootstrap_samples > 0:", evaluator)
 
     def test_full_evaluation_defaults_are_resource_conservative(self) -> None:
-        for profile_name in (
-            "default_experiment.json",
-            "madlad400_3b_native.json",
-        ):
-            profile = load_profile(
-                ROOT / "formosan_mt_experiments/configs" / profile_name
-            )
-            defaults = profile["generation_defaults"]
-            self.assertEqual(defaults["metadata_modes"], ["default"])
-            self.assertEqual(defaults["bootstrap_samples"], 0)
+        defaults = load_profile(DEFAULT_PROFILE)["generation_defaults"]
+        self.assertEqual(defaults["metadata_modes"], ["default"])
+        self.assertEqual(defaults["bootstrap_samples"], 0)
 
     def test_nllb_setup_checksum_is_computed_then_enforced(self) -> None:
         submitter = (
@@ -1424,7 +1358,7 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
-            "formosan_mt_experiments/scripts/setup_formosan_madlad400.py",
+            "formosan_mt_experiments/scripts/nllb_runtime.py",
             repository_paths,
         )
         self.assertIn(
@@ -1454,18 +1388,17 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertTrue(all(len(row["sha256"]) == 64 for row in artifacts))
 
     def test_publication_examples_apply_formosan_mt_standardization(self) -> None:
-        for usage_builder in (nllb_usage, madlad_usage):
-            formosan_source = usage_builder(DIRECTIONS["f2en"])
-            major_source = usage_builder(DIRECTIONS["en2f"])
-            self.assertIn(
-                "from formosan_mt_inference import normalize_formosan",
-                formosan_source,
-            )
-            self.assertIn(
-                "text = normalize_formosan(text, lang_code)",
-                formosan_source,
-            )
-            self.assertNotIn("normalize_formosan", major_source)
+        formosan_source = nllb_usage(DIRECTIONS["f2en"])
+        major_source = nllb_usage(DIRECTIONS["en2f"])
+        self.assertIn(
+            "from formosan_mt_inference import normalize_formosan",
+            formosan_source,
+        )
+        self.assertIn(
+            "text = normalize_formosan(text, lang_code)",
+            formosan_source,
+        )
+        self.assertNotIn("normalize_formosan", major_source)
 
     def test_publication_card_records_release_and_hard_test_contract(self) -> None:
         profile = {
@@ -1520,7 +1453,6 @@ class ExperimentManifestTests(unittest.TestCase):
         card = render_card(
             spec=DIRECTIONS["f2en"],
             repo_id="FormosanBank/nllb200-formosan-en-spm8k",
-            family="nllb",
             profile=profile,
             metrics=metrics,
             metadata=metadata,
@@ -1532,7 +1464,7 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("Document overlap is diagnostic", card)
         self.assertIn("source-balanced", card)
         self.assertIn("`20260809-210523`", card)
-        self.assertNotIn("MADLAD selects", card)
+        self.assertIn("nllb-200", card)
 
     def test_public_metrics_remove_cluster_paths(self) -> None:
         metrics = {
@@ -1594,24 +1526,6 @@ class ExperimentManifestTests(unittest.TestCase):
             {"best": 10},
         )
         self.assertEqual(graph["setup"], {})
-
-    def test_madlad_submission_graph_uses_one_shared_setup(self) -> None:
-        job_ids = {
-            "validate_en": 1,
-            "validate_zh": 2,
-            "setup_madlad400": 3,
-        }
-        next_id = 4
-        for direction in ("f2en", "en2f", "f2zh", "zh2f"):
-            for label in (
-                f"train_{direction}",
-                f"eval_{direction}_final",
-                f"eval_{direction}_best",
-            ):
-                job_ids[label] = next_id
-                next_id += 1
-        graph = build_job_graph(job_ids, model_family="madlad400")
-        self.assertEqual(graph["setup"], {"shared": 3})
 
     def test_submission_state_rejects_non_numeric_job_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -3,8 +3,8 @@
 Formosan MT Toolkit builds leakage-controlled Formosan-English and
 Formosan-Traditional Chinese corpora from the public
 [FormosanBank](https://github.com/FormosanBank/FormosanBank) XML collection.
-It also contains reproducible directional training and evaluation code for
-NLLB-200 and MADLAD-400 3B.
+It also contains reproducible directional NLLB-200 training and evaluation
+code.
 
 The supported workflow is corpus pipeline v3. It keeps the supplied XML
 `kindOf="standard"` tier, derives a separate model-facing standardization,
@@ -128,13 +128,10 @@ The `formosan_mt_experiments/` package trains four unidirectional models:
 | `f2zh` | tagged Formosan | Traditional Chinese |
 | `zh2f` | tagged Traditional Chinese | Formosan |
 
-The NLLB profile uses the established 8k Formosan SentencePiece extension.
-The MADLAD profile retains its native tokenizer and adds target and metadata
-control tokens. Both use the same corpus validation, balanced sampling,
-metrics, run contracts, checkpointing, and evaluation code. Prefixes put
-direction and language first, use a fixed coarse domain vocabulary, and apply
-25% independent domain/dialect dropout during training so unknown/default tags
-are learned conditions.
+The supported profile uses the established 8k Formosan SentencePiece extension.
+Prefixes put direction and language first, use a fixed coarse domain
+vocabulary, and apply 25% independent domain/dialect dropout during training
+so unknown/default tags are learned conditions.
 
 On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
 shared data root and submit from `formosan_mt_experiments/`:
@@ -160,7 +157,7 @@ defaults. See [Experiment Training](formosan_mt_experiments/README.md).
 | `build_corpora.sh` | Stable public entrypoint. |
 | `config/` | Versioned MT standardization policy. |
 | `scripts/local/` | Acquisition, QC, extraction, filtering, pivoting, and release orchestration. |
-| `formosan_mt_experiments/` | Split validation, NLLB/MADLAD setup, training, evaluation, and Slurm launchers. |
+| `formosan_mt_experiments/` | Split validation, NLLB setup, training, evaluation, and Slurm launchers. |
 | `tests/` | Corpus, training, inference, and provenance contract tests. |
 
 Corpus rows, downloaded XML, credentials, paid caches, private repository

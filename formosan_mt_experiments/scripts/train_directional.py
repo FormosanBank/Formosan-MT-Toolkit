@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Directional multilingual fine-tuning for supported Formosan MT backends."""
+"""Directional multilingual NLLB fine-tuning for Formosan MT."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+import nllb_runtime as nllb
 import numpy as np
 import pandas as pd
 import torch
@@ -26,13 +27,6 @@ from experiment_config import (
     profile_record,
     sha256_file,
     stable_hash,
-)
-from model_backends import (
-    ModelBackend,
-    TaskSpec,
-    ensure_source_prefix_tokens,
-    get_backend,
-    normalize_control_metadata,
 )
 from mt_common import (
     EASY_BUCKETS,
@@ -68,7 +62,6 @@ LOAD_DTYPES = {
 def prepare_data(
     args,
     tokenizer,
-    backend: ModelBackend,
 ) -> tuple[dict, dict, dict]:
     df = read_parallel_csv(args.input, target_col=args.target_col)
     if "split" not in df.columns:
@@ -110,27 +103,25 @@ def prepare_data(
         "dialect_fallback_rows": 0,
     }
     if args.use_tags:
-        train, training_metadata_fallback = normalize_control_metadata(
+        train, training_metadata_fallback = nllb.normalize_control_metadata(
             train,
             tokenizer,
             mode="oracle",
         )
-        val, validation_metadata_fallback = normalize_control_metadata(
+        val, validation_metadata_fallback = nllb.normalize_control_metadata(
             val,
             tokenizer,
             mode=args.validation_metadata_mode,
         )
     if args.use_tags and args.validate_tags:
-        ensure_source_prefix_tokens(
-            backend,
+        nllb.ensure_source_prefix_tokens(
             tokenizer,
             train,
             args.direction,
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-        ensure_source_prefix_tokens(
-            backend,
+        nllb.ensure_source_prefix_tokens(
             tokenizer,
             val,
             args.direction,
@@ -143,7 +134,7 @@ def prepare_data(
         target_col=args.target_col,
         target_lang=args.target_lang,
         use_tags=args.use_tags,
-        prefix_builder=lambda row: backend.source_prefix(
+        prefix_builder=lambda row: nllb.source_prefix(
             row,
             args.direction,
             target_lang=args.target_lang,
@@ -176,12 +167,12 @@ def prepare_data(
             train_sub["tgt_text"] = train_sub["formosan_sentence"].astype(str)
             val_sub["src_text"] = val_sub[args.target_col].astype(str)
             val_sub["tgt_text"] = val_sub["formosan_sentence"].astype(str)
-        task = backend.task_spec(
+        task = nllb.task_spec(
             lang,
             args.direction,
             target_lang=args.target_lang,
         )
-        backend.validate_task(tokenizer, task)
+        nllb.validate_task(tokenizer, task)
         train_by_lang[lang] = {
             "df": train_sub.reset_index(drop=True),
             "task": task,
@@ -199,7 +190,7 @@ def prepare_data(
         "train_rows": int(len(train)),
         "validate_rows": int(len(val)),
         "direction": args.direction,
-        "model_family": backend.family,
+        "model_family": nllb.MODEL_FAMILY,
         "target_lang": args.target_lang,
         "target_col": args.target_col,
         "use_tags": bool(args.use_tags),
@@ -226,15 +217,14 @@ def prepare_data(
 
 
 def encode_batch(
-    backend: ModelBackend,
     tokenizer,
     src_texts,
     tgt_texts,
-    task: TaskSpec,
+    task: nllb.TaskSpec,
     max_length,
     device,
 ):
-    backend.prepare_source(tokenizer, task)
+    nllb.prepare_source(tokenizer, task)
     enc = tokenizer(
         list(src_texts),
         return_tensors="pt",
@@ -244,7 +234,7 @@ def encode_batch(
         return_attention_mask=True,
         return_token_type_ids=False,
     )
-    backend.prepare_target(tokenizer, task)
+    nllb.prepare_target(tokenizer, task)
     labels = tokenizer(
         text_target=list(tgt_texts),
         return_tensors="pt",
@@ -270,7 +260,6 @@ def row_probabilities(df: pd.DataFrame, easy_source_weight: float) -> np.ndarray
 def training_source_texts(
     batch: pd.DataFrame,
     *,
-    backend: ModelBackend,
     args,
 ) -> tuple[list[str], dict[str, int]]:
     """Build training inputs with independent, reproducible metadata dropout."""
@@ -292,7 +281,7 @@ def training_source_texts(
             row["source_bucket"] = "unknown"
         if dialect_mask[index]:
             row["dialect"] = "default"
-        prefix = backend.source_prefix(
+        prefix = nllb.source_prefix(
             row,
             args.direction,
             target_lang=args.target_lang,
@@ -309,7 +298,6 @@ def training_source_texts(
 def evaluate_loss(
     model,
     tokenizer,
-    backend: ModelBackend,
     val_by_lang,
     args,
     device,
@@ -325,7 +313,6 @@ def evaluate_loss(
         for start in range(0, len(df), args.eval_batch_size):
             batch = df.iloc[start : start + args.eval_batch_size]
             enc, labels = encode_batch(
-                backend,
                 tokenizer,
                 batch["src_text"].tolist(),
                 batch["tgt_text"].tolist(),
@@ -381,7 +368,6 @@ def validation_sample_manifest(val_by_lang: dict, args) -> dict:
 def evaluate_generation(
     model,
     tokenizer,
-    backend: ModelBackend,
     val_by_lang,
     args,
     device,
@@ -401,7 +387,7 @@ def evaluate_generation(
         task = info["task"]
         for start in range(0, len(df), args.generation_batch_size):
             batch = df.iloc[start : start + args.generation_batch_size]
-            backend.prepare_source(tokenizer, task)
+            nllb.prepare_source(tokenizer, task)
             enc = tokenizer(
                 batch["src_text"].astype(str).tolist(),
                 return_tensors="pt",
@@ -415,7 +401,7 @@ def evaluate_generation(
                 **enc,
                 num_beams=args.validation_beam,
                 max_new_tokens=args.validation_max_new_tokens,
-                **backend.generation_kwargs(tokenizer, model, task),
+                **nllb.generation_kwargs(tokenizer, task),
             )
             lang_hypotheses.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
         by_language[lang] = {"samples": len(df)} | score_translations(
@@ -605,19 +591,16 @@ def build_run_contract(args, profile: dict) -> dict:
         for record in setup_inputs
         if isinstance(record, dict)
     )
-    setup_family = str(
-        setup.get("model_family") or "nllb"
-    ).strip().lower()
     if (
         setup.get("recipe_id") != profile["recipe_id"]
-        or setup_family != profile["model_family"]
+        or setup.get("model_family") != "nllb"
         or setup.get("profile", {}).get("sha256")
         != expected_profile["sha256"]
         or not setup_has_input
         or setup.get("mt_standardization") != expected_mt_standard
     ):
         raise SystemExit(
-            "Model setup manifest does not match corpus/profile/family"
+            "NLLB setup manifest does not match the corpus or profile"
         )
     verify_setup_artifacts(
         setup,
@@ -819,19 +802,18 @@ def main() -> None:
     if resume_arg == "none" or not resume_exists:
         resume_path = None
     load_path = resume_path or args.model
-    backend = get_backend(profile)
     checkpoint_contract = {
-        "model_family": backend.family,
+        "model_family": nllb.MODEL_FAMILY,
         "recipe_id": profile["recipe_id"],
         "mt_standardization": profile["mt_standardization"],
     }
-    tokenizer = backend.load_tokenizer(resume_path or args.tokenizer)
+    tokenizer = nllb.load_tokenizer(resume_path or args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         load_path,
         dtype=LOAD_DTYPES[args.load_dtype],
         low_cpu_mem_usage=True,
     )
-    backend.configure_model(model, tokenizer)
+    nllb.configure_model(model, tokenizer)
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
         raise SystemExit(
             "Tokenizer and model vocabulary sizes differ; "
@@ -847,7 +829,6 @@ def main() -> None:
     train_by_lang, val_by_lang, data_report = prepare_data(
         args,
         tokenizer,
-        backend,
     )
     write_json(args.output_dir / "data_report.json", data_report)
     write_json(args.output_dir / "validation_sample_manifest.json", validation_sample_manifest(val_by_lang, args))
@@ -857,7 +838,7 @@ def main() -> None:
         serializable_args
         | {
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model_family": backend.family,
+            "model_family": nllb.MODEL_FAMILY,
             "run_contract_sha256": contract_sha256,
             "trainable_parameters": sum(
                 parameter.numel()
@@ -930,13 +911,11 @@ def main() -> None:
             batch = df.iloc[sampled]
             source_texts, dropout_counts = training_source_texts(
                 batch,
-                backend=backend,
                 args=args,
             )
             for name, count in dropout_counts.items():
                 interval_metadata_dropout[name] += count
             enc, labels = encode_batch(
-                backend,
                 tokenizer,
                 source_texts,
                 batch["tgt_text"].tolist(),
@@ -1009,7 +988,6 @@ def main() -> None:
             metrics = evaluate_loss(
                 model,
                 tokenizer,
-                backend,
                 val_by_lang,
                 args,
                 device,
@@ -1017,7 +995,6 @@ def main() -> None:
             metrics["generation"] = evaluate_generation(
                 model,
                 tokenizer,
-                backend,
                 val_by_lang,
                 args,
                 device,

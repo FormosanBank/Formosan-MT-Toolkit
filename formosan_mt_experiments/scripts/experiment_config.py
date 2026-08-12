@@ -80,35 +80,15 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         raise SystemExit("Experiment profile has an invalid MT-standard contract")
     if profile.get("corpus_pipeline_version") != "formosan-mt-corpus-v3":
         raise SystemExit("Experiment profile must use corpus pipeline V3")
-    model_family = str(profile.get("model_family") or "nllb").strip().lower()
-    profile["model_family"] = model_family
+    if profile.get("model_family") != "nllb":
+        raise SystemExit(f"Experiment profile must use NLLB: {path}")
     tokenizer = profile.get("tokenizer", {})
-    if model_family == "nllb":
-        if tokenizer.get("mode") != "spm":
-            raise SystemExit("The NLLB recipe requires tokenizer.mode=spm")
-        if tokenizer.get("default_spm_vocab") != 8192:
-            raise SystemExit(
-                "The supported NLLB recipe requires an 8192-piece auxiliary SPM"
-            )
-    elif model_family == "madlad400":
-        if tokenizer.get("mode") != "native":
-            raise SystemExit(
-                "The MADLAD-400 recipe requires tokenizer.mode=native"
-            )
-        expected_prefixes = {
-            "english": "<2en>",
-            "chinese": "<2zh_Hant>",
-        }
-        if tokenizer.get("target_prefixes") != expected_prefixes:
-            raise SystemExit(
-                "MADLAD target prefixes must be <2en> and <2zh_Hant>"
-            )
-        if tokenizer.get("formosan_target_template") != "<2{lang_code}>":
-            raise SystemExit(
-                "MADLAD Formosan target template must be <2{lang_code}>"
-            )
-    else:
-        raise SystemExit(f"Unsupported model family in {path}: {model_family}")
+    if tokenizer.get("mode") != "spm":
+        raise SystemExit("The NLLB recipe requires tokenizer.mode=spm")
+    if tokenizer.get("default_spm_vocab") != 8192:
+        raise SystemExit(
+            "The supported NLLB recipe requires an 8192-piece auxiliary SPM"
+        )
     revision = str(profile.get("base_model", {}).get("revision") or "")
     if len(revision) != 40:
         raise SystemExit("Experiment profile must pin a full base-model revision")

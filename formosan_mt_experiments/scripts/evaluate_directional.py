@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+import nllb_runtime as nllb
 import numpy as np
 import pandas as pd
 import torch
@@ -17,13 +18,6 @@ from experiment_config import (
     profile_record,
     sha256_file,
     stable_hash,
-)
-from model_backends import (
-    ModelBackend,
-    TaskSpec,
-    ensure_source_prefix_tokens,
-    get_backend,
-    normalize_control_metadata,
 )
 from mt_common import (
     FORMOSAN_CODES,
@@ -95,8 +89,7 @@ def validate_evaluation_contract(
     if (
         run_contract.get("input", {}).get("sha256") != input_hash
         or run_contract.get("recipe_id") != profile["recipe_id"]
-        or str(run_contract.get("model_family") or "nllb")
-        != profile["model_family"]
+        or run_contract.get("model_family") != "nllb"
         or run_contract.get("profile", {}).get("sha256")
         != profile_record(args.profile)["sha256"]
         or run_contract.get("mt_standardization")
@@ -224,7 +217,7 @@ def metadata_frame(
     *,
     mode: str,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    return normalize_control_metadata(
+    return nllb.normalize_control_metadata(
         evaluation,
         tokenizer,
         mode=mode,
@@ -237,8 +230,7 @@ def generate(
     model,
     texts: list[str],
     *,
-    backend: ModelBackend,
-    task: TaskSpec,
+    task: nllb.TaskSpec,
     device: torch.device,
     args: argparse.Namespace,
     description: str,
@@ -255,7 +247,7 @@ def generate(
     )
     for start in range(0, len(sorted_texts), args.batch_size):
         batch = sorted_texts[start : start + args.batch_size]
-        backend.prepare_source(tokenizer, task)
+        nllb.prepare_source(tokenizer, task)
         encoded = tokenizer(
             batch,
             return_tensors="pt",
@@ -276,7 +268,7 @@ def generate(
             no_repeat_ngram_size=args.no_repeat_ngram_size,
             repetition_penalty=args.repetition_penalty,
             length_penalty=args.length_penalty,
-            **backend.generation_kwargs(tokenizer, model, task),
+            **nllb.generation_kwargs(tokenizer, task),
         )
         outputs.extend(
             tokenizer.batch_decode(
@@ -294,7 +286,6 @@ def generate_mode(
     tokenizer,
     model,
     *,
-    backend: ModelBackend,
     mode: str,
     device: torch.device,
     args: argparse.Namespace,
@@ -305,8 +296,7 @@ def generate_mode(
         mode=mode,
     )
     if args.validate_tags:
-        ensure_source_prefix_tokens(
-            backend,
+        nllb.ensure_source_prefix_tokens(
             tokenizer,
             metadata,
             args.direction,
@@ -319,7 +309,7 @@ def generate_mode(
         target_col=args.target_col,
         target_lang=args.target_lang,
         use_tags=args.use_tags,
-        prefix_builder=lambda row: backend.source_prefix(
+        prefix_builder=lambda row: nllb.source_prefix(
             row,
             args.direction,
             target_lang=args.target_lang,
@@ -333,12 +323,12 @@ def generate_mode(
     ):
         if language not in FORMOSAN_CODES:
             continue
-        task = backend.task_spec(
+        task = nllb.task_spec(
             language,
             args.direction,
             target_lang=args.target_lang,
         )
-        backend.validate_task(tokenizer, task)
+        nllb.validate_task(tokenizer, task)
         if is_formosan_to_target(args.direction):
             source = subset["formosan_sentence"].astype(str).tolist()
         else:
@@ -347,7 +337,6 @@ def generate_mode(
             tokenizer,
             model,
             source,
-            backend=backend,
             task=task,
             device=device,
             args=args,
@@ -571,14 +560,13 @@ def main() -> None:
             ]
         ).sort_index()
 
-    backend = get_backend(profile)
-    tokenizer = backend.load_tokenizer(args.tokenizer)
+    tokenizer = nllb.load_tokenizer(args.tokenizer)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         args.model,
         dtype=LOAD_DTYPES[args.load_dtype],
         low_cpu_mem_usage=True,
     )
-    backend.configure_model(model, tokenizer)
+    nllb.configure_model(model, tokenizer)
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
         raise SystemExit(
             "Tokenizer and model vocabulary sizes differ; "
@@ -611,7 +599,6 @@ def main() -> None:
             evaluation,
             tokenizer,
             model,
-            backend=backend,
             mode=mode,
             device=device,
             args=args,
@@ -697,7 +684,7 @@ def main() -> None:
         "complete": False,
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
-        "model_family": backend.family,
+        "model_family": nllb.MODEL_FAMILY,
         "contract": contract,
         "input": str(args.input),
         "model": str(args.model),
