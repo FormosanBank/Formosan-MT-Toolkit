@@ -59,6 +59,7 @@ def load_model(path: Path, *, dtype: torch.dtype):
         path,
         dtype=dtype,
         low_cpu_mem_usage=True,
+        attn_implementation="eager",
     )
 
 
@@ -67,6 +68,11 @@ def configure_model(model, tokenizer) -> None:
         raise SystemExit("MiLMMT tokenizer must define pad and EOS tokens")
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.use_cache = False
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.do_sample = False
+        model.generation_config.top_k = None
+        model.generation_config.top_p = None
+        model.generation_config.cache_implementation = None
 
 
 def validate_model_tokenizer(model, tokenizer) -> None:

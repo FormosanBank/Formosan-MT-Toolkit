@@ -350,6 +350,27 @@ class NllbRuntimeTests(unittest.TestCase):
 
 
 class MilmmtRuntimeTests(unittest.TestCase):
+    def test_configure_model_uses_deterministic_generation(self) -> None:
+        model = SimpleNamespace(
+            config=SimpleNamespace(pad_token_id=None, use_cache=True),
+            generation_config=SimpleNamespace(
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                cache_implementation="hybrid",
+            ),
+        )
+        tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=1)
+
+        milmmt.configure_model(model, tokenizer)
+
+        self.assertEqual(model.config.pad_token_id, 0)
+        self.assertFalse(model.config.use_cache)
+        self.assertFalse(model.generation_config.do_sample)
+        self.assertIsNone(model.generation_config.top_k)
+        self.assertIsNone(model.generation_config.top_p)
+        self.assertIsNone(model.generation_config.cache_implementation)
+
     def test_official_prompt_covers_all_directions(self) -> None:
         row = {
             "lang_code": "ami",
