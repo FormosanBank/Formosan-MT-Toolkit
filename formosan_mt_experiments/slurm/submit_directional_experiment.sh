@@ -164,7 +164,7 @@ submit_validation() {
     --time="${VALIDATE_TIME:-02:00:00}" \
     --cpus-per-task="${VALIDATE_CPUS:-8}" \
     --mem="${VALIDATE_MEM:-64G}" \
-    --export="$(common_export "${target_lang}"),MIN_TEST_RATIO=0.075,MIN_VALIDATE_RATIO=0.025" \
+    --export="$(common_export "${target_lang}")" \
     "${VALIDATE_SL}"
 }
 

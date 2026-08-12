@@ -123,7 +123,7 @@ RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
 ```
 
 The launcher queues two CPU validators, family-specific setup, four trainers,
-and final/best evaluation for each trainer. A fixed `RUN_STAMP` is idempotent:
+and a `best/` checkpoint evaluation for each trainer. A fixed `RUN_STAMP` is idempotent:
 active or completed jobs are reused, while terminal failures are resubmitted.
 Training resumes only when corpus, code, profile, and setup hashes match.
 
@@ -140,7 +140,8 @@ validation loss, perplexity, BLEU, chrF2, TER, exact match, empty-output rate,
 output/reference length ratio, and applied metadata-dropout counts. Direction
 and language tags are always retained. Domain and dialect tags independently
 fall back to `unknown` and `default` for 25% of training presentations.
-Generation metrics include per-language breakdowns.
+Checkpoint selection uses `unknown`/`default` metadata to match headline
+inference. Generation metrics include per-language breakdowns.
 
 Each generation validation atomically updates `resume/` with model, optimizer,
 scheduler, scaler, random state, and run-contract hash. Successful training

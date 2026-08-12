@@ -17,6 +17,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from experiment_config import (
+    CORPUS_PIPELINE_CONFIG,
     DEFAULT_PROFILE,
     dependency_versions,
     git_record,
@@ -117,7 +118,7 @@ def prepare_data(
         val, validation_metadata_fallback = normalize_control_metadata(
             val,
             tokenizer,
-            mode="oracle",
+            mode=args.validation_metadata_mode,
         )
     if args.use_tags and args.validate_tags:
         ensure_source_prefix_tokens(
@@ -204,6 +205,7 @@ def prepare_data(
         "use_tags": bool(args.use_tags),
         "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
         "validation_metadata_fallback": validation_metadata_fallback,
+        "validation_metadata_mode": args.validation_metadata_mode,
         "training_metadata_fallback": training_metadata_fallback,
         "domain_tag_dropout": float(args.domain_tag_dropout),
         "dialect_tag_dropout": float(args.dialect_tag_dropout),
@@ -272,35 +274,32 @@ def training_source_texts(
     args,
 ) -> tuple[list[str], dict[str, int]]:
     """Build training inputs with independent, reproducible metadata dropout."""
-    work = batch.copy()
     if args.use_tags:
-        domain_mask = np.random.random(len(work)) < args.domain_tag_dropout
-        dialect_mask = np.random.random(len(work)) < args.dialect_tag_dropout
-        work.loc[domain_mask, "source_bucket"] = "unknown"
-        work.loc[dialect_mask, "dialect"] = "default"
+        domain_mask = np.random.random(len(batch)) < args.domain_tag_dropout
+        dialect_mask = np.random.random(len(batch)) < args.dialect_tag_dropout
     else:
-        domain_mask = np.zeros(len(work), dtype=bool)
-        dialect_mask = np.zeros(len(work), dtype=bool)
+        domain_mask = np.zeros(len(batch), dtype=bool)
+        dialect_mask = np.zeros(len(batch), dtype=bool)
 
-    tagged = with_tagged_columns(
-        work,
-        args.direction,
-        target_col=args.target_col,
-        target_lang=args.target_lang,
-        use_tags=args.use_tags,
-        prefix_builder=lambda row: backend.source_prefix(
-            row,
-            args.direction,
-            target_lang=args.target_lang,
-            use_tags=args.use_tags,
-        ),
-    )
     source_column = (
         "formosan_sentence"
         if is_formosan_to_target(args.direction)
         else args.target_col
     )
-    return tagged[source_column].astype(str).tolist(), {
+    texts: list[str] = []
+    for index, row in enumerate(batch.to_dict(orient="records")):
+        if domain_mask[index]:
+            row["source_bucket"] = "unknown"
+        if dialect_mask[index]:
+            row["dialect"] = "default"
+        prefix = backend.source_prefix(
+            row,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        )
+        texts.append(f"{prefix} {row[source_column]}".strip())
+    return texts, {
         "domain": int(domain_mask.sum()),
         "dialect": int(dialect_mask.sum()),
     }
@@ -541,6 +540,7 @@ def verify_setup_artifacts(
 
 def build_run_contract(args, profile: dict) -> dict:
     input_hash = sha256_file(args.input)
+    expected_profile = profile_record(args.profile)
     corpus_manifest = read_complete_manifest(
         args.corpus_manifest,
         "corpus build manifest",
@@ -553,6 +553,11 @@ def build_run_contract(args, profile: dict) -> dict:
     expected_mt_standard = profile["mt_standardization"]
     if corpus_manifest.get("mt_standardization") != expected_mt_standard:
         raise SystemExit("Corpus manifest does not match the recipe MT-standard profile")
+    if (
+        corpus_manifest.get("pipeline_config", {}).get("sha256")
+        != sha256_file(CORPUS_PIPELINE_CONFIG)
+    ):
+        raise SystemExit("Corpus manifest does not match the current pipeline configuration")
     if not manifest_contains_hash(corpus_manifest, input_hash):
         raise SystemExit(
             "Training CSV checksum is absent from the corpus build manifest"
@@ -565,6 +570,24 @@ def build_run_contract(args, profile: dict) -> dict:
         raise SystemExit(
             "Corpus validation report does not match the training CSV"
         )
+    split_validation = validation.get("split_validation", {})
+    expected_split_policy = profile["splits"]
+    expected_minimums = {
+        "test": expected_split_policy["test_ratio"],
+        "validate": expected_split_policy["validate_ratio"],
+        "min_test_rows": expected_split_policy["min_test_rows"],
+        "min_validate_rows": expected_split_policy["min_validate_rows"],
+    }
+    if (
+        validation.get("profile", {}).get("sha256")
+        != expected_profile["sha256"]
+        or split_validation.get("minimum_ratios") != expected_minimums
+        or split_validation.get("ngram_jaccard_threshold")
+        != expected_split_policy["character_ngram_jaccard_threshold"]
+        or split_validation.get("source_ratio_tolerance")
+        != expected_split_policy["source_ratio_tolerance"]
+    ):
+        raise SystemExit("Corpus validation did not use the current experiment split policy")
     if (
         validation.get("provenance_validation", {}).get("mt_standardization")
         != {key: expected_mt_standard[key] for key in ("id", "sha256")}
@@ -574,7 +597,6 @@ def build_run_contract(args, profile: dict) -> dict:
         args.setup_manifest,
         "model setup manifest",
     )
-    expected_profile = profile_record(args.profile)
     setup_inputs = setup.get("inputs")
     if not isinstance(setup_inputs, list):
         setup_inputs = [setup.get("input", {})]
@@ -727,6 +749,11 @@ def main() -> None:
     parser.add_argument("--eval-batch-size", type=int, default=defaults["generation_eval_batch_size"])
     parser.add_argument("--generation-batch-size", type=int, default=defaults["generation_eval_batch_size"])
     parser.add_argument("--validation-beam", type=int, default=defaults["validation_beam"])
+    parser.add_argument(
+        "--validation-metadata-mode",
+        choices=["default", "oracle"],
+        default=defaults["validation_metadata_mode"],
+    )
     parser.add_argument("--validation-max-new-tokens", type=int, default=256)
     parser.add_argument(
         "--best-metric",

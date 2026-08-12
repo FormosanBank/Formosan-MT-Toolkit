@@ -38,6 +38,7 @@ ACTIVE_EXPERIMENT_FILES = (
 )
 
 ACTIVE_REPOSITORY_FILES = (
+    "config/corpus_pipeline.json",
     "config/mt_standardization.json",
     "scripts/local/corpus_quality.py",
     "scripts/local/mt_standardization.py",

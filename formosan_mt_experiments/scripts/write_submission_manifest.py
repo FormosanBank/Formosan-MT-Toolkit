@@ -28,36 +28,56 @@ def build_job_graph(
     job_ids: dict[str, int],
     model_family: str = "nllb",
 ) -> dict[str, Any]:
-    required = {"validate_en", "validate_zh"}
-    for direction in DIRECTIONS:
-        required.update(
-            {
-                f"train_{direction}",
-                f"eval_{direction}_final",
-                f"eval_{direction}_best",
-            }
-        )
+    if model_family not in {"nllb", "madlad400"}:
+        raise ValueError(f"Unsupported model family: {model_family}")
+    required = {
+        "validate_en",
+        "validate_zh",
+        *(f"train_{direction}" for direction in DIRECTIONS),
+    }
     missing = sorted(required - job_ids.keys())
     if missing:
         raise ValueError(f"Submission state is incomplete; missing: {', '.join(missing)}")
 
     graph: dict[str, Any] = {
-        "validate_en": job_ids["validate_en"],
-        "validate_zh": job_ids["validate_zh"],
+        "validation": {
+            "english": job_ids["validate_en"],
+            "chinese": job_ids["validate_zh"],
+        },
+        "setup": {},
+        "directions": {},
     }
     if model_family == "madlad400":
-        graph["setup_shared"] = job_ids.get("setup_madlad400")
-    elif model_family == "nllb":
-        graph["setup_en"] = job_ids.get("setup_en_spm8192")
-        graph["setup_zh"] = job_ids.get("setup_zh_spm8192")
+        if "setup_madlad400" in job_ids:
+            graph["setup"]["shared"] = job_ids["setup_madlad400"]
     else:
-        raise ValueError(f"Unsupported model family: {model_family}")
+        for language, label in (
+            ("english", "setup_en_spm8192"),
+            ("chinese", "setup_zh_spm8192"),
+        ):
+            if label in job_ids:
+                graph["setup"][language] = job_ids[label]
+
     for direction in DIRECTIONS:
-        graph[direction] = [
-            job_ids[f"train_{direction}"],
-            job_ids[f"eval_{direction}_final"],
-            job_ids[f"eval_{direction}_best"],
-        ]
+        evaluations = {
+            checkpoint: job_ids[label]
+            for checkpoint in ("best", "final")
+            if (label := f"eval_{direction}_{checkpoint}") in job_ids
+        }
+        if not evaluations:
+            raise ValueError(
+                f"Submission state has no evaluation for direction {direction}"
+            )
+        bootstrap = {
+            checkpoint: job_ids[label]
+            for checkpoint in evaluations
+            if (label := f"bootstrap_{direction}_{checkpoint}") in job_ids
+        }
+        graph["directions"][direction] = {
+            "train": job_ids[f"train_{direction}"],
+            "evaluations": evaluations,
+            "bootstrap": bootstrap,
+        }
     return graph
 
 
@@ -115,7 +135,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         profile.get("model_family") or "nllb"
     ).strip().lower()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "experiment_id": (
             f"{profile['recipe_id']}_{args.corpus_name}_{args.run_stamp}"

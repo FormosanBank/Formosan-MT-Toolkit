@@ -31,7 +31,12 @@ from build_experiment_splits import (  # noqa: E402
     split_targets,
 )
 from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E402
-from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
+from experiment_config import (  # noqa: E402
+    DEFAULT_PROFILE,
+    SHARED_SPLIT_FIELDS,
+    load_corpus_pipeline_config,
+    load_profile,
+)
 from formosan_mt_inference import normalize_formosan  # noqa: E402
 from model_backends import get_backend, normalize_control_metadata  # noqa: E402
 from mt_common import (  # noqa: E402
@@ -1041,7 +1046,32 @@ class TokenizerSetupTests(unittest.TestCase):
             ["formosan_sentence"],
         )
         self.assertEqual(profile["splits"]["tiers"], ["in_domain_hard"])
+        self.assertEqual(
+            profile["training_defaults"]["validation_metadata_mode"],
+            "default",
+        )
         self.assertEqual(len(profile["base_model"]["revision"]), 40)
+
+    def test_experiment_profiles_match_canonical_split_policy(self) -> None:
+        pipeline_splits = load_corpus_pipeline_config()["splits"]
+        for profile_path in (
+            DEFAULT_PROFILE,
+            ROOT / "formosan_mt_experiments/configs/madlad400_3b_native.json",
+        ):
+            profile_splits = load_profile(profile_path)["splits"]
+            self.assertEqual(
+                {field: profile_splits[field] for field in SHARED_SPLIT_FIELDS},
+                {field: pipeline_splits[field] for field in SHARED_SPLIT_FIELDS},
+            )
+
+    def test_experiment_profile_rejects_split_policy_drift(self) -> None:
+        profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+        profile["splits"]["test_ratio"] = 0.05
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "split policies differ"):
+                load_profile(path)
 
     def test_madlad_profile_uses_native_train_only_tokenizer(self) -> None:
         profile = load_profile(
@@ -1414,6 +1444,7 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn("config/mt_standardization.json", repository_paths)
+        self.assertIn("config/corpus_pipeline.json", repository_paths)
         self.assertIn("scripts/local/corpus_quality.py", repository_paths)
         self.assertIn("scripts/local/mt_standardization.py", repository_paths)
         self.assertIn(
@@ -1521,7 +1552,7 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertEqual(output["profile"]["path"], "training_profile.json")
         self.assertEqual(metrics["input"], "/projects/private.csv")
 
-    def test_submission_graph_requires_complete_directional_chain(self) -> None:
+    def test_submission_graph_records_available_evaluations(self) -> None:
         job_ids = {
             "validate_en": 1,
             "validate_zh": 2,
@@ -1539,8 +1570,30 @@ class ExperimentManifestTests(unittest.TestCase):
                 next_id += 1
 
         graph = build_job_graph(job_ids)
-        self.assertEqual(graph["f2en"], [5, 6, 7])
-        self.assertEqual(len({job for chain in graph.values() for job in (chain if isinstance(chain, list) else [chain])}), 16)
+        self.assertEqual(
+            graph["directions"]["f2en"],
+            {
+                "train": 5,
+                "evaluations": {"best": 7, "final": 6},
+                "bootstrap": {},
+            },
+        )
+
+    def test_submission_graph_accepts_default_best_only_flight(self) -> None:
+        job_ids = {"validate_en": 1, "validate_zh": 2}
+        next_id = 3
+        for direction in ("f2en", "en2f", "f2zh", "zh2f"):
+            job_ids[f"train_{direction}"] = next_id
+            job_ids[f"eval_{direction}_best"] = next_id + 1
+            next_id += 2
+
+        graph = build_job_graph(job_ids)
+
+        self.assertEqual(
+            graph["directions"]["zh2f"]["evaluations"],
+            {"best": 10},
+        )
+        self.assertEqual(graph["setup"], {})
 
     def test_madlad_submission_graph_uses_one_shared_setup(self) -> None:
         job_ids = {
@@ -1558,8 +1611,7 @@ class ExperimentManifestTests(unittest.TestCase):
                 job_ids[label] = next_id
                 next_id += 1
         graph = build_job_graph(job_ids, model_family="madlad400")
-        self.assertEqual(graph["setup_shared"], 3)
-        self.assertNotIn("setup_en", graph)
+        self.assertEqual(graph["setup"], {"shared": 3})
 
     def test_submission_state_rejects_non_numeric_job_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

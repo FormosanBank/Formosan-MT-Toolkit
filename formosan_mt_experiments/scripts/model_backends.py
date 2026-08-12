@@ -15,6 +15,7 @@ from mt_common import (
     get_lid,
     is_formosan_to_target,
     safe_tag_value,
+    source_bucket,
     target_language_from_direction,
     target_lid_for,
 )
@@ -126,8 +127,20 @@ def ensure_source_prefix_tokens(
     target_lang: str,
     use_tags: bool,
 ) -> None:
+    metadata = pd.DataFrame(index=frame.index)
+    metadata["lang_code"] = frame["lang_code"].astype(str)
+    metadata["source_bucket"] = (
+        frame["source_bucket"].astype(str)
+        if "source_bucket" in frame
+        else frame["source"].map(source_bucket)
+    )
+    metadata["dialect"] = (
+        frame["dialect"].astype(str)
+        if "dialect" in frame
+        else "default"
+    )
     needed: set[str] = set()
-    for _, row in frame.iterrows():
+    for row in metadata.drop_duplicates().to_dict(orient="records"):
         needed.update(
             backend.source_prefix(
                 row,

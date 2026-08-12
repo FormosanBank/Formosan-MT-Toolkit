@@ -34,15 +34,11 @@ case "${TARGET_LANG}" in
     TARGET_COL="${TARGET_COL:-english_sentence}"
     FILE_SHORT="en"
     DEFAULT_DIRECTION="f2en"
-    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_spm8192"
-    DEFAULT_VOCAB="8192"
     ;;
   chinese)
     TARGET_COL="${TARGET_COL:-chinese_sentence}"
     FILE_SHORT="zh"
     DEFAULT_DIRECTION="f2zh"
-    DEFAULT_TOKEN_DIR="${SCRATCH}/formosan_mt_experiments/data/tokenizer_sweep_zh_spm8192"
-    DEFAULT_VOCAB="8192"
     ;;
   *)
     echo "Unsupported TARGET_LANG=${TARGET_LANG}" >&2
@@ -59,13 +55,13 @@ else
   DEFAULT_INPUT="${CORPUS_DIR}/splits_${FILE_SHORT}_v1/big_corpus_${FILE_SHORT}_${TIER}.csv"
 fi
 INPUT="${INPUT:-${DEFAULT_INPUT}}"
-TOKENIZER="${TOKENIZER:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_tokenizer}"
-MODEL="${MODEL:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_model}"
-SETUP_MANIFEST="${SETUP_MANIFEST:-${DEFAULT_TOKEN_DIR}/formosan_multilingual_nllb_spm${DEFAULT_VOCAB}_setup_manifest.json}"
+TOKENIZER="${TOKENIZER:?Set TOKENIZER to the prepared tokenizer directory}"
+MODEL="${MODEL:?Set MODEL to the prepared base model directory}"
+SETUP_MANIFEST="${SETUP_MANIFEST:?Set SETUP_MANIFEST to the setup manifest}"
 CORPUS_MANIFEST="${CORPUS_MANIFEST:-${CORPUS_DIR}/provenance/mt_build_manifest.json}"
 VALIDATION_REPORT="${VALIDATION_REPORT:-${CORPUS_DIR}/provenance/validate_${FILE_SHORT}_${TIER}_runtime.json}"
 PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
-OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/v1_spm8192_${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
+OUT_DIR="${OUT_DIR:-${SCRATCH}/formosan_mt_experiments/runs/${TIER}_${DIRECTION}_$(date +%Y%m%d-%H%M%S)}"
 
 mkdir -p "${OUT_DIR}"
 nvidia-smi || true
@@ -106,6 +102,7 @@ add_override EVAL_SAMPLES --eval-samples
 add_override EVAL_BATCH_SIZE --eval-batch-size
 add_override GENERATION_BATCH_SIZE --generation-batch-size
 add_override VALIDATION_BEAM --validation-beam
+add_override VALIDATION_METADATA_MODE --validation-metadata-mode
 add_override VALIDATION_MAX_NEW_TOKENS --validation-max-new-tokens
 add_override BEST_METRIC --best-metric
 add_override EARLY_STOPPING_PATIENCE --early-stopping-patience

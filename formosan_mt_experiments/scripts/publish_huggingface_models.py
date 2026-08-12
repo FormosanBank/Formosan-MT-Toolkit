@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from experiment_config import load_profile, profile_record, sha256_file
-from mt_common import DOMAIN_BUCKETS
+from mt_common import CODE_TO_LID, DOMAIN_BUCKETS, FORMOSAN_CODES
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = EXPERIMENT_ROOT.parent
@@ -37,41 +37,7 @@ DIRECTIONS = {
     "zh2f": Direction("zh2f", "Traditional Chinese to Formosan", "chinese", "他回家了。"),
 }
 
-FORMOSAN_CODES = (
-    "ami",
-    "bnn",
-    "ckv",
-    "dru",
-    "pwn",
-    "pyu",
-    "ssf",
-    "sxr",
-    "szy",
-    "tao",
-    "tay",
-    "trv",
-    "tsu",
-    "xnb",
-    "xsy",
-)
-
-NLLB_LIDS = {
-    "ami": "ami_Latn",
-    "bnn": "bnn_Latn",
-    "ckv": "ckv_Latn",
-    "dru": "dru_Latn",
-    "pwn": "pwn_Latn",
-    "pyu": "pyu_Latn",
-    "ssf": "ssf_Latn",
-    "sxr": "sxr_Latn",
-    "szy": "szy_Latn",
-    "tao": "tao_Latn",
-    "tay": "tay_Latn",
-    "trv": "trv_Latn",
-    "tsu": "tsu_Latn",
-    "xnb": "xnb_Latn",
-    "xsy": "xsy_Latn",
-}
+NLLB_LIDS = {code: CODE_TO_LID[code] for code in FORMOSAN_CODES}
 
 NLLB_REPOS = {
     "f2en": "nllb200-formosan-en-spm8k",
