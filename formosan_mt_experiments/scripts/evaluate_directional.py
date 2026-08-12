@@ -534,8 +534,7 @@ def main() -> None:
     contract = validate_evaluation_contract(args, profile)
 
     full = read_parallel_csv(args.input, target_col=args.target_col)
-    if "source_bucket" not in full:
-        full["source_bucket"] = full["source"].map(source_bucket)
+    full["source_bucket"] = full["source"].map(source_bucket)
     if "source_corpus" not in full:
         full["source_corpus"] = full["source"].map(source_corpus)
     if (

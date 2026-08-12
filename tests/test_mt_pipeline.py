@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -36,7 +37,9 @@ from model_backends import get_backend, normalize_control_metadata  # noqa: E402
 from mt_common import (  # noqa: E402
     add_normalized_columns,
     evaluation_candidate_mask,
+    source_bucket,
     source_corpus,
+    special_tokens_from_corpus,
 )
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from mt_standardization import (  # noqa: E402
@@ -59,7 +62,7 @@ from publish_huggingface_models import (  # noqa: E402
 )
 from setup_formosan_madlad400 import resize_and_initialize  # noqa: E402
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
-from train_directional import metric_improved  # noqa: E402
+from train_directional import metric_improved, training_source_texts  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
 from transformers import T5Config, T5ForConditionalGeneration  # noqa: E402
 from validate_experiment import (  # noqa: E402
@@ -236,14 +239,14 @@ class ModelBackendTests(unittest.TestCase):
         backend = get_backend("madlad400")
         row = {
             "lang_code": "ami",
-            "source_bucket": "ntu",
+            "source_bucket": "narrative",
             "dialect": "Coastal",
         }
         expected = {
-            ("f2en", "english"): "<2en> <to_eng> <src_ami> <dom_ntu> <dialect_coastal>",
-            ("en2f", "english"): "<2ami> <to_ami> <src_eng> <dom_ntu> <dialect_coastal>",
-            ("f2zh", "chinese"): "<2zh_Hant> <to_zh> <src_ami> <dom_ntu> <dialect_coastal>",
-            ("zh2f", "chinese"): "<2ami> <to_ami> <src_zh> <dom_ntu> <dialect_coastal>",
+            ("f2en", "english"): "<2en> <to_eng> <src_ami> <dom_narrative> <dialect_coastal>",
+            ("en2f", "english"): "<2ami> <to_ami> <src_eng> <dom_narrative> <dialect_coastal>",
+            ("f2zh", "chinese"): "<2zh_Hant> <to_zh> <src_ami> <dom_narrative> <dialect_coastal>",
+            ("zh2f", "chinese"): "<2ami> <to_ami> <src_zh> <dom_narrative> <dialect_coastal>",
         }
         for (direction, target_lang), prefix in expected.items():
             self.assertEqual(
@@ -314,14 +317,14 @@ class ModelBackendTests(unittest.TestCase):
         tokenizer.vocab.update(
             {
                 "<dom_unknown>": len(tokenizer.vocab),
-                "<dom_ntu>": len(tokenizer.vocab) + 1,
+                "<dom_narrative>": len(tokenizer.vocab) + 1,
                 "<dialect_default>": len(tokenizer.vocab) + 2,
                 "<dialect_coastal>": len(tokenizer.vocab) + 3,
             }
         )
         frame = pd.DataFrame(
             {
-                "source_bucket": ["ntu", "held_out_source", None],
+                "source_bucket": ["narrative", "held_out_source", None],
                 "dialect": ["Coastal", "Held Out", ""],
             }
         )
@@ -331,7 +334,7 @@ class ModelBackendTests(unittest.TestCase):
         )
         self.assertEqual(
             normalized["source_bucket"].tolist(),
-            ["ntu", "unknown", "unknown"],
+            ["narrative", "unknown", "unknown"],
         )
         self.assertEqual(
             normalized["dialect"].tolist(),
@@ -344,6 +347,42 @@ class ModelBackendTests(unittest.TestCase):
                 "dialect_fallback_rows": 1,
             },
         )
+
+    def test_training_metadata_dropout_builds_default_control_paths(self) -> None:
+        batch = pd.DataFrame(
+            {
+                "lang_code": ["ami", "ami"],
+                "source_bucket": ["narrative", "culture"],
+                "dialect": ["Coastal", "Coastal"],
+                "formosan_sentence": ["mako ko loma niyam.", "mako ko loma nira."],
+                "english_sentence": ["This is our house.", "This is their house."],
+            }
+        )
+        args = SimpleNamespace(
+            use_tags=True,
+            domain_tag_dropout=0.5,
+            dialect_tag_dropout=0.5,
+            direction="f2en",
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        with mock.patch(
+            "train_directional.np.random.random",
+            side_effect=[np.array([0.1, 0.9]), np.array([0.9, 0.1])],
+        ):
+            texts, counts = training_source_texts(
+                batch,
+                backend=get_backend("nllb"),
+                args=args,
+            )
+        self.assertEqual(
+            texts,
+            [
+                "<to_eng> <src_ami> <dom_unknown> <dialect_coastal> mako ko loma niyam.",
+                "<to_eng> <src_ami> <dom_culture> <dialect_default> mako ko loma nira.",
+            ],
+        )
+        self.assertEqual(counts, {"domain": 1, "dialect": 1})
 
     def test_madlad_resize_updates_untied_input_and_output_vocab(self) -> None:
         tokenizer = FakeTokenizer()
@@ -373,6 +412,29 @@ class ModelBackendTests(unittest.TestCase):
 
 
 class LeakageTests(unittest.TestCase):
+    def test_source_bucket_uses_only_coarse_domains(self) -> None:
+        self.assertEqual(
+            source_bucket(
+                "FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"
+            ),
+            "narrative",
+        )
+        self.assertEqual(
+            source_bucket(
+                "Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"
+            ),
+            "linguistic",
+        )
+        self.assertEqual(
+            source_bucket("Formosan-Glosbe/Final_XML/Amis/entries.xml"),
+            "dictionary",
+        )
+        tokens = special_tokens_from_corpus(
+            pd.DataFrame({"source_bucket": ["Formosan-Zheng-ACL-2024"]})
+        )
+        self.assertNotIn("<dom_formosan_zheng_acl_2024>", tokens)
+        self.assertIn("<dom_unknown>", tokens)
+
     def test_source_corpus_preserves_exact_public_and_private_identity(self) -> None:
         self.assertEqual(
             source_corpus(
@@ -1352,6 +1414,7 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn("config/mt_standardization.json", repository_paths)
+        self.assertIn("scripts/local/corpus_quality.py", repository_paths)
         self.assertIn("scripts/local/mt_standardization.py", repository_paths)
         self.assertIn(
             "formosan_mt_experiments/slurm/train_directional.sl",

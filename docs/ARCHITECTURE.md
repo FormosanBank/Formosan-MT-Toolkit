@@ -122,6 +122,12 @@ backs off on transient errors, and writes each successful response immediately
 to a content-keyed JSONL cache. Rebuilds read shared and build-local caches
 before spending quota.
 
+Only structurally typed, MT-eligible sentence rows enter pivoting. Known
+lexical sources, ambiguous standards, gloss targets, and rows below the
+four-unit Formosan or pivot-source floor are excluded before cache lookup or
+billing. Existing cache entries remain reusable but are joined only for rows
+that still satisfy this policy.
+
 Pivot rows retain provider, direction, source text, origin, cache key, detected
 language, and inherited XML provenance. Responses pass the same script,
 identity, repetition, placeholder, and fertility checks as human rows.
@@ -163,8 +169,9 @@ one XML file; treating that file as an indivisible split unit would recreate the
 source imbalance this stage prevents.
 
 `source_corpus` records the exact public corpus root or private repository used
-for split allocation. `source_bucket` remains the coarser domain control used by
-sampling and model tags.
+for split allocation. It is never a model tag. `source_bucket` is restricted to
+the fixed domains `dictionary`, `classroom`, `narrative`, `linguistic`,
+`education`, `media`, `culture`, `religious`, and `unknown`.
 
 ### 8. Independent Validation
 
@@ -208,15 +215,15 @@ weakening any QC, split, validation, or exposure gate.
 8k SPM from V3 MT-standard Formosan training text only. They load a pinned
 NLLB-200 revision, realign every shared embedding by token identity after the
 SentencePiece ID shift, initialize new pieces from old subpieces, seed new
-Formosan language IDs, add train-derived metadata tags, and hash every setup
-artifact.
+Formosan language IDs, add fixed domain and train-derived dialect tags, and hash
+every setup artifact.
 
 `train_directional.py` verifies the corpus, independent validation, setup,
 profile, and file hashes before training. It trains one direction per
 checkpoint with source-bucket weighting and language-temperature sampling,
-performs fixed human per-language generation validation, selects best by
-chrF2, supports early stopping, and binds every resume/checkpoint to an
-immutable run contract.
+applies independent 25% domain and dialect metadata dropout, performs fixed
+human per-language generation validation, selects best by chrF2, supports early
+stopping, and binds every resume/checkpoint to an immutable run contract.
 
 `evaluate_directional.py` evaluates the entire human test split. Default
 metadata tags are the headline score; oracle source/dialect tags are a separate

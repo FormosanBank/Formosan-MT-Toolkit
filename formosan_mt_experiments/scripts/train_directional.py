@@ -73,14 +73,7 @@ def prepare_data(
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
     df["split"] = df["split"].astype(str).str.lower()
-    if "source_bucket" not in df.columns:
-        df["source_bucket"] = df["source"].map(source_bucket)
-    else:
-        df["source_bucket"] = (
-            df["source_bucket"]
-            .astype(str)
-            .replace("", "unknown")
-        )
+    df["source_bucket"] = df["source"].map(source_bucket)
     if "kindOf" not in df or not df["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Training CSV must contain only kindOf=standard rows")
     if "row_id" not in df or df["row_id"].astype(str).duplicated().any():
@@ -111,14 +104,21 @@ def prepare_data(
         "domain_fallback_rows": 0,
         "dialect_fallback_rows": 0,
     }
+    training_metadata_fallback = {
+        "domain_fallback_rows": 0,
+        "dialect_fallback_rows": 0,
+    }
     if args.use_tags:
+        train, training_metadata_fallback = normalize_control_metadata(
+            train,
+            tokenizer,
+            mode="oracle",
+        )
         val, validation_metadata_fallback = normalize_control_metadata(
             val,
             tokenizer,
             mode="oracle",
         )
-    working = pd.concat([train, val]).sort_index()
-
     if args.use_tags and args.validate_tags:
         ensure_source_prefix_tokens(
             backend,
@@ -136,8 +136,8 @@ def prepare_data(
             target_lang=args.target_lang,
             use_tags=args.use_tags,
         )
-    working = with_tagged_columns(
-        working,
+    tagged_val = with_tagged_columns(
+        val,
         args.direction,
         target_col=args.target_col,
         target_lang=args.target_lang,
@@ -150,8 +150,7 @@ def prepare_data(
         ),
     )
 
-    train = working[working["split"].eq("train")].copy()
-    val = working[working["split"].isin(["validate", "valid", "val"])].copy()
+    val = tagged_val.copy()
     pivot_origin = val.get(
         "pivot_origin",
         pd.Series("original", index=val.index),
@@ -205,6 +204,9 @@ def prepare_data(
         "use_tags": bool(args.use_tags),
         "standard_rows": int(df["kindOf"].astype(str).str.lower().eq("standard").sum()),
         "validation_metadata_fallback": validation_metadata_fallback,
+        "training_metadata_fallback": training_metadata_fallback,
+        "domain_tag_dropout": float(args.domain_tag_dropout),
+        "dialect_tag_dropout": float(args.dialect_tag_dropout),
         "synthetic_train_rows": int(
             train.get(
                 "pivot_origin",
@@ -261,6 +263,47 @@ def row_probabilities(df: pd.DataFrame, easy_source_weight: float) -> np.ndarray
         weights[easy] = easy_source_weight
     weights = np.maximum(weights, 1e-8)
     return weights / weights.sum()
+
+
+def training_source_texts(
+    batch: pd.DataFrame,
+    *,
+    backend: ModelBackend,
+    args,
+) -> tuple[list[str], dict[str, int]]:
+    """Build training inputs with independent, reproducible metadata dropout."""
+    work = batch.copy()
+    if args.use_tags:
+        domain_mask = np.random.random(len(work)) < args.domain_tag_dropout
+        dialect_mask = np.random.random(len(work)) < args.dialect_tag_dropout
+        work.loc[domain_mask, "source_bucket"] = "unknown"
+        work.loc[dialect_mask, "dialect"] = "default"
+    else:
+        domain_mask = np.zeros(len(work), dtype=bool)
+        dialect_mask = np.zeros(len(work), dtype=bool)
+
+    tagged = with_tagged_columns(
+        work,
+        args.direction,
+        target_col=args.target_col,
+        target_lang=args.target_lang,
+        use_tags=args.use_tags,
+        prefix_builder=lambda row: backend.source_prefix(
+            row,
+            args.direction,
+            target_lang=args.target_lang,
+            use_tags=args.use_tags,
+        ),
+    )
+    source_column = (
+        "formosan_sentence"
+        if is_formosan_to_target(args.direction)
+        else args.target_col
+    )
+    return tagged[source_column].astype(str).tolist(), {
+        "domain": int(domain_mask.sum()),
+        "dialect": int(dialect_mask.sum()),
+    }
 
 
 @torch.no_grad()
@@ -654,6 +697,16 @@ def main() -> None:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--alpha", type=float, default=defaults["alpha"], help="Language sampling exponent p(lang) ∝ n^alpha.")
     parser.add_argument("--easy-source-weight", type=float, default=None)
+    parser.add_argument(
+        "--domain-tag-dropout",
+        type=float,
+        default=defaults["domain_tag_dropout"],
+    )
+    parser.add_argument(
+        "--dialect-tag-dropout",
+        type=float,
+        default=defaults["dialect_tag_dropout"],
+    )
     parser.add_argument("--label-smoothing", type=float, default=defaults["label_smoothing"])
     parser.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default=defaults["precision"])
     parser.add_argument(
@@ -707,6 +760,9 @@ def main() -> None:
         raise SystemExit("--eval-samples must be positive; use a bounded, fixed validation sample per language.")
     if args.early_stopping_patience < 0:
         raise SystemExit("--early-stopping-patience cannot be negative.")
+    for name in ("domain_tag_dropout", "dialect_tag_dropout"):
+        if not 0.0 <= getattr(args, name) <= 1.0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 1.")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -821,6 +877,7 @@ def main() -> None:
         print(f"[resume] checkpoint={resume_path} next_step={start_step}")
     running_loss = []
     interval_tokens = 0
+    interval_metadata_dropout = {"domain": 0, "dialect": 0}
     interval_started = time.monotonic()
     actual_step = start_step - 1
     stopped_early = False
@@ -844,10 +901,17 @@ def main() -> None:
             df = info["df"]
             sampled = np.random.choice(len(df), size=args.batch_size, replace=True, p=row_probs[lang])
             batch = df.iloc[sampled]
+            source_texts, dropout_counts = training_source_texts(
+                batch,
+                backend=backend,
+                args=args,
+            )
+            for name, count in dropout_counts.items():
+                interval_metadata_dropout[name] += count
             enc, labels = encode_batch(
                 backend,
                 tokenizer,
-                batch["src_text"].tolist(),
+                source_texts,
                 batch["tgt_text"].tolist(),
                 info["task"],
                 args.max_length,
@@ -901,6 +965,7 @@ def main() -> None:
                 "tokens_per_second": float(interval_tokens / elapsed),
                 "updates_per_second": float(args.log_interval / elapsed),
                 "elapsed_seconds": float(elapsed),
+                "metadata_dropout_rows": dict(interval_metadata_dropout),
                 "cuda_max_memory_gb": float(torch.cuda.max_memory_allocated() / 2**30) if device.type == "cuda" else 0.0,
             }
             train_log.write(json.dumps(record) + "\n")
@@ -908,6 +973,7 @@ def main() -> None:
             print(json.dumps({"event": "train", **record}), flush=True)
             running_loss.clear()
             interval_tokens = 0
+            interval_metadata_dropout = {"domain": 0, "dialect": 0}
             interval_started = time.monotonic()
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats()

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from experiment_config import load_profile, profile_record, sha256_file
+from mt_common import DOMAIN_BUCKETS
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = EXPERIMENT_ROOT.parent
@@ -175,9 +176,15 @@ NLLB_LIDS = {NLLB_LIDS!r}
 def translate(text, lang_code, source_bucket="unknown", dialect="default"):
 {normalization_line.rstrip()}
     tokenizer.src_lang = {source_lid}
+    source_bucket = source_bucket if source_bucket in {DOMAIN_BUCKETS!r} else "unknown"
+    domain_tag = f"<dom_{{source_bucket}}>"
+    if tokenizer.convert_tokens_to_ids(domain_tag) == tokenizer.unk_token_id:
+        domain_tag = "<dom_unknown>"
+    dialect_tag = f"<dialect_{{dialect}}>"
+    if tokenizer.convert_tokens_to_ids(dialect_tag) == tokenizer.unk_token_id:
+        dialect_tag = "<dialect_default>"
     prompt = (
-        f"{prefix} <dom_{{source_bucket}}> "
-        f"<dialect_{{dialect}}> {{text}}"
+        f"{prefix} {{domain_tag}} {{dialect_tag}} {{text}}"
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     output = model.generate(
@@ -228,9 +235,15 @@ model.to("cuda" if torch.cuda.is_available() else "cpu")
 def translate(text, lang_code, source_bucket="unknown", dialect="default"):
 {normalization_line.rstrip()}
     target = {selector}
+    source_bucket = source_bucket if source_bucket in {DOMAIN_BUCKETS!r} else "unknown"
+    domain_tag = f"<dom_{{source_bucket}}>"
+    if tokenizer.convert_tokens_to_ids(domain_tag) == tokenizer.unk_token_id:
+        domain_tag = "<dom_unknown>"
+    dialect_tag = f"<dialect_{{dialect}}>"
+    if tokenizer.convert_tokens_to_ids(dialect_tag) == tokenizer.unk_token_id:
+        dialect_tag = "<dialect_default>"
     prompt = (
-        f"{{target}} {controls} <dom_{{source_bucket}}> "
-        f"<dialect_{{dialect}}> {{text}}"
+        f"{{target}} {controls} {{domain_tag}} {{dialect_tag}} {{text}}"
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     output = model.generate(
@@ -368,7 +381,9 @@ model-index:
 
 This is a directional model for 15 Formosan languages. It uses the
 `private_no_bible` leakage-controlled corpus, {tokenizer_note}, balanced
-language/source sampling, and direction/domain/dialect control tags. The model
+language/source sampling, direction/language controls, fixed coarse domain
+tags, and dialect tags. Domain and dialect metadata use independent training
+dropout so `unknown` and `default` are learned inference conditions. The model
 weights are public, but the private training corpus is not included.
 
 ## Model details

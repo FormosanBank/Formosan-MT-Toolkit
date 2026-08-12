@@ -91,6 +91,11 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         raise SystemExit(
             "Auxiliary SPM must be trained only on Formosan training text"
         )
+    training = profile.get("training_defaults", {})
+    for name in ("domain_tag_dropout", "dialect_tag_dropout"):
+        value = training.get(name)
+        if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
+            raise SystemExit(f"Experiment profile has invalid {name}")
     return profile
 
 

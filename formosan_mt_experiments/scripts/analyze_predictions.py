@@ -55,7 +55,7 @@ def main() -> None:
     args = parser.parse_args()
 
     df = pd.read_csv(args.predictions, low_memory=False)
-    if "source_bucket" not in df.columns and "source" in df.columns:
+    if "source" in df.columns:
         df["source_bucket"] = df["source"].map(source_bucket)
     if "src_tokens" not in df.columns:
         src_col = "src" if "src" in df.columns else ("src_formosan" if args.direction == "f2en" else "ref_en")

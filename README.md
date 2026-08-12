@@ -100,7 +100,8 @@ Production builds fail unless all of these conditions hold:
 - malformed, missing, rejected, quarantined, and deduplicated rows are logged;
 - explicit interlinear gloss targets and high-confidence annotation-bearing target
   structures are excluded from model corpora;
-- DeepL completion is explicit and every provider response is validated;
+- DeepL is limited to MT-eligible sentence rows with at least four Formosan and
+  pivot-source units; completion is explicit and every response is validated;
 - lexemes, morphemes, lexical source corpora, and short lexical-like rows are
   training-only;
 - each language/source corpus contributes roughly 90% of its eligible sentence
@@ -130,7 +131,10 @@ The `formosan_mt_experiments/` package trains four unidirectional models:
 The NLLB profile uses the established 8k Formosan SentencePiece extension.
 The MADLAD profile retains its native tokenizer and adds target and metadata
 control tokens. Both use the same corpus validation, balanced sampling,
-metrics, run contracts, checkpointing, and evaluation code.
+metrics, run contracts, checkpointing, and evaluation code. Prefixes put
+direction and language first, use a fixed coarse domain vocabulary, and apply
+25% independent domain/dialect dropout during training so unknown/default tags
+are learned conditions.
 
 On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
 shared data root and submit from `formosan_mt_experiments/`:

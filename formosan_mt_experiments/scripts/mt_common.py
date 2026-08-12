@@ -70,8 +70,19 @@ TARGET_CONFIGS = {
     "chinese": {"short": "zh", "tag": "zh", "col": "chinese_sentence", "lid": "zho_Hant"},
 }
 
-EASY_BUCKETS = ("dictionary", "learning_vocab", "classroom_context")
-LEXICAL_SOURCE_BUCKETS = ("dictionary", "learning_vocab")
+DOMAIN_BUCKETS = (
+    "dictionary",
+    "classroom",
+    "narrative",
+    "linguistic",
+    "education",
+    "media",
+    "culture",
+    "religious",
+    "unknown",
+)
+EASY_BUCKETS = ("dictionary", "classroom")
+LEXICAL_SOURCE_BUCKETS = ("dictionary",)
 MT_STANDARD_NAMESPACE = "formosan-mt"
 MT_STANDARD_REQUIRED_COLUMNS = (
     "kindOf",
@@ -84,34 +95,6 @@ MT_STANDARD_REQUIRED_COLUMNS = (
     "mt_standard_profile",
     "mt_standard_profile_sha256",
 )
-
-DEFAULT_DOMAIN_BUCKETS = (
-    "dictionary",
-    "learning_vocab",
-    "classroom_context",
-    "picture_story",
-    "picture_book",
-    "essays",
-    "reading_writing",
-    "culture",
-    "nine_level",
-    "youtube",
-    "ntu",
-    "presidential_apology",
-    "Formosan-100_Paiwan_Texts",
-    "Formosan-Amis_myths_and_customs",
-    "Formosan-ePark",
-    "Formosan-gitbook_translations",
-    "Formosan-Old_Texts",
-    "Formosan-PaiwanStories",
-    "Formosan-Rik-Bunun",
-    "Formosan-SEALS",
-    "Formosan-Wilang-Yutas-Videos",
-    "Formosan-Yeddas-Blog",
-    "Formosan-Zheng-Data",
-    "unknown",
-)
-
 
 def normalize_text(value: object) -> str:
     """NFKC + casefold + whitespace collapse for leakage checks."""
@@ -207,37 +190,45 @@ def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -
 
 
 def source_bucket(source: object) -> str:
-    """Coarse source family used by splitting, sampling, and reporting."""
-    s = "" if pd.isna(source) else str(source)
-    lowered = s.lower()
-    if "xue_xi_ci_biao_learning_vocabulary" in lowered:
-        return "learning_vocab"
-    if "qing_jing_zu_yu_contextual_indigenous_language" in lowered:
-        return "classroom_context"
-    if "dict" in lowered or "dictionary" in lowered:
+    """Map provenance paths to a fixed, repository-independent domain."""
+    lowered = "" if pd.isna(source) else str(source).casefold()
+    if re.search(
+        r"dict(?:ionary|ionaries)?|lexic(?:on|ons|al)?|glossar|glosbe|"
+        r"word.?list|vocab",
+        lowered,
+    ):
         return "dictionary"
-    if "tu_hua_gu_shi_pian_picture_story" in lowered:
-        return "picture_story"
-    if "hui_ben_ping_tai_picture_book_platform" in lowered:
-        return "picture_book"
-    if "zu_yu_duan_wen_indigenous_language_essays" in lowered:
-        return "essays"
-    if "yue_du_shu_xie_pian_reading_writing" in lowered:
-        return "reading_writing"
-    if "wen_hua_pian_cultural_section" in lowered:
+    if re.search(r"contextual|classroom|qing_jing|conversation|dialogue", lowered):
+        return "classroom"
+    if re.search(r"bible|hymn|church|religio", lowered):
+        return "religious"
+    if re.search(r"youtube|video|audio|wilang.yutas", lowered):
+        return "media"
+    if re.search(r"cultur|custom|apolog|president|ceremon|ritual", lowered):
         return "culture"
-    if "jiu_jie_jiao_cai_nine_level_materials" in lowered:
-        return "nine_level"
-    if "youtube" in lowered:
-        return "youtube"
-    if "ntu" in lowered:
-        return "ntu"
-    if "president" in lowered or "apology" in lowered:
-        return "presidential_apology"
-    parts = [part for part in s.replace("\\", "/").split("/") if part]
-    if len(parts) >= 3 and parts[0].lower() == "formosanbank" and parts[1] == "Corpora":
-        return parts[2]
-    return parts[0] if parts else "unknown"
+    if re.search(
+        r"story|stories|(?:^|[/_.-])texts?(?:[/_.-]|$)|picture.?book|"
+        r"myth|blog|narrat|tale|"
+        r"legend|folklore|literary|ode.to|raodong|wakelin|montgomery",
+        lowered,
+    ):
+        return "narrative"
+    if re.search(
+        r"learning|epark|gitbook|essay|reading|writing|nine.level|教材|"
+        r"material|textbook|course|tousvusvutu",
+        lowered,
+    ):
+        return "education"
+    if re.search(
+        r"grammar|grammatical|syntax|linguist|seals|zheng|acl|elicitat|"
+        r"construction|sentence|word.order|negation|relative|causative|voice|"
+        r"phonolog|corpus|dissertation|thesis|descriptive.study|dialect|"
+        r"relationship|classification|topic.focus|complement|comparative|"
+        r"demonstrative|affix|time.reference|social.structure|conjunction",
+        lowered,
+    ):
+        return "linguistic"
+    return "unknown"
 
 
 def source_corpus(source: object) -> str:
@@ -510,7 +501,7 @@ def base_special_tokens() -> list[str]:
         tokens.extend([f"<to_{config['tag']}>", f"<src_{config['tag']}>"])
     for code in FORMOSAN_CODES:
         tokens.extend([f"<to_{code}>", f"<src_{code}>"])
-    for bucket in DEFAULT_DOMAIN_BUCKETS:
+    for bucket in DOMAIN_BUCKETS:
         tokens.append(f"<dom_{safe_tag_value(bucket)}>")
     tokens.append("<dialect_default>")
     return sorted(set(tokens))
@@ -522,15 +513,6 @@ def special_tokens_from_corpus(
     min_dialect_frequency: int = 3,
 ) -> list[str]:
     tokens = set(base_special_tokens())
-    if "source_bucket" in df.columns:
-        buckets = df["source_bucket"]
-    elif "source" in df.columns:
-        buckets = df["source"].map(source_bucket)
-    else:
-        buckets = pd.Series(dtype=str)
-    if not buckets.empty:
-        for bucket in sorted(buckets.dropna().unique()):
-            tokens.add(f"<dom_{safe_tag_value(bucket)}>")
     if "dialect" in df.columns and max_dialect_tags > 0:
         dialects = df["dialect"].map(lambda x: safe_tag_value(x, "default")).value_counts()
         selected = dialects[dialects >= min_dialect_frequency].head(max_dialect_tags)
@@ -542,8 +524,11 @@ def special_tokens_from_corpus(
 def build_prefix(row: Mapping, direction: str, target_lang: str | None = None) -> str:
     code = str(row.get("lang_code", "")).strip().lower()
     bucket = row.get("source_bucket", row.get("_source_bucket", source_bucket(row.get("source", ""))))
+    bucket = safe_tag_value(bucket, "unknown")
+    if bucket not in DOMAIN_BUCKETS:
+        bucket = "unknown"
     dialect = row.get("dialect", "default")
-    domain_tag = f"<dom_{safe_tag_value(bucket)}>"
+    domain_tag = f"<dom_{bucket}>"
     dialect_tag = f"<dialect_{safe_tag_value(dialect)}>"
     if is_formosan_to_target(direction):
         target_tag = target_tag_for(target_language_from_direction(direction, target_lang))

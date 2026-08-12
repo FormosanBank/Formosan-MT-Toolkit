@@ -9,6 +9,7 @@ from typing import Mapping
 
 import pandas as pd
 from mt_common import (
+    DOMAIN_BUCKETS,
     FORMOSAN_CODES,
     build_prefix,
     get_lid,
@@ -85,7 +86,12 @@ def normalize_control_metadata(
             )
         )
 
-    buckets = values("source_bucket", "unknown")
+    raw_buckets = values("source_bucket", "unknown")
+    canonical_buckets = raw_buckets.map(
+        lambda value: safe_tag_value(value, "unknown")
+    )
+    domain_invalid = ~canonical_buckets.isin(DOMAIN_BUCKETS)
+    buckets = canonical_buckets.mask(domain_invalid, "unknown")
     dialects = values("dialect", "default")
     domain_available = {
         value: token_exists(
@@ -101,7 +107,7 @@ def normalize_control_metadata(
         )
         for value in dialects.unique()
     }
-    domain_missing = ~buckets.map(domain_available)
+    domain_missing = domain_invalid | ~buckets.map(domain_available)
     dialect_missing = ~dialects.map(dialect_available)
     output["source_bucket"] = buckets.mask(domain_missing, "unknown")
     output["dialect"] = dialects.mask(dialect_missing, "default")

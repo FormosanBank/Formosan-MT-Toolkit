@@ -158,11 +158,10 @@ def audit_direction(
     config: ScoreConfig,
 ) -> dict[str, object]:
     frame = frame.copy()
-    if "source_bucket" not in frame:
-        frame["source_bucket"] = frame.get(
-            "source",
-            pd.Series("unknown", index=frame.index),
-        ).map(source_bucket)
+    frame["source_bucket"] = frame.get(
+        "source",
+        pd.Series("unknown", index=frame.index),
+    ).map(source_bucket)
     if "source_corpus" not in frame:
         frame["source_corpus"] = frame.get(
             "source",

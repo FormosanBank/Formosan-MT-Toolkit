@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 import unicodedata
 from collections import Counter
 from pathlib import Path
@@ -30,6 +31,10 @@ from mt_common import (
     target_col_for,
     write_json,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
+from corpus_quality import has_annotation_gloss_structure  # noqa: E402
 
 EVAL_SPLITS = {"validate", "valid", "val", "test"}
 REQUIRED_PROVENANCE = {
@@ -459,12 +464,13 @@ def validate_splits(
     require_human_eval: bool = False,
     require_document_holdout: bool = False,
 ) -> dict[str, object]:
+    target_language = (
+        "chinese" if target_col == "chinese_sentence" else "english"
+    )
     normalized = add_normalized_columns(
         frame,
         target_col=target_col,
-        target_lang=(
-            "chinese" if target_col == "chinese_sentence" else "english"
-        ),
+        target_lang=target_language,
     )
     keyed = add_validation_keys(normalized, target_col=target_col)
     if "source_corpus" in keyed.columns:
@@ -519,6 +525,11 @@ def validate_splits(
     )
     gloss_translation_rows = int(
         translation_kind.isin({"gloss", "interlinear-gloss"}).sum()
+    )
+    annotation_gloss_rows = int(
+        keyed[target_col].astype(str).map(has_annotation_gloss_structure).sum()
+        if target_language == "english"
+        else 0
     )
     candidate = evaluation_candidate_mask(
         keyed,
@@ -653,6 +664,7 @@ def validate_splits(
         and non_sentence_eval_rows == 0
         and lexical_like_eval_rows == 0
         and gloss_translation_rows == 0
+        and annotation_gloss_rows == 0
         and duplicate_pairs == 0
         and bool(train_eval["ok"])
         and bool(validate_test["ok"])
@@ -676,6 +688,7 @@ def validate_splits(
         "non_sentence_eval_rows": non_sentence_eval_rows,
         "lexical_like_eval_rows": lexical_like_eval_rows,
         "gloss_translation_rows": gloss_translation_rows,
+        "annotation_gloss_rows": annotation_gloss_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
         "validate_test_cross_language_diagnostic": (
@@ -707,8 +720,7 @@ def validate_tags(
     backend = get_backend(profile)
     tokenizer = backend.load_tokenizer(tokenizer_dir)
     work = frame.copy()
-    if "source_bucket" not in work.columns:
-        work["source_bucket"] = work["source"].map(source_bucket)
+    work["source_bucket"] = work["source"].map(source_bucket)
     tags: set[str] = set()
     for _, row in work.iterrows():
         tags.update(
@@ -882,7 +894,7 @@ def main() -> None:
         "  eval: "
         f"synthetic={split_validation['synthetic_eval_rows']:,}, "
         f"lexical-like={split_validation['lexical_like_eval_rows']:,}, "
-        f"gloss={split_validation['gloss_translation_rows']:,}"
+        f"gloss={split_validation['gloss_translation_rows'] + split_validation['annotation_gloss_rows']:,}"
     )
     print(
         "  train/eval conflicts: "

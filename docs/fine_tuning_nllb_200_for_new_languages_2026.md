@@ -292,7 +292,12 @@ The tags mean:
 - `<dom_unknown>`: broad source/domain label is unknown.
 - `<dialect_default>`: dialect label is unknown or default.
 
-For your own corpus, you can simplify this to only direction and source-language tags. Keep tags short and add them as special tokens.
+Direction and language are the primary controls. Keep domain values coarse and
+fixed; never turn repository names into model tokens. The toolkit uses
+`dictionary`, `classroom`, `narrative`, `linguistic`, `education`, `media`,
+`culture`, `religious`, and `unknown`. During training, replace domain and
+dialect independently with `unknown` and `default` some of the time so default
+inference is a learned condition rather than an unseen prompt.
 
 ```python
 def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -> str:
@@ -304,17 +309,14 @@ def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -
     return text[:max_len].strip("_") or default
 
 def source_bucket(source: object) -> str:
-    s = "" if pd.isna(source) else str(source)
-    s_lower = s.lower()
-    if "dictionary" in s_lower or "dict" in s_lower:
+    source = "" if pd.isna(source) else str(source).lower()
+    if "dictionary" in source or "dict" in source:
         return "dictionary"
-    if "picture_book" in s_lower:
-        return "picture_book"
-    if "picture_story" in s_lower:
-        return "picture_story"
-    if "reading" in s_lower or "writing" in s_lower:
-        return "reading_writing"
-    if "culture" in s_lower:
+    if "story" in source or "picture_book" in source:
+        return "narrative"
+    if "reading" in source or "writing" in source:
+        return "education"
+    if "culture" in source:
         return "culture"
     return "unknown"
 

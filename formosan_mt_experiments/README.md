@@ -137,8 +137,10 @@ those two setup lines to the cluster environment when needed.
 
 Training logs loss, learning rate, gradient norm, throughput, peak CUDA memory,
 validation loss, perplexity, BLEU, chrF2, TER, exact match, empty-output rate,
-and output/reference length ratio. Generation metrics include per-language
-breakdowns.
+output/reference length ratio, and applied metadata-dropout counts. Direction
+and language tags are always retained. Domain and dialect tags independently
+fall back to `unknown` and `default` for 25% of training presentations.
+Generation metrics include per-language breakdowns.
 
 Each generation validation atomically updates `resume/` with model, optimizer,
 scheduler, scaler, random state, and run-contract hash. Successful training

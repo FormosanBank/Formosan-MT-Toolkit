@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "madlad400-3b-native-directional-v2",
+  "recipe_id": "madlad400-3b-native-directional-v3",
   "model_family": "madlad400",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -71,6 +71,8 @@
     "warmup_steps": 1000,
     "weight_decay": 0.001,
     "alpha": 0.5,
+    "domain_tag_dropout": 0.25,
+    "dialect_tag_dropout": 0.25,
     "precision": "bf16",
     "load_dtype": "bf16",
     "gradient_checkpointing": true,
