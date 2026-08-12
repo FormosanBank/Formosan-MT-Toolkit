@@ -48,6 +48,8 @@ from publish_huggingface_models import (  # noqa: E402
     DIRECTIONS,
     madlad_usage,
     nllb_usage,
+    public_metrics,
+    render_card,
     validate_checkpoint,
 )
 from setup_formosan_madlad400 import resize_and_initialize  # noqa: E402
@@ -1178,6 +1180,90 @@ class ExperimentManifestTests(unittest.TestCase):
                 formosan_source,
             )
             self.assertNotIn("normalize_formosan", major_source)
+
+    def test_publication_card_records_release_and_hard_test_contract(self) -> None:
+        profile = {
+            "recipe_id": "nllb200-spm8k-directional-v3",
+            "base_model": {"name": "base/model", "revision": "abc123"},
+            "mt_standardization": {"id": "formosan-mt-standard-v3"},
+            "training_defaults": {
+                "effective_batch_size": 64,
+                "max_length": 384,
+                "learning_rate": 2e-5,
+                "precision": "bf16",
+                "best_metric": "chrF2",
+            },
+        }
+        metrics = {
+            "global": {
+                "BLEU": 9.1,
+                "chrF2": 27.2,
+                "TER": 90.3,
+                "empty_output_rate": 0.0,
+            },
+            "by_language": {
+                "ami": {"samples": 100, "BLEU": 9.1, "chrF2": 27.2, "TER": 90.3}
+            },
+            "headline_metadata_mode": "default",
+            "profile": {"sha256": "b" * 64},
+        }
+        metadata = {
+            "step": 210000,
+            "validation": {
+                "generation": {
+                    "global": {"BLEU": 8.0, "chrF2": 25.0, "TER": 92.0}
+                }
+            },
+        }
+        manifest = {
+            "corpora": {
+                "english": {
+                    "rows": 1000,
+                    "sha256": "a" * 64,
+                    "splits": {"train": 900, "test": 75, "validate": 25},
+                    "validation": {
+                        "exact_overlap": 0,
+                        "skeleton_overlap": 0,
+                        "one_edit_conflicts": 0,
+                        "character_ngram_conflicts": 0,
+                        "document_overlap": 0,
+                    },
+                }
+            }
+        }
+        card = render_card(
+            spec=DIRECTIONS["f2en"],
+            repo_id="FormosanBank/nllb200-formosan-en-spm8k",
+            family="nllb",
+            profile=profile,
+            metrics=metrics,
+            metadata=metadata,
+            manifest=manifest,
+            run_stamp="20260809-210523",
+        )
+        self.assertIn("model-index:", card)
+        self.assertIn("headline result uses `default` metadata", card)
+        self.assertIn("document\ntrain/evaluation conflicts", card)
+        self.assertIn("`20260809-210523`", card)
+        self.assertNotIn("MADLAD selects", card)
+
+    def test_public_metrics_remove_cluster_paths(self) -> None:
+        metrics = {
+            "input": "/projects/private.csv",
+            "model": "/scratch/model",
+            "tokenizer": "/scratch/model",
+            "profile": {"path": "/home/user/profile.json", "sha256": "a" * 64},
+        }
+        output = public_metrics(
+            metrics,
+            repo_id="FormosanBank/model",
+            corpus_name="private_no_bible",
+            target_lang="english",
+        )
+        self.assertEqual(output["input"], "private_no_bible:english")
+        self.assertEqual(output["model"], "FormosanBank/model")
+        self.assertEqual(output["profile"]["path"], "training_profile.json")
+        self.assertEqual(metrics["input"], "/projects/private.csv")
 
     def test_submission_graph_requires_complete_directional_chain(self) -> None:
         job_ids = {

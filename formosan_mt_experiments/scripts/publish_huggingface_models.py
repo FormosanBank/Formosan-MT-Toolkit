@@ -270,6 +270,7 @@ def render_card(
     metrics: dict,
     metadata: dict,
     manifest: dict,
+    run_stamp: str,
 ) -> str:
     global_metrics = metrics["global"]
     corpus = corpus_record(manifest, spec.target_lang)
@@ -289,17 +290,44 @@ def render_card(
     validation = metadata.get("validation", {})
     selected = validation.get("generation", {}).get("global", {})
     base = profile["base_model"]["name"]
+    base_revision = profile["base_model"]["revision"]
     family_tag = "nllb-200" if family == "nllb" else "madlad-400"
     tokenizer_note = (
         "Formosan-aware 8k SentencePiece extension"
         if family == "nllb"
         else "native MADLAD 256k SentencePiece plus Formosan target/control tokens"
     )
+    languages = (*FORMOSAN_CODES, "en" if spec.target_lang == "english" else "zh")
+    language_yaml = "\n".join(f"- {code}" for code in languages)
+    headline_mode = metrics.get("headline_metadata_mode", "default")
+    training = profile["training_defaults"]
+    corpus_validation = corpus["validation"]
+    confidence = metrics.get("bootstrap_95_ci") or {}
+    confidence_metrics = confidence.get("metrics") or {}
+    confidence_table = ""
+    if confidence_metrics:
+        confidence_rows = "\n".join(
+            f"| {name} | {values['lower']:.2f} | {values['upper']:.2f} |"
+            for name, values in confidence_metrics.items()
+        )
+        confidence_table = f"""
+
+### Confidence intervals
+
+Stratified bootstrap, {confidence['samples']:,} samples, 95% confidence.
+
+| Metric | Lower | Upper |
+|---|---:|---:|
+{confidence_rows}
+"""
+    model_name = repo_id.split("/", 1)[-1]
     return f"""---
 license: cc-by-nc-4.0
 library_name: transformers
 pipeline_tag: translation
 base_model: {base}
+language:
+{language_yaml}
 tags:
 - translation
 - {family_tag}
@@ -307,33 +335,70 @@ tags:
 - low-resource
 metrics:
 - bleu
-- chrf2
+- chrf
 - ter
+model-index:
+- name: {model_name}
+  results:
+  - task:
+      type: translation
+      name: Translation
+    dataset:
+      name: FormosanBank private no-Bible hard test
+      type: private-no-bible-hard-test
+      split: test
+    metrics:
+    - type: bleu
+      name: sacreBLEU
+      value: {global_metrics['BLEU']:.6f}
+    - type: chrf
+      name: chrF2
+      value: {global_metrics['chrF2']:.6f}
+    - type: ter
+      name: TER
+      value: {global_metrics['TER']:.6f}
 ---
 
-# {repo_id.split('/', 1)[-1]}
+# {model_name}
 
 **Direction:** {spec.title}<br>
 **Base model:** [`{base}`](https://huggingface.co/{base})<br>
 **Recipe:** `{profile['recipe_id']}`<br>
-**Checkpoint:** validation-selected step {metadata['step']:,}
+**Release:** `{run_stamp}`, validation-selected step {metadata['step']:,}
 
 This is a directional model for 15 Formosan languages. It uses the
 `private_no_bible` leakage-controlled corpus, {tokenizer_note}, balanced
-language/source sampling, and direction/domain/dialect control tags.
+language/source sampling, and direction/domain/dialect control tags. The model
+weights are public, but the private training corpus is not included.
+
+## Model details
+
+| Item | Value |
+|---|---|
+| Base revision | `{base_revision}` |
+| Training rows | {corpus['splits']['train']:,} |
+| Effective batch size | {training['effective_batch_size']:,} |
+| Maximum sequence length | {training['max_length']:,} |
+| Learning rate | {training['learning_rate']:.2g} |
+| Precision | `{training['precision']}` |
+| Checkpoint selection | Human validation `{training['best_metric']}` |
+| Formosan text | `kindOf=standard`, `{profile['mt_standardization']['id']}` |
+| Corpus SHA-256 | `{corpus['sha256']}` |
+| Training profile SHA-256 | `{metrics['profile']['sha256']}` |
 
 ## Usage
 
 {usage}
 
-MADLAD selects the target language with the first source token and uses its
-configured T5 decoder start token. NLLB selects the target using
-`forced_bos_token_id`. Do not interchange these generation contracts.
+The control tags are part of the training contract. Use `unknown` and `default`
+when source bucket or dialect metadata is unavailable.
 
 ## Evaluation
 
 The best checkpoint was selected on human validation chrF2. Test references
 are human sentence pairs; synthetic pivots and lexical entries are train-only.
+The headline result uses `{headline_mode}` metadata controls, so it does not
+assume access to test-set domain or dialect labels.
 
 | Split | Rows |
 |---|---:|
@@ -346,15 +411,32 @@ are human sentence pairs; synthetic pivots and lexical entries are train-only.
 | Hard test | {global_metrics['BLEU']:.2f} | {global_metrics['chrF2']:.2f} | {global_metrics['TER']:.2f} |
 | Selection validation | {selected.get('BLEU', float('nan')):.2f} | {selected.get('chrF2', float('nan')):.2f} | {selected.get('TER', float('nan')):.2f} |
 
+Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
+{confidence_table}
+
 | Language | Samples | BLEU | chrF2 | TER |
 |---|---:|---:|---:|---:|
 {by_language}
 
 The corpus gate enforces standard-tier Formosan text, at least 7.5% test and
 2.5% validation per language, human sentence-only evaluation, and zero exact,
-skeleton, one-edit, or configured high character n-gram train/evaluation
-conflicts. See `eval/metrics.json` for domain/length diagnostics and optional
-bootstrap confidence intervals when they were generated.
+skeleton, one-edit, configured high character n-gram, or document
+train/evaluation conflicts. This release passed all gates: exact
+{corpus_validation['exact_overlap']}, skeleton
+{corpus_validation['skeleton_overlap']}, one-edit
+{corpus_validation['one_edit_conflicts']}, character n-gram
+{corpus_validation['character_ngram_conflicts']}, and document
+{corpus_validation['document_overlap']}.
+
+See `eval/metrics.json` for sacreBLEU signatures, per-language, source,
+dialect, and length diagnostics. `publication.json` records the corpus,
+profile, run, and checkpoint hashes used for this release.
+
+## Intended use
+
+This model supports research, corpus development, and assisted translation for
+the 15 included Formosan languages. It is designed for the exact prompt and
+generation contract shown above.
 
 ## Limitations
 
@@ -362,6 +444,23 @@ Outputs require knowledgeable speaker review. Aggregate metrics hide large
 differences among languages and domains. This model is not suitable for
 authoritative, medical, legal, or safety-critical translation.
 """
+
+
+def public_metrics(
+    metrics: dict,
+    *,
+    repo_id: str,
+    corpus_name: str,
+    target_lang: str,
+) -> dict:
+    """Remove machine-local paths while preserving evaluation provenance."""
+    output = json.loads(json.dumps(metrics))
+    output["input"] = f"{corpus_name}:{target_lang}"
+    output["model"] = repo_id
+    output["tokenizer"] = repo_id
+    if isinstance(output.get("profile"), dict):
+        output["profile"]["path"] = "training_profile.json"
+    return output
 
 
 def parse_args() -> argparse.Namespace:
@@ -425,6 +524,7 @@ def prepare_direction(
 
     name = repo_name(family, spec.code)
     repo_id = f"{args.organization}/{name}"
+    corpus = corpus_record(manifest, spec.target_lang)
     output = args.output_root / name
     shutil.rmtree(output, ignore_errors=True)
     output.mkdir(parents=True)
@@ -434,6 +534,7 @@ def prepare_direction(
         (MT_STANDARDIZER, "mt_standardization.py"),
         (MT_INFERENCE, "formosan_mt_inference.py"),
         (MT_PROFILE, "mt_standardization_profile.json"),
+        (args.profile, "training_profile.json"),
     ):
         if not source_path.is_file():
             raise RuntimeError(
@@ -441,7 +542,39 @@ def prepare_direction(
             )
         link_or_copy(source_path, output / output_name)
     (output / "eval").mkdir()
-    shutil.copy2(metrics_path, output / "eval" / "metrics.json")
+    published_metrics = public_metrics(
+        metrics,
+        repo_id=repo_id,
+        corpus_name=manifest["corpus_name"],
+        target_lang=spec.target_lang,
+    )
+    (output / "eval" / "metrics.json").write_text(
+        json.dumps(published_metrics, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    publication = {
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "direction": spec.code,
+        "run_stamp": run_stamp,
+        "checkpoint": args.checkpoint,
+        "checkpoint_step": metadata["step"],
+        "corpus": {
+            "name": manifest["corpus_name"],
+            "target_lang": spec.target_lang,
+            "rows": corpus["rows"],
+            "splits": corpus["splits"],
+            "sha256": corpus["sha256"],
+        },
+        "profile_sha256": sha256_file(args.profile),
+        "base_model": profile["base_model"],
+        "mt_standardization": profile["mt_standardization"],
+        "run_contract_sha256": metadata["run_contract_sha256"],
+    }
+    (output / "publication.json").write_text(
+        json.dumps(publication, indent=2) + "\n",
+        encoding="utf-8",
+    )
     (output / "README.md").write_text(
         render_card(
             spec=spec,
@@ -451,6 +584,7 @@ def prepare_direction(
             metrics=metrics,
             metadata=metadata,
             manifest=manifest,
+            run_stamp=run_stamp,
         ),
         encoding="utf-8",
     )
