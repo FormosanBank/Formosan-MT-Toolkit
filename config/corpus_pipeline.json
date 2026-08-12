@@ -4,7 +4,7 @@
   "formosanbank": {
     "org": "FormosanBank",
     "repo": "FormosanBank",
-    "qc_revision": "c6c1d06010f54e80e08b14ab2aa8099c3e2284eb"
+    "qc_revision": "acc3ec9f3137a59b9661e446a750ee1606720394"
   },
   "cleaning": {
     "profile": "formosan-mt-v3",
@@ -31,18 +31,22 @@
   },
   "pivot": {
     "require_complete": true,
-    "synthetic_eval": false
+    "synthetic_eval": true
   },
   "splits": {
     "seed": 42,
     "train_ratio": 0.9,
     "validate_ratio": 0.025,
     "test_ratio": 0.075,
-    "min_test_rows": 500,
-    "min_validate_rows": 150,
+    "min_test_rows": 0,
+    "min_validate_rows": 0,
     "character_ngram_jaccard_threshold": 0.82,
+    "min_formosan_tokens": 4,
+    "min_target_tokens": 4,
     "lexical_eval": false,
-    "synthetic_eval": false,
+    "synthetic_eval": true,
+    "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
+    "ratio_basis": "mt_eligible_sentence_rows_by_language_and_source_corpus",
     "headline_tier": "in_domain_hard"
   },
   "exposure_audit": {

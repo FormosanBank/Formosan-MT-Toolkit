@@ -55,4 +55,6 @@ python -u "${EXP_DIR}/scripts/build_experiment_splits.py" \
   --test-ratio 0.075 \
   --min-formosan-tokens "${MIN_FORMOSAN_TOKENS:-4}" \
   --min-target-tokens "${MIN_TARGET_TOKENS:-4}" \
-  --tiers lexical,in_domain_hard,hard_global
+  --min-test-rows "${MIN_TEST_ROWS:-0}" \
+  --min-validate-rows "${MIN_VALIDATE_ROWS:-0}" \
+  --tiers in_domain_hard

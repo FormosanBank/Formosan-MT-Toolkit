@@ -71,6 +71,7 @@ TARGET_CONFIGS = {
 }
 
 EASY_BUCKETS = ("dictionary", "learning_vocab", "classroom_context")
+LEXICAL_SOURCE_BUCKETS = ("dictionary", "learning_vocab")
 MT_STANDARD_NAMESPACE = "formosan-mt"
 MT_STANDARD_REQUIRED_COLUMNS = (
     "kindOf",
@@ -239,6 +240,22 @@ def source_bucket(source: object) -> str:
     return parts[0] if parts else "unknown"
 
 
+def source_corpus(source: object) -> str:
+    """Return the exact public corpus root or private repository name."""
+    value = "" if pd.isna(source) else str(source)
+    parts = [part for part in value.replace("\\", "/").split("/") if part]
+    lowered = [part.casefold() for part in parts]
+    if "corpora" in lowered:
+        position = lowered.index("corpora")
+        if position + 1 < len(parts):
+            return parts[position + 1]
+    if parts and ({"final_xml", "xml"} & set(lowered)):
+        return parts[0]
+    if parts and parts[0].casefold().startswith("formosan-"):
+        return parts[0]
+    return source_bucket(value)
+
+
 def add_normalized_columns(
     df: pd.DataFrame,
     target_col: str = "english_sentence",
@@ -251,6 +268,7 @@ def add_normalized_columns(
     out["row_type"] = out["row_type"].fillna("unknown").astype(str).str.strip().str.lower()
     out["_source_key"] = out["source"].fillna("").astype(str) if "source" in out else ""
     out["_source_bucket"] = out["_source_key"].map(source_bucket)
+    out["_source_corpus"] = out["_source_key"].map(source_corpus)
     out["_formosan_key"] = out["formosan_sentence"].map(normalize_text)
     out["_target_key"] = out[target_col].map(normalize_text)
     out["_pair_key"] = out["_formosan_key"] + PAIR_SEP + out["_target_key"]
@@ -264,6 +282,99 @@ def add_normalized_columns(
     out["_lang_source_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"]
     out["_target_group_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"] + PAIR_SEP + out["_target_key"]
     return out
+
+
+def evaluation_candidate_mask(
+    frame: pd.DataFrame,
+    *,
+    min_formosan_tokens: int,
+    min_target_tokens: int,
+) -> pd.Series:
+    """Return sentence-quality rows that may be used in dev or test.
+
+    Some source dictionaries encode entries as ``S`` elements. Structural type
+    alone is therefore insufficient: known lexical sources and short entries
+    are also kept out of evaluation.
+    """
+    required = {
+        "row_type",
+        "mt_eval_eligible",
+        "mt_normalization_confidence",
+        "_source_bucket",
+        "_formosan_tokens",
+        "_target_tokens",
+    }
+    require_columns(frame, required, "evaluation eligibility")
+    flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
+    source = frame.get("source", pd.Series("", index=frame.index)).astype(str)
+    lexical_path = source.str.contains(
+        r"(?:^|[/_\-])(?:dict(?:s|ionary|ionaries)?|lexic(?:on|ons|al)?|"
+        r"glossar(?:y|ies)|word[-_ ]?lists?|vocab(?:ulary|ularies)?)(?:[/_\-.]|$)",
+        case=False,
+        regex=True,
+    )
+    return (
+        frame["row_type"].astype(str).str.casefold().eq("sentence")
+        & ~frame["_source_bucket"].isin(LEXICAL_SOURCE_BUCKETS)
+        & ~lexical_path
+        & ~flags.str.contains(
+            r"(?:contains_unclear|unknown_row_type)",
+            regex=True,
+        )
+        & bool_series(
+            frame["mt_eval_eligible"],
+            context="evaluation eligibility:mt_eval_eligible",
+        )
+        & ~frame["mt_normalization_confidence"].astype(str).eq("ambiguous")
+        & frame["_formosan_tokens"].ge(min_formosan_tokens)
+        & frame["_target_tokens"].ge(min_target_tokens)
+    )
+
+
+def apportioned_counts(
+    capacities: Mapping[str, int],
+    total: int,
+) -> dict[str, int]:
+    """Hamilton-apportion ``total`` rows without exceeding each capacity."""
+    capacities = {
+        str(key): max(0, int(value))
+        for key, value in capacities.items()
+        if int(value) > 0
+    }
+    available = sum(capacities.values())
+    total = min(max(0, int(total)), available)
+    if not capacities or total == 0:
+        return {key: 0 for key in capacities}
+    quotas = {
+        key: total * capacity / available
+        for key, capacity in capacities.items()
+    }
+    allocated = {
+        key: min(capacities[key], math.floor(quota))
+        for key, quota in quotas.items()
+    }
+    remaining = total - sum(allocated.values())
+    order = sorted(
+        capacities,
+        key=lambda key: (
+            -(quotas[key] - math.floor(quotas[key])),
+            -capacities[key],
+            key,
+        ),
+    )
+    while remaining:
+        progressed = False
+        for key in order:
+            if allocated[key] >= capacities[key]:
+                continue
+            allocated[key] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            raise RuntimeError("Could not apportion split targets within capacities")
+    return allocated
 
 
 def require_columns(df: pd.DataFrame, columns: Iterable[str], context: str) -> None:

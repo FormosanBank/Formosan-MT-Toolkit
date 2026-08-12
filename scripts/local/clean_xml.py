@@ -42,7 +42,8 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 QC_ORG = str(FORMOSANBANK_CONFIG["org"])
 QC_REPO = str(FORMOSANBANK_CONFIG["repo"])
 DEFAULT_QC_REVISION = str(FORMOSANBANK_CONFIG["qc_revision"])
-SYNC_PREFIXES = ("QC/", "Orthographies/", "dialects.csv")
+SYNC_PREFIXES = ("QC/", "Orthographies/")
+SYNC_FILES = {"dialects.csv", "languages.csv", "standards.csv"}
 DEFAULT_QC_CACHE = PROJECT_ROOT / "scripts" / ".formosan_qc_repo"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 TRANSFORM_INVENTORY = "_qc_transform_inventory.jsonl"
@@ -157,13 +158,34 @@ def qc_checkout_is_clean(path: Path) -> bool:
     return not output.strip()
 
 
+def git_has_revision(path: Path, revision: str) -> bool:
+    try:
+        subprocess.run(
+            ["git", "-C", str(path), "cat-file", "-e", f"{revision}^{{commit}}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
 def raw_url(revision: str, path: str) -> str:
     encoded = "/".join(quote(part) for part in path.split("/"))
     return f"{RAW_BASE}/{QC_ORG}/{QC_REPO}/{revision}/{encoded}"
 
 
+def public_qc_get(url: str, **kwargs) -> requests.Response:
+    """Retry public FormosanBank QC without a stale optional token."""
+    response = SESSION.get(url, **kwargs)
+    if response.status_code == 401 and GITHUB_TOKEN:
+        response = requests.get(url, **kwargs)
+    return response
+
+
 def github_tree(revision: str) -> list[dict]:
-    response = SESSION.get(
+    response = public_qc_get(
         f"{GITHUB_API}/repos/{QC_ORG}/{QC_REPO}/git/trees/{revision}",
         params={"recursive": "1"},
         timeout=60,
@@ -179,7 +201,7 @@ def github_tree(revision: str) -> list[dict]:
 
 
 def download_raw(revision: str, path: str) -> bytes:
-    response = SESSION.get(raw_url(revision, path), timeout=60)
+    response = public_qc_get(raw_url(revision, path), timeout=60)
     response.raise_for_status()
     return response.content
 
@@ -205,8 +227,8 @@ def _sync_qc_tree_unlocked(cache_root: Path, revision: str, force_update: bool) 
         for item in tree
         if item.get("type") == "blob"
         and (
-            any(str(item.get("path", "")).startswith(prefix) for prefix in SYNC_PREFIXES[:2])
-            or item.get("path") == "dialects.csv"
+            any(str(item.get("path", "")).startswith(prefix) for prefix in SYNC_PREFIXES)
+            or item.get("path") in SYNC_FILES
         )
     ]
     if not wanted:
@@ -267,6 +289,87 @@ def sync_qc_tree(cache_root: Path, revision: str, force_update: bool) -> Path:
         return _sync_qc_tree_unlocked(cache_root, revision, force_update)
 
 
+def _sync_qc_tree_from_git_unlocked(
+    repository: Path,
+    cache_root: Path,
+    revision: str,
+) -> Path:
+    """Materialize the pinned QC subset from an existing Git object store."""
+    destination = cache_root.expanduser().resolve() / revision
+    destination.mkdir(parents=True, exist_ok=True)
+    listing = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "ls-tree",
+            "-r",
+            revision,
+            "--",
+            "QC",
+            "Orthographies",
+            "dialects.csv",
+            "languages.csv",
+            "standards.csv",
+        ],
+        text=True,
+    )
+    inventory: list[dict[str, object]] = []
+    for line in listing.splitlines():
+        metadata, relative = line.split("\t", 1)
+        _, object_type, expected_blob = metadata.split()
+        if object_type != "blob":
+            continue
+        content = subprocess.check_output(
+            ["git", "-C", str(repository), "show", f"{revision}:{relative}"]
+        )
+        if git_blob_sha(content) != expected_blob:
+            raise SystemExit(
+                f"Git blob checksum mismatch for local QC file {relative}"
+            )
+        output = destination / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(content)
+        inventory.append(
+            {
+                "path": relative,
+                "git_blob_sha": expected_blob,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "bytes": len(content),
+            }
+        )
+    manifest = {
+        "schema_version": 1,
+        "created_at": utc_now(),
+        "repository": f"{QC_ORG}/{QC_REPO}",
+        "revision": revision,
+        "source": f"local_git:{repository}",
+        "files": inventory,
+        "inventory_sha256": stable_json_hash(inventory),
+    }
+    atomic_write_json(destination / "QC_SNAPSHOT.json", manifest)
+    if not has_qc_package_root(destination):
+        raise SystemExit(f"Pinned local QC snapshot is incomplete: {destination}")
+    print(f"Pinned QC snapshot: {destination} ({len(inventory)} local Git objects)")
+    return destination
+
+
+def sync_qc_tree_from_git(
+    repository: Path,
+    cache_root: Path,
+    revision: str,
+) -> Path:
+    cache_root = cache_root.expanduser().resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with (cache_root / f".{revision}.lock").open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _sync_qc_tree_from_git_unlocked(
+            repository,
+            cache_root,
+            revision,
+        )
+
+
 def resolve_qc_root(args: argparse.Namespace) -> Path:
     revision = args.qc_revision.lower()
     if args.formosanbank_path:
@@ -287,8 +390,14 @@ def resolve_qc_root(args: argparse.Namespace) -> Path:
         return sibling
 
     if has_qc_package_root(sibling):
+        if git_has_revision(sibling, revision):
+            return sync_qc_tree_from_git(
+                sibling,
+                args.qc_dir,
+                revision,
+            )
         print(
-            f"Ignoring sibling FormosanBank checkout at {git_head(sibling) or 'unknown'}; the build requires {revision}"
+            f"Sibling FormosanBank does not contain pinned revision {revision}; using GitHub"
         )
     return sync_qc_tree(args.qc_dir, revision, force_update=args.force_update)
 

@@ -123,14 +123,16 @@ pivot, source snapshot, standardization, and configuration records. Row counts
 and hashes belong in these generated manifests, not in source documentation.
 
 The build fails when acquisition is incomplete, row accounting does not
-conserve inputs, unresolved pivots remain, evaluation contains synthetic or
-lexical rows, split floors are missed, leakage gates fail, or release hashes
-cannot be written.
+conserve inputs, unresolved pivots remain, evaluation contains lexical-like
+rows, language/source split ratios are missed, leakage gates fail, or release
+hashes cannot be written. Human sentence references are preferred, but a
+validated synthetic sentence may be used when a source stratum lacks enough
+human parallel rows.
 
 ## Authorized Nonpublic Sources
 
 The orchestrator can ingest repositories visible to an authorized GitHub
-token. Those source snapshots, inventories, corpora, manifests, metrics, and
-models must remain outside this repository. Use a separate named build and
-external access-controlled storage. Never commit or attach them to a public
-pull request.
+token. Private discovery accepts top-level `Final_XML/` and `XML/` trees. Those
+source snapshots, inventories, corpora, manifests, metrics, and models must
+remain outside this repository. Use a separate named build and external
+access-controlled storage. Never commit or attach them to a public pull request.

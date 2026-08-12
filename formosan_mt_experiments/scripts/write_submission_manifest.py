@@ -94,7 +94,16 @@ def corpus_record(corpus_dir: Path, short: str) -> dict[str, Any]:
             ),
             "document_overlap": int(train_evaluation["document_overlap"]),
             "lexeme_eval_rows": int(validation["lexical_eval_rows"]),
+            "lexical_like_eval_rows": int(
+                validation.get("lexical_like_eval_rows", 0)
+            ),
             "per_language_ratio_failures": len(validation["ratio_failures"]),
+            "per_source_ratio_failures": sum(
+                len(values)
+                for values in validation.get(
+                    "source_ratio_failures", {}
+                ).values()
+            ),
         },
     }
 

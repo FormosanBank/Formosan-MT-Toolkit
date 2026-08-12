@@ -11,7 +11,13 @@ from pathlib import Path
 import pandas as pd
 from columnar_cache import read_csv_or_columnar
 from experiment_config import sha256_file
-from mt_common import normalize_target_language, target_col_for, write_json
+from mt_common import (
+    normalize_target_language,
+    source_bucket,
+    source_corpus,
+    target_col_for,
+    write_json,
+)
 from tame_mt import CachedSegmentScorer, TameScorer
 from tame_mt.config import (
     BinConfig,
@@ -56,12 +62,11 @@ def read_corpus(path: Path, *, target_col: str) -> pd.DataFrame:
     if not {"train", *EVAL_SPLITS}.issubset(splits):
         raise SystemExit(f"Exposure audit requires train/test/validate splits, found {sorted(splits)}")
     evaluation = frame[frame["split"].str.casefold().isin(EVAL_SPLITS)]
-    synthetic = evaluation["pivot_origin"].str.casefold().eq("synthetic")
     lexical = ~evaluation["row_type"].str.casefold().eq("sentence")
-    if synthetic.any() or lexical.any():
+    if lexical.any():
         raise SystemExit(
-            "Exposure audit requires human sentence-only evaluation rows; "
-            f"found synthetic={int(synthetic.sum())}, lexical={int(lexical.sum())}"
+            "Exposure audit requires sentence-only evaluation rows; "
+            f"found lexical={int(lexical.sum())}"
         )
     return frame
 
@@ -70,20 +75,17 @@ def exposure_summary(segments, config: ScoreConfig) -> dict[str, object]:
     return asdict(summarize_exposures(list(segments), config))
 
 
-def per_language_summary(
+def per_group_summary(
     frame: pd.DataFrame,
     segments,
     config: ScoreConfig,
+    column: str,
 ) -> dict[str, dict[str, object]]:
     output: dict[str, dict[str, object]] = {}
-    for language in sorted(frame["lang_code"].unique()):
-        indexes = [
-            index
-            for index, value in enumerate(frame["lang_code"])
-            if value == language
-        ]
-        selected = [segments[index] for index in indexes]
-        output[str(language)] = {
+    values = frame[column].astype(str)
+    for value, indexes in sorted(values.groupby(values).groups.items()):
+        selected = [segments[int(index)] for index in indexes]
+        output[str(value)] = {
             "rows": len(selected),
             "exposure": exposure_summary(selected, config),
         }
@@ -155,6 +157,17 @@ def audit_direction(
     target_col: str,
     config: ScoreConfig,
 ) -> dict[str, object]:
+    frame = frame.copy()
+    if "source_bucket" not in frame:
+        frame["source_bucket"] = frame.get(
+            "source",
+            pd.Series("unknown", index=frame.index),
+        ).map(source_bucket)
+    if "source_corpus" not in frame:
+        frame["source_corpus"] = frame.get(
+            "source",
+            pd.Series("unknown", index=frame.index),
+        ).map(source_corpus)
     train = frame[frame["split"].str.casefold().eq("train")].reset_index(drop=True)
     evaluation = frame[
         frame["split"].str.casefold().isin(EVAL_SPLITS)
@@ -249,7 +262,18 @@ def audit_direction(
         by_split[split] = {
             "rows": len(indexes),
             "exposure": exposure_summary(segments, config),
-            "by_language": per_language_summary(split_frame, segments, config),
+            "by_language": per_group_summary(
+                split_frame, segments, config, "lang_code"
+            ),
+            "by_source_bucket": per_group_summary(
+                split_frame, segments, config, "source_bucket"
+            ),
+            "by_source_corpus": per_group_summary(
+                split_frame, segments, config, "source_corpus"
+            ),
+            "by_reference_origin": per_group_summary(
+                split_frame, segments, config, "pivot_origin"
+            ),
         }
     return {
         "source_column": source_col,

@@ -34,6 +34,7 @@ from mt_common import (
     normalize_target_language,
     read_parallel_csv,
     source_bucket,
+    source_corpus,
     target_col_for,
     target_language_from_direction,
     token_count,
@@ -474,6 +475,7 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
         type=int,
         default=defaults["bootstrap_seed"],
     )
+    parser.add_argument("--bootstrap-workers", type=int, default=1)
     parser.add_argument("--limit-per-lang", type=int, default=0)
     parser.add_argument("--lowercase-bleu", action="store_true")
     parser.add_argument(
@@ -534,6 +536,8 @@ def main() -> None:
     full = read_parallel_csv(args.input, target_col=args.target_col)
     if "source_bucket" not in full:
         full["source_bucket"] = full["source"].map(source_bucket)
+    if "source_corpus" not in full:
+        full["source_corpus"] = full["source"].map(source_corpus)
     if (
         "kindOf" not in full
         or not full["kindOf"].astype(str).str.lower().eq("standard").all()
@@ -544,19 +548,8 @@ def main() -> None:
     ].copy()
     if evaluation.empty:
         raise SystemExit(f"No rows with split={args.split}")
-    if (
-        evaluation.get(
-            "pivot_origin",
-            pd.Series("original", index=evaluation.index),
-        )
-        .astype(str)
-        .eq("synthetic")
-        .any()
-        or not evaluation["row_type"].astype(str).eq("sentence").all()
-    ):
-        raise SystemExit(
-            "Evaluation rows must be human sentence pairs"
-        )
+    if not evaluation["row_type"].astype(str).eq("sentence").all():
+        raise SystemExit("Evaluation rows must be sentence pairs")
     if (
         not bool_series(
             evaluation["mt_eval_eligible"],
@@ -640,6 +633,7 @@ def main() -> None:
             "direction": args.direction,
             "eval_tier": evaluation.get("eval_tier", ""),
             "source_bucket": evaluation["source_bucket"].astype(str),
+            "source_corpus": evaluation["source_corpus"].astype(str),
             "source": evaluation["source"].astype(str),
             "dialect": evaluation["dialect"].astype(str),
             "pivot_origin": evaluation.get("pivot_origin", "original"),
@@ -682,6 +676,10 @@ def main() -> None:
         and is_formosan_to_target(args.direction)
         else "13a"
     )
+    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+    predictions.to_csv(args.output_csv, index=False)
+    print(f"predictions checkpoint: {args.output_csv}")
+
     mode_metrics = {
         mode: {
             "samples": len(predictions),
@@ -695,18 +693,9 @@ def main() -> None:
         for mode in modes
     }
     primary = mode_metrics["default"]
-    confidence = bootstrap_confidence_intervals(
-        predictions["hyp_default"].tolist(),
-        predictions["ref"].tolist(),
-        strata=predictions["lang_code"].tolist(),
-        samples=args.bootstrap_samples,
-        seed=args.bootstrap_seed,
-        lowercase=args.lowercase_bleu,
-        bleu_tokenize=bleu_tokenize,
-    )
     metrics = {
         "schema_version": 3,
-        "complete": True,
+        "complete": False,
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
         "model_family": backend.family,
@@ -717,13 +706,22 @@ def main() -> None:
         "direction": args.direction,
         "target_lang": args.target_lang,
         "bleu_tokenize": bleu_tokenize,
+        "lowercase_bleu": args.lowercase_bleu,
         "split": args.split,
         "samples": len(predictions),
         "headline_metadata_mode": "default",
         "global": primary,
         "metadata_modes": mode_metrics,
         "metadata_fallbacks": metadata_fallbacks,
-        "bootstrap_95_ci": confidence,
+        "bootstrap_95_ci": {
+            "status": (
+                "pending"
+                if args.bootstrap_samples > 0
+                else "skipped"
+            ),
+            "samples": args.bootstrap_samples,
+            "seed": args.bootstrap_seed,
+        },
         "by_language": group_scores(
             predictions,
             "lang_code",
@@ -734,6 +732,20 @@ def main() -> None:
         "by_source_bucket": group_scores(
             predictions,
             "source_bucket",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_source_corpus": group_scores(
+            predictions,
+            "source_corpus",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_reference_origin": group_scores(
+            predictions,
+            "pivot_origin",
             hypothesis_column="hyp_default",
             lowercase=args.lowercase_bleu,
             bleu_tokenize=bleu_tokenize,
@@ -753,10 +765,26 @@ def main() -> None:
             bleu_tokenize=bleu_tokenize,
         ),
     }
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    predictions.to_csv(args.output_csv, index=False)
+    metrics["complete"] = True
     write_json(args.output_json, metrics)
     print(json.dumps(primary, indent=2))
+    print(f"metrics checkpoint: {args.output_json}")
+
+    if args.bootstrap_samples > 0:
+        metrics["bootstrap_95_ci"] = (
+            bootstrap_confidence_intervals(
+                predictions["hyp_default"].tolist(),
+                predictions["ref"].tolist(),
+                strata=predictions["lang_code"].tolist(),
+                samples=args.bootstrap_samples,
+                seed=args.bootstrap_seed,
+                workers=args.bootstrap_workers,
+                lowercase=args.lowercase_bleu,
+                bleu_tokenize=bleu_tokenize,
+            )
+        )
+        metrics["bootstrap_95_ci"]["status"] = "complete"
+        write_json(args.output_json, metrics)
     print(f"predictions: {args.output_csv}")
     print(f"metrics: {args.output_json}")
 

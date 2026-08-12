@@ -33,12 +33,17 @@ Use only `big_corpus_<en|zh>_in_domain_hard.csv` from a completed v3 provenance
 bundle. Before model setup, `scripts/validate_experiment.py` verifies:
 
 - the corpus, profile, standardization namespace, and artifact hashes;
-- at least 7.5% test and 2.5% validation rows per language;
-- human sentence references only in evaluation;
-- no synthetic, lexical, morpheme, or ambiguous-normalization evaluation rows;
-- document holdout or a declared small-language fallback;
+- roughly 90/2.5/7.5 train/validation/test proportions within every language
+  and source corpus;
+- sentence references only in evaluation, preferring human rows before valid
+  synthetic pivot fallbacks;
+- no lexical, morpheme, lexical-source, short, or ambiguous-normalization
+  evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts
   across split boundaries.
+
+Document overlap is diagnostic rather than a gate because a source corpus may
+store thousands of independent records in one XML file.
 
 The local release pipeline also runs per-language TAME-MT exposure checks in
 both translation directions. Tokenizer/model setup consumes training rows only.
@@ -137,8 +142,15 @@ breakdowns.
 
 Each generation validation atomically updates `resume/` with model, optimizer,
 scheduler, scaler, random state, and run-contract hash. Successful training
-retains deployable `best/` and `final/` directories. Evaluation reports default
-metadata tags as the headline and oracle metadata as a diagnostic.
+retains deployable `best/` and `final/` directories. The default Slurm flight
+evaluates only the validation-selected `best/` checkpoint with realistic
+default metadata. Set `EVAL_CHECKPOINTS="best final"` or
+`METADATA_MODES="default,oracle"` only for a specific ablation.
+
+Headline and grouped metrics are written immediately after generation.
+Bootstrap confidence intervals are optional because they are not needed for
+routine model selection. Set `SUBMIT_BOOTSTRAP=1` to add a parallel CPU-only
+confidence-interval job; the GPU is not held while resampling.
 
 ## Component Ownership
 
@@ -150,7 +162,8 @@ metadata tags as the headline and oracle metadata as a diagnostic.
 | `setup_formosan_madlad400.py` | MADLAD controls and embedding/head resize. |
 | `model_backends.py` | Model-family prompts and generation behavior. |
 | `train_directional.py` | Sampling, optimization, validation, and resume. |
-| `evaluate_directional.py` | Final/best test evaluation. |
+| `evaluate_directional.py` | Selected-checkpoint test evaluation. |
+| `bootstrap_predictions.py` | Optional CPU confidence intervals. |
 | `mt_metrics.py` | BLEU, chrF2, TER, signatures, and confidence intervals. |
 | `publish_huggingface_models.py` | Audited standalone Hub packages. |
 | `slurm/submit_directional_experiment.sh` | Idempotent Slurm DAG. |
