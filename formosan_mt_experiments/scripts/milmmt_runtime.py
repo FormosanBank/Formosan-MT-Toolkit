@@ -28,7 +28,7 @@ FORMOSAN_LANGUAGE_NAMES = {
     "ssf": "Thao",
     "sxr": "Saaroa",
     "szy": "Sakizaya",
-    "tao": "Tao (Yami)",
+    "tao": "Tao",
     "tay": "Atayal",
     "trv": "Seediq",
     "tsu": "Tsou",

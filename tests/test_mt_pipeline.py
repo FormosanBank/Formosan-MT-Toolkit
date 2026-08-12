@@ -397,6 +397,16 @@ class MilmmtRuntimeTests(unittest.TestCase):
                 f"Translate this from {source_name} to {target_name}:\n{source_name}: sample\n{target_name}:",
             )
 
+    def test_prompt_uses_canonical_formosan_names(self) -> None:
+        self.assertEqual(
+            milmmt.task_spec("tao", "f2en", target_lang="english").source_name,
+            "Tao",
+        )
+        self.assertEqual(
+            milmmt.task_spec("trv", "f2en", target_lang="english").source_name,
+            "Seediq",
+        )
+
     def test_causal_labels_mask_the_prompt(self) -> None:
         class Tokenizer:
             pad_token_id = 0
