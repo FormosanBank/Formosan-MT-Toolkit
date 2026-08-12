@@ -234,6 +234,13 @@ def configure_model(model, tokenizer) -> None:
         model.generation_config.decoder_start_token_id = tokenizer.eos_token_id
 
 
+def validate_model_tokenizer(model, tokenizer) -> None:
+    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
+        raise SystemExit(
+            "Tokenizer and model vocabulary sizes differ; load matching setup artifacts."
+        )
+
+
 def validate_task(tokenizer, task: TaskSpec) -> None:
     token_id(tokenizer, task.source_lid)
     token_id(tokenizer, task.target_lid)

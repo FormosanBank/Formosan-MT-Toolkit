@@ -398,6 +398,26 @@ class MilmmtRuntimeTests(unittest.TestCase):
         self.assertTrue((labels[0, : -len(target)] == -100).all())
         self.assertEqual(encoded["attention_mask"].sum().item(), 13)
 
+    def test_text_model_allows_only_gemma_image_token_outside_embeddings(self) -> None:
+        class Tokenizer:
+            def __len__(self):
+                return 11
+
+            def get_added_vocab(self):
+                return {"<image_soft_token>": 10}
+
+        model = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(num_embeddings=10)
+        )
+        milmmt.validate_model_tokenizer(model, Tokenizer())
+
+        class BadTokenizer(Tokenizer):
+            def get_added_vocab(self):
+                return {"<unexpected>": 10}
+
+        with self.assertRaisesRegex(SystemExit, "unexpected mismatch"):
+            milmmt.validate_model_tokenizer(model, BadTokenizer())
+
 
 class LeakageTests(unittest.TestCase):
     def test_source_bucket_uses_only_coarse_domains(self) -> None:

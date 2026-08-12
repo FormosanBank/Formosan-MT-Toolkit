@@ -796,8 +796,7 @@ def main() -> None:
         dtype=LOAD_DTYPES[args.load_dtype],
     )
     runtime.configure_model(model, tokenizer)
-    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        raise SystemExit("Tokenizer and model vocabulary sizes differ; load matching setup artifacts.")
+    runtime.validate_model_tokenizer(model, tokenizer)
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model.config, "use_cache"):

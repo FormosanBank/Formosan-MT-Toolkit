@@ -60,6 +60,16 @@ def main() -> None:
         raise SystemExit(f"Expected Gemma 3 text configuration, found {config.model_type!r}")
     if tokenizer.pad_token_id is None or tokenizer.eos_token_id is None:
         raise SystemExit("MiLMMT tokenizer is missing pad or EOS tokens")
+    model_vocab_size = int(config.vocab_size)
+    extra_tokens = {
+        token: token_id
+        for token, token_id in tokenizer.get_added_vocab().items()
+        if int(token_id) >= model_vocab_size
+    }
+    if len(tokenizer) != model_vocab_size + 1 or extra_tokens != {
+        "<image_soft_token>": model_vocab_size
+    }:
+        raise SystemExit("MiLMMT tokenizer has an unexpected text-model vocabulary")
     weight_files = sorted(temporary_dir.glob("*.safetensors"))
     if not weight_files:
         raise SystemExit("MiLMMT snapshot contains no safetensors weights")
@@ -94,11 +104,14 @@ def main() -> None:
         "mt_standardization": profile["mt_standardization"],
         "base_model": base_model,
         "upstream_code": profile["upstream_code"],
+        "implementation": artifact_record(Path(__file__).resolve()),
         "repository": git_record(),
         "runtime_dependencies": dependency_versions(),
         "tokenizer": {
             "path": str(model_dir),
             "vocab_size": len(tokenizer),
+            "text_model_vocab_size": model_vocab_size,
+            "non_text_special_tokens": extra_tokens,
             "files": tokenizer_files,
         },
         "model": {

@@ -98,6 +98,7 @@ add_override NO_REPEAT_NGRAM_SIZE --no-repeat-ngram-size
 add_override REPETITION_PENALTY --repetition-penalty
 add_override LENGTH_PENALTY --length-penalty
 add_override METADATA_MODES --metadata-modes
+add_override LIMIT_PER_LANG --limit-per-lang
 add_override BOOTSTRAP_SAMPLES --bootstrap-samples
 add_override BOOTSTRAP_SEED --bootstrap-seed
 add_override BOOTSTRAP_WORKERS --bootstrap-workers

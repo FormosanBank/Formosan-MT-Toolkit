@@ -69,6 +69,23 @@ def configure_model(model, tokenizer) -> None:
     model.config.use_cache = False
 
 
+def validate_model_tokenizer(model, tokenizer) -> None:
+    embedding_size = int(model.get_input_embeddings().num_embeddings)
+    if len(tokenizer) == embedding_size:
+        return
+    extra_tokens = {
+        token: token_id
+        for token, token_id in tokenizer.get_added_vocab().items()
+        if int(token_id) >= embedding_size
+    }
+    if len(tokenizer) != embedding_size + 1 or extra_tokens != {
+        "<image_soft_token>": embedding_size
+    }:
+        raise SystemExit(
+            "MiLMMT tokenizer and text embedding table have an unexpected mismatch"
+        )
+
+
 def normalize_control_metadata(
     frame: pd.DataFrame,
     tokenizer,

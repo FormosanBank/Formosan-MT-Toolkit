@@ -499,8 +499,7 @@ def main() -> None:
         dtype=LOAD_DTYPES[args.load_dtype],
     )
     runtime.configure_model(model, tokenizer)
-    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        raise SystemExit("Tokenizer and model vocabulary sizes differ; load matching checkpoint artifacts.")
+    runtime.validate_model_tokenizer(model, tokenizer)
     device_name = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
     if device_name == "auto":
         device_name = "cpu"
