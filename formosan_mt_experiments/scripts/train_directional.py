@@ -96,7 +96,7 @@ def prepare_data(
     if train.empty:
         raise SystemExit("No train rows found.")
     if val.empty:
-        raise SystemExit("No human validation rows found")
+        raise SystemExit("No validation rows found")
     val_mt_eligible = bool_series(
         val["mt_eval_eligible"],
         context="training validation rows:mt_eval_eligible",
@@ -156,8 +156,6 @@ def prepare_data(
         "pivot_origin",
         pd.Series("original", index=val.index),
     ).astype(str)
-    if pivot_origin.eq("synthetic").any():
-        raise SystemExit("Synthetic rows are forbidden in validation")
     if not val["row_type"].astype(str).eq("sentence").all():
         raise SystemExit("Validation must contain sentence rows only")
 
@@ -216,7 +214,8 @@ def prepare_data(
             .eq("synthetic")
             .sum()
         ),
-        "synthetic_validate_rows": 0,
+        "synthetic_validate_rows": int(pivot_origin.eq("synthetic").sum()),
+        "human_validate_rows": int((~pivot_origin.eq("synthetic")).sum()),
         "train_by_language": {k: int(len(v["df"])) for k, v in train_by_lang.items()},
         "validate_by_language": {k: int(len(v["df"])) for k, v in val_by_lang.items()},
     }
@@ -317,7 +316,7 @@ def validation_subset(df: pd.DataFrame, lang: str, args) -> pd.DataFrame:
 
 
 def validation_sample_manifest(val_by_lang: dict, args) -> dict:
-    """Record exactly which human validation rows drive checkpoint selection."""
+    """Record exactly which validation rows drive checkpoint selection."""
     rows = {}
     for lang, info in sorted(val_by_lang.items()):
         subset = validation_subset(info["df"], lang, args)

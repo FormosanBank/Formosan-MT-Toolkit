@@ -7,7 +7,6 @@ import argparse
 import math
 import unicodedata
 from collections import Counter
-from itertools import chain
 from pathlib import Path
 
 import pandas as pd
@@ -19,12 +18,15 @@ from experiment_config import (
 )
 from model_backends import get_backend
 from mt_common import (
+    add_normalized_columns,
     bool_series,
     direction_choices,
+    evaluation_candidate_mask,
     mt_standard_contract,
     normalize_target_language,
     read_parallel_csv,
     source_bucket,
+    source_corpus,
     target_col_for,
     write_json,
 )
@@ -199,15 +201,10 @@ def char_ngrams(value: str, size: int = 4) -> frozenset[str]:
 
 def jaccard_prefix(
     grams: frozenset[str],
-    frequency: Counter[str],
     threshold: float,
 ) -> tuple[str, ...]:
     prefix_length = len(grams) - math.ceil(threshold * len(grams)) + 1
-    return tuple(
-        sorted(grams, key=lambda gram: (frequency[gram], gram))[
-            : max(1, prefix_length)
-        ]
-    )
+    return tuple(sorted(grams)[: max(1, prefix_length)])
 
 
 def ngram_conflict_count(
@@ -239,41 +236,65 @@ def ngram_conflict_count(
         candidate_group = candidate_groups.get(str(language))
         if candidate_group is None:
             continue
-        candidate_grams = {
-            int(index): char_ngrams(value)
-            for index, value in candidate_group[column].astype(str).items()
-            if len(value) >= 8
-        }
-        reference_grams = {
-            value: char_ngrams(value)
-            for value in set(reference_group[column].astype(str))
-            if len(value) >= 8
-        }
-        frequency: Counter[str] = Counter()
-        for grams in chain(
-            candidate_grams.values(),
-            reference_grams.values(),
-        ):
-            frequency.update(grams)
-        prefix_index: dict[str, list[int]] = {}
-        for index, grams in candidate_grams.items():
-            for gram in jaccard_prefix(grams, frequency, threshold):
-                prefix_index.setdefault(gram, []).append(index)
-        for grams in reference_grams.values():
-            possible: set[int] = set()
-            for gram in jaccard_prefix(grams, frequency, threshold):
-                possible.update(prefix_index.get(gram, ()))
-            for index in possible:
-                other = candidate_grams[index]
-                if not (
-                    threshold * len(grams)
-                    <= len(other)
-                    <= len(grams) / threshold
-                ):
+        if len(candidate_group) <= len(reference_group):
+            indexed = {
+                int(index): char_ngrams(value)
+                for index, value in candidate_group[column].astype(str).items()
+                if len(value) >= 8
+            }
+            prefix_index: dict[str, list[int]] = {}
+            for index, grams in indexed.items():
+                for gram in jaccard_prefix(grams, threshold):
+                    prefix_index.setdefault(gram, []).append(index)
+            for value in set(reference_group[column].astype(str)):
+                if len(value) < 8:
                     continue
-                union = len(grams | other)
-                if union and len(grams & other) / union >= threshold:
-                    conflicts.add(index)
+                grams = char_ngrams(value)
+                possible: set[int] = set()
+                for gram in jaccard_prefix(grams, threshold):
+                    possible.update(prefix_index.get(gram, ()))
+                for index in possible:
+                    other = indexed[index]
+                    if not (
+                        threshold * len(grams)
+                        <= len(other)
+                        <= len(grams) / threshold
+                    ):
+                        continue
+                    union = len(grams | other)
+                    if union and len(grams & other) / union >= threshold:
+                        conflicts.add(index)
+        else:
+            indexed = {
+                position: char_ngrams(value)
+                for position, value in enumerate(
+                    set(reference_group[column].astype(str))
+                )
+                if len(value) >= 8
+            }
+            prefix_index = {}
+            for position, grams in indexed.items():
+                for gram in jaccard_prefix(grams, threshold):
+                    prefix_index.setdefault(gram, []).append(position)
+            for index, value in candidate_group[column].astype(str).items():
+                if len(value) < 8:
+                    continue
+                grams = char_ngrams(value)
+                possible: set[int] = set()
+                for gram in jaccard_prefix(grams, threshold):
+                    possible.update(prefix_index.get(gram, ()))
+                for position in possible:
+                    other = indexed[position]
+                    if not (
+                        threshold * len(grams)
+                        <= len(other)
+                        <= len(grams) / threshold
+                    ):
+                        continue
+                    union = len(grams | other)
+                    if union and len(grams & other) / union >= threshold:
+                        conflicts.add(int(index))
+                        break
     return len(conflicts)
 
 
@@ -363,8 +384,10 @@ def pairwise_leakage(
             value
             for family in (exact, skeleton_overlap, one_edit, character_ngram)
             for value in family.values()
-        )
-        and overlap_count(left, right, "_document_key") == 0,
+        ),
+        "document_disjoint": (
+            overlap_count(left, right, "_document_key") == 0
+        ),
     }
 
 
@@ -430,8 +453,24 @@ def validate_splits(
     min_test_rows: int,
     min_validate_rows: int,
     ngram_threshold: float,
+    min_formosan_tokens: int = 4,
+    min_target_tokens: int = 4,
+    source_ratio_tolerance: float = 0.02,
+    require_human_eval: bool = False,
+    require_document_holdout: bool = False,
 ) -> dict[str, object]:
-    keyed = add_validation_keys(frame, target_col=target_col)
+    normalized = add_normalized_columns(
+        frame,
+        target_col=target_col,
+        target_lang=(
+            "chinese" if target_col == "chinese_sentence" else "english"
+        ),
+    )
+    keyed = add_validation_keys(normalized, target_col=target_col)
+    if "source_corpus" in keyed.columns:
+        keyed["_source_corpus"] = keyed["source_corpus"].astype(str)
+    else:
+        keyed["_source_corpus"] = keyed["source"].map(source_corpus)
     split = keyed["split"].astype(str).str.strip().str.lower()
     unknown_splits = sorted(set(split) - {"train", "validate", "test"})
     train = keyed[split.eq("train")]
@@ -472,12 +511,22 @@ def validate_splits(
             & split.isin(EVAL_SPLITS)
         ).sum()
     )
+    candidate = evaluation_candidate_mask(
+        keyed,
+        min_formosan_tokens=min_formosan_tokens,
+        min_target_tokens=min_target_tokens,
+    )
+    lexical_like_eval_rows = int(
+        (split.isin(EVAL_SPLITS) & ~candidate).sum()
+    )
 
     ratios: dict[str, dict[str, object]] = {}
     ratio_failures: dict[str, dict[str, object]] = {}
     for language, group in keyed.groupby("lang_code", sort=True):
-        group_split = group["split"].astype(str).str.lower()
-        total = len(group)
+        group_candidate = candidate.loc[group.index]
+        eligible_group = group[group_candidate]
+        group_split = eligible_group["split"].astype(str).str.lower()
+        total = len(eligible_group)
         test_rows = int(group_split.eq("test").sum())
         validate_rows = int(group_split.eq("validate").sum())
         required_test = max(math.ceil(total * min_test_ratio), min_test_rows)
@@ -487,17 +536,85 @@ def validate_splits(
         )
         values = {
             "rows": total,
+            "all_rows": len(group),
             "train": int(group_split.eq("train").sum()),
             "test": test_rows,
             "validate": validate_rows,
-            "test_ratio": test_rows / total,
-            "validate_ratio": validate_rows / total,
+            "test_ratio": test_rows / max(total, 1),
+            "validate_ratio": validate_rows / max(total, 1),
             "required_test": required_test,
             "required_validate": required_validate,
         }
         ratios[str(language)] = values
         if test_rows < required_test or validate_rows < required_validate:
             ratio_failures[str(language)] = values
+
+    source_ratios: dict[str, dict[str, dict[str, object]]] = {}
+    source_ratio_failures: dict[str, dict[str, dict[str, object]]] = {}
+    source_distribution_tvd: dict[str, dict[str, float]] = {}
+    for language, language_frame in keyed.groupby("lang_code", sort=True):
+        language_key = str(language)
+        language_candidate = language_frame[
+            candidate.loc[language_frame.index]
+        ]
+        eligible_distribution = Counter(language_candidate["_source_corpus"])
+        source_ratios[language_key] = {}
+        source_ratio_failures[language_key] = {}
+        source_distribution_tvd[language_key] = {}
+        for split_name, ratio in (
+            ("test", min_test_ratio),
+            ("validate", min_validate_ratio),
+        ):
+            distribution = Counter(
+                language_candidate[
+                    language_candidate["split"].astype(str).str.lower().eq(split_name)
+                ]["_source_corpus"]
+            )
+            total = sum(distribution.values())
+            eligible_total = sum(eligible_distribution.values())
+            source_distribution_tvd[language_key][split_name] = 0.5 * sum(
+                abs(
+                    eligible_distribution[bucket] / max(eligible_total, 1)
+                    - distribution[bucket] / max(total, 1)
+                )
+                for bucket in set(eligible_distribution) | set(distribution)
+            )
+        for bucket, source_frame in language_candidate.groupby(
+            "_source_corpus", sort=True
+        ):
+            bucket_key = str(bucket)
+            source_split = source_frame["split"].astype(str).str.lower()
+            total = len(source_frame)
+            test_rows = int(source_split.eq("test").sum())
+            validate_rows = int(source_split.eq("validate").sum())
+            row_tolerance = max(1, math.ceil(total * source_ratio_tolerance))
+            required_test = max(0, math.floor(total * min_test_ratio) - row_tolerance)
+            required_validate = max(
+                0,
+                math.floor(total * min_validate_ratio) - row_tolerance,
+            )
+            allowed_test = math.ceil(total * min_test_ratio) + row_tolerance
+            allowed_validate = (
+                math.ceil(total * min_validate_ratio) + row_tolerance
+            )
+            values = {
+                "eligible_sentence_rows": total,
+                "train": int(source_split.eq("train").sum()),
+                "test": test_rows,
+                "validate": validate_rows,
+                "test_ratio": test_rows / total,
+                "validate_ratio": validate_rows / total,
+                "test_bounds": [required_test, allowed_test],
+                "validate_bounds": [required_validate, allowed_validate],
+            }
+            source_ratios[language_key][bucket_key] = values
+            if not (
+                required_test <= test_rows <= allowed_test
+                and required_validate <= validate_rows <= allowed_validate
+            ):
+                source_ratio_failures[language_key][bucket_key] = values
+        if not source_ratio_failures[language_key]:
+            source_ratio_failures.pop(language_key)
 
     train_eval = pairwise_leakage(
         train,
@@ -519,24 +636,35 @@ def validate_splits(
     ok = (
         not unknown_splits
         and not ratio_failures
-        and synthetic_eval_rows == 0
+        and not source_ratio_failures
+        and (not require_human_eval or synthetic_eval_rows == 0)
         and mt_ineligible_eval_rows == 0
         and ambiguous_normalization_eval_rows == 0
         and lexical_eval_rows == 0
         and non_sentence_eval_rows == 0
+        and lexical_like_eval_rows == 0
         and duplicate_pairs == 0
         and bool(train_eval["ok"])
         and bool(validate_test["ok"])
+        and (
+            not require_document_holdout
+            or (
+                bool(train_eval["document_disjoint"])
+                and bool(validate_test["document_disjoint"])
+            )
+        )
     )
     return {
         "ok": ok,
         "unknown_splits": unknown_splits,
         "duplicate_pairs": duplicate_pairs,
         "synthetic_eval_rows": synthetic_eval_rows,
+        "synthetic_eval_allowed": not require_human_eval,
         "mt_ineligible_eval_rows": mt_ineligible_eval_rows,
         "ambiguous_normalization_eval_rows": ambiguous_normalization_eval_rows,
         "lexical_eval_rows": lexical_eval_rows,
         "non_sentence_eval_rows": non_sentence_eval_rows,
+        "lexical_like_eval_rows": lexical_like_eval_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
         "validate_test_cross_language_diagnostic": (
@@ -550,6 +678,10 @@ def validate_splits(
         },
         "ratios_by_language": ratios,
         "ratio_failures": ratio_failures,
+        "ratios_by_language_and_source": source_ratios,
+        "source_ratio_failures": source_ratio_failures,
+        "source_distribution_total_variation": source_distribution_tvd,
+        "source_ratio_tolerance": source_ratio_tolerance,
         "ngram_jaccard_threshold": ngram_threshold,
     }
 
@@ -644,16 +776,32 @@ def parse_args() -> argparse.Namespace:
             "character_ngram_jaccard_threshold"
         ],
     )
+    parser.add_argument(
+        "--min-formosan-tokens",
+        type=int,
+        default=split_defaults.get("min_formosan_tokens", 4),
+    )
+    parser.add_argument(
+        "--min-target-tokens",
+        type=int,
+        default=split_defaults.get("min_target_tokens", 4),
+    )
+    parser.add_argument(
+        "--source-ratio-tolerance",
+        type=float,
+        default=split_defaults.get("source_ratio_tolerance", 0.02),
+        help="Allowed per-source split deviation in addition to one row.",
+    )
     parser.add_argument("--report", "--output-json", dest="report", type=Path)
     parser.add_argument(
         "--require-human-eval",
         action="store_true",
-        help="Compatibility flag; human-only evaluation is always required.",
+        help="Reject synthetic pivot references in evaluation.",
     )
     parser.add_argument(
         "--require-document-holdout-report",
         action="store_true",
-        help="Compatibility flag; document disjointness is always required.",
+        help="Require source XML documents to be disjoint across splits.",
     )
     args = parser.parse_args()
     args.profile = known.profile
@@ -680,6 +828,11 @@ def main() -> None:
         min_test_rows=args.min_test_rows,
         min_validate_rows=args.min_validate_rows,
         ngram_threshold=args.ngram_jaccard_threshold,
+        min_formosan_tokens=args.min_formosan_tokens,
+        min_target_tokens=args.min_target_tokens,
+        source_ratio_tolerance=args.source_ratio_tolerance,
+        require_human_eval=args.require_human_eval,
+        require_document_holdout=args.require_document_holdout_report,
     )
     report: dict[str, object] = {
         "schema_version": 3,
@@ -709,7 +862,31 @@ def main() -> None:
         )
     if args.report:
         write_json(args.report, report)
-    print(report)
+    leakage = split_validation["train_evaluation"]
+    print(
+        f"Corpus validation: {'PASS' if report['complete'] else 'FAIL'} "
+        f"({len(frame):,} rows, {target_lang})"
+    )
+    print(
+        "  eval: "
+        f"synthetic={split_validation['synthetic_eval_rows']:,}, "
+        f"lexical-like={split_validation['lexical_like_eval_rows']:,}"
+    )
+    print(
+        "  train/eval conflicts: "
+        f"exact={sum(leakage['exact_overlap'].values()):,}, "
+        f"skeleton={sum(leakage['skeleton_overlap'].values()):,}, "
+        f"one-edit={sum(leakage['one_edit_conflicting_rows'].values()):,}, "
+        f"char-ngram={sum(leakage['character_ngram_conflicting_rows'].values()):,}"
+    )
+    print(
+        "  ratio failures: "
+        f"languages={len(split_validation['ratio_failures']):,}, "
+        "sources="
+        f"{sum(len(rows) for rows in split_validation['source_ratio_failures'].values()):,}"
+    )
+    if args.report:
+        print(f"  report: {args.report}")
     if not report["complete"]:
         raise SystemExit(1)
 

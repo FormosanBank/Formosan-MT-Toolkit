@@ -33,12 +33,17 @@ Use only `big_corpus_<en|zh>_in_domain_hard.csv` from a completed v3 provenance
 bundle. Before model setup, `scripts/validate_experiment.py` verifies:
 
 - the corpus, profile, standardization namespace, and artifact hashes;
-- at least 7.5% test and 2.5% validation rows per language;
-- human sentence references only in evaluation;
-- no synthetic, lexical, morpheme, or ambiguous-normalization evaluation rows;
-- document holdout or a declared small-language fallback;
+- roughly 90/2.5/7.5 train/validation/test proportions within every language
+  and source corpus;
+- sentence references only in evaluation, preferring human rows before valid
+  synthetic pivot fallbacks;
+- no lexical, morpheme, lexical-source, short, or ambiguous-normalization
+  evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts
   across split boundaries.
+
+Document overlap is diagnostic rather than a gate because a source corpus may
+store thousands of independent records in one XML file.
 
 The local release pipeline also runs per-language TAME-MT exposure checks in
 both translation directions. Tokenizer/model setup consumes training rows only.

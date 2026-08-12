@@ -1211,10 +1211,12 @@ def build_hard_splits(
                     str(args.min_validate_rows),
                     "--ngram-jaccard-threshold",
                     str(args.ngram_jaccard_threshold),
+                    "--min-formosan-tokens",
+                    str(args.min_formosan_tokens),
+                    "--min-target-tokens",
+                    str(args.min_target_tokens),
                     "--report",
                     str(out_dir / "validation_in_domain_hard.json"),
-                    "--require-human-eval",
-                    "--require-document-holdout-report",
                 ],
                 label=f"Validate {target_lang} hard split",
                 log_path=stage_log(paths, f"validate_{short}"),
@@ -1643,8 +1645,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=PIPELINE_CONFIG["splits"]["test_ratio"],
     )
-    parser.add_argument("--min-formosan-tokens", type=int, default=4)
-    parser.add_argument("--min-target-tokens", type=int, default=4)
+    parser.add_argument(
+        "--min-formosan-tokens",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_formosan_tokens"],
+    )
+    parser.add_argument(
+        "--min-target-tokens",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_target_tokens"],
+    )
     parser.add_argument(
         "--min-test-rows",
         type=int,

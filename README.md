@@ -8,8 +8,10 @@ NLLB-200 and MADLAD-400 3B.
 
 The supported workflow is corpus pipeline v3. It keeps the supplied XML
 `kindOf="standard"` tier, derives a separate model-facing standardization,
-records every transformation, keeps synthetic and lexical rows in training,
-and creates hard human-reference evaluation splits.
+records every transformation, keeps lexical rows in training, and creates
+source-balanced hard evaluation splits. Human sentence references
+are preferred; validated pivot sentences are used only when a source lacks
+enough human parallel sentences.
 
 ## Quick Start
 
@@ -97,9 +99,12 @@ Production builds fail unless all of these conditions hold:
 - model text comes from the separate, versioned `formosan-mt` namespace;
 - malformed, missing, rejected, quarantined, and deduplicated rows are logged;
 - DeepL completion is explicit and every provider response is validated;
-- lexemes, morphemes, and synthetic rows are training-only;
-- every language has at least 7.5% test and 2.5% validation rows;
-- evaluation references are human and sentence-level;
+- lexemes, morphemes, lexical source corpora, and short lexical-like rows are
+  training-only;
+- each language/source corpus contributes roughly 90% of its eligible sentence
+  rows to train, 7.5% to test, and 2.5% to validation;
+- evaluation references are sentence-level, with human rows preferred before
+  validated synthetic pivot rows;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;
 - exact TAME-MT source, target, and pair exposure at 0.95 is zero;

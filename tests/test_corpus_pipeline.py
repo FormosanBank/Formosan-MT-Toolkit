@@ -31,6 +31,7 @@ from build_mt_corpus import (  # noqa: E402
     replace_with_hardlink,
 )
 from clean_xml import (  # noqa: E402
+    SYNC_FILES,
     audit_standard_tiers,
     classify_translation_version_repairs,
     ensure_standard_tiers,
@@ -325,6 +326,12 @@ class MTStandardizationTests(unittest.TestCase):
 
 
 class StandardTierTests(unittest.TestCase):
+    def test_pinned_qc_snapshot_includes_required_root_registries(self) -> None:
+        self.assertEqual(
+            SYNC_FILES,
+            {"dialects.csv", "languages.csv", "standards.csv"},
+        )
+
     def write_xml(self, directory: Path, body: str) -> Path:
         path = directory / "sample.xml"
         path.write_text(
@@ -1107,6 +1114,24 @@ class AcquisitionTests(unittest.TestCase):
                 )
         self.assertEqual(tree[0]["path"], "Final_XML/Paiwan/sample.xml")
         self.assertEqual(get.call_count, 2)
+
+    def test_private_xml_discovery_accepts_both_supported_roots(self) -> None:
+        self.assertTrue(
+            fetch_xml.is_private_release_xml_path(
+                "Final_XML/Paiwan/sample.xml"
+            )
+        )
+        self.assertTrue(
+            fetch_xml.is_private_release_xml_path("XML/Paiwan/sample.xml")
+        )
+        self.assertFalse(
+            fetch_xml.is_private_release_xml_path(
+                "archive/XML/Paiwan/sample.xml"
+            )
+        )
+        self.assertFalse(
+            fetch_xml.is_private_release_xml_path("Final_XML/README.md")
+        )
 
     def test_repository_snapshot_is_resolved_once_and_reused(self) -> None:
         selection = repository_selection(

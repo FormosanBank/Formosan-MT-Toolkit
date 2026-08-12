@@ -25,6 +25,7 @@ from build_experiment_splits import (  # noqa: E402
     GroupCandidate,
     build_hard_split,
     choose_groups,
+    ngram_candidate_conflicts,
     one_edit_conflicts,
     split_targets,
 )
@@ -32,7 +33,11 @@ from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E
 from experiment_config import DEFAULT_PROFILE, load_profile  # noqa: E402
 from formosan_mt_inference import normalize_formosan  # noqa: E402
 from model_backends import get_backend, normalize_control_metadata  # noqa: E402
-from mt_common import add_normalized_columns  # noqa: E402
+from mt_common import (  # noqa: E402
+    add_normalized_columns,
+    evaluation_candidate_mask,
+    source_corpus,
+)
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from mt_standardization import (  # noqa: E402
     DEFAULT_PROFILE_PATH as MT_STANDARD_PROFILE_PATH,
@@ -368,6 +373,24 @@ class ModelBackendTests(unittest.TestCase):
 
 
 class LeakageTests(unittest.TestCase):
+    def test_source_corpus_preserves_exact_public_and_private_identity(self) -> None:
+        self.assertEqual(
+            source_corpus(
+                "FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"
+            ),
+            "NTUFormosanCorpus",
+        )
+        self.assertEqual(
+            source_corpus(
+                "Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"
+            ),
+            "Formosan-Zheng-ACL-2024",
+        )
+        self.assertEqual(
+            source_corpus("PrivateRepo/XML/Bunun/examples.xml"),
+            "PrivateRepo",
+        )
+
     def test_group_selection_reserves_the_other_evaluation_split(self) -> None:
         candidates = [
             GroupCandidate(
@@ -426,18 +449,83 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertEqual(one_edit_conflicts(training, evaluation, "text"), {1, 2, 3})
 
-    def test_split_targets_use_every_final_row_as_denominator(self) -> None:
+    def test_streaming_ngram_join_finds_conflicts_with_either_side_smaller(self) -> None:
+        base = "abcdefghijklmnopqrstuvwxyz" * 4
+        near = base[:50] + "X" + base[51:]
+        far = "zyxwvutsrqponmlkjihgfedcba" * 4
+        reference = pd.DataFrame(
+            {"lang_code": ["ami"], "text": [base]},
+            index=[100],
+        )
+        candidates = pd.DataFrame(
+            {
+                "lang_code": ["ami", "ami", "ami"],
+                "text": [near, far, f"{far} extra"],
+            },
+            index=[1, 2, 3],
+        )
+        self.assertEqual(
+            ngram_candidate_conflicts(
+                reference,
+                candidates,
+                "text",
+                by_language=False,
+                threshold=0.82,
+            ),
+            {1},
+        )
+        self.assertEqual(
+            ngram_candidate_conflicts(
+                candidates,
+                reference,
+                "text",
+                by_language=False,
+                threshold=0.82,
+            ),
+            {100},
+        )
+
+    def test_split_targets_use_eligible_sentences_as_denominator(self) -> None:
         self.assertEqual(
             split_targets(
-                rows_total=100_000,
+                eligible_total=1_000,
+                test_ratio=0.075,
+                val_ratio=0.025,
+                min_test_rows=0,
+                min_validate_rows=0,
+            ),
+            (75, 25),
+        )
+        self.assertEqual(
+            split_targets(
                 eligible_total=20_000,
                 test_ratio=0.075,
                 val_ratio=0.025,
-                min_test_rows=500,
-                min_validate_rows=150,
+                min_test_rows=0,
+                min_validate_rows=0,
             ),
-            (7_500, 2_500),
+            (1_500, 500),
         )
+
+    def test_word_list_sources_are_not_evaluation_candidates(self) -> None:
+        row = self.hard_split_fixture().iloc[[0]].copy()
+        row["source"] = (
+            "Formosan-ILRDF-42-Language-Practice-Word-Lists/"
+            "Final_XML/Atayal/word-list.xml"
+        )
+        row["formosan_sentence"] = "one two three four"
+        row["english_sentence"] = "first second third fourth"
+        normalized = add_normalized_columns(
+            row,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        candidates = evaluation_candidate_mask(
+            normalized,
+            min_formosan_tokens=4,
+            min_target_tokens=4,
+        )
+        self.assertFalse(bool(candidates.iloc[0]))
 
     @staticmethod
     def hard_split_fixture() -> pd.DataFrame:
@@ -502,7 +590,7 @@ class LeakageTests(unittest.TestCase):
         rows.append({**rows[0], "row_id": "duplicate-pair"})
         return add_mt_contract(pd.DataFrame(rows))
 
-    def test_hard_split_is_human_document_disjoint_and_large(self) -> None:
+    def test_hard_split_prefers_human_rows_and_excludes_lexemes(self) -> None:
         raw = self.hard_split_fixture()
         keyed = add_normalized_columns(
             raw,
@@ -524,14 +612,12 @@ class LeakageTests(unittest.TestCase):
             registry_in=None,
         )
         evaluation = output[output["split"].isin({"test", "validate"})]
-        train = output[output["split"].eq("train")]
         self.assertTrue(evaluation["row_type"].eq("sentence").all())
         self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
-        self.assertFalse(
-            set(train["document_id"]) & set(evaluation["document_id"])
-        )
+        self.assertEqual(report["lexical_like_eval_rows"], 0)
+        self.assertGreaterEqual(report["document_overlap_train_eval"], 0)
         self.assertEqual(len(duplicates), 1)
-        self.assertGreater(len(excluded), 0)
+        self.assertEqual(len(excluded), 0)
         self.assertTrue(report["complete"])
 
         provenance = validate_provenance(output)
@@ -571,6 +657,76 @@ class LeakageTests(unittest.TestCase):
         first_map = dict(zip(first["row_id"], first["split"], strict=True))
         second_map = dict(zip(second["row_id"], second["split"], strict=True))
         self.assertEqual(first_map, second_map)
+
+    def test_hard_split_apportions_each_source_corpus(self) -> None:
+        raw = self.hard_split_fixture()
+        document_numbers = raw["source"].str.extract(r"doc-(\d+)")[0]
+        first_source = document_numbers.fillna("0").astype(int).lt(30)
+        raw.loc[first_source, "source"] = raw.loc[
+            first_source, "source"
+        ].str.replace("/Test/", "/SourceA/", regex=False)
+        raw.loc[~first_source, "source"] = raw.loc[
+            ~first_source, "source"
+        ].str.replace("/Test/", "/SourceB/", regex=False)
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        _, _, _, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+
+        for source in ("SourceA", "SourceB"):
+            values = report["source_strata"]["ami"][source]
+            self.assertEqual(values["test_rows"], values["target_test_rows"])
+            self.assertEqual(
+                values["validate_rows"],
+                values["target_validate_rows"],
+            )
+        self.assertLess(
+            report["source_distribution_total_variation"]["ami"]["test"],
+            0.02,
+        )
+
+    def test_hard_split_uses_synthetic_sentences_only_as_fallback(self) -> None:
+        raw = self.hard_split_fixture()
+        sentence_indexes = raw.index[raw["row_type"].eq("sentence")]
+        raw.loc[sentence_indexes[2:], "pivot_origin"] = "synthetic"
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        output, _, _, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+        evaluation = output[output["split"].isin({"test", "validate"})]
+        self.assertGreater(report["synthetic_eval_rows"], 0)
+        self.assertTrue(evaluation["row_type"].eq("sentence").all())
+        self.assertEqual(report["lexical_like_eval_rows"], 0)
 
     def test_near_synthetic_training_rows_are_excluded_not_eval(self) -> None:
         raw = self.hard_split_fixture()
@@ -646,18 +802,17 @@ class LeakageTests(unittest.TestCase):
         self.assertFalse(
             evaluation["pivot_origin"].eq("synthetic").any()
         )
+        language = report["languages"]["ami"]
         self.assertGreaterEqual(
-            len(output[output["split"].eq("test")])
-            / len(output),
+            language["test_fraction_of_eligible_sentences"],
             0.075,
         )
         self.assertGreaterEqual(
-            len(output[output["split"].eq("validate")])
-            / len(output),
+            language["validate_fraction_of_eligible_sentences"],
             0.025,
         )
 
-    def test_independent_validator_rejects_synthetic_same_document_eval(self) -> None:
+    def test_independent_validator_reports_synthetic_and_document_overlap(self) -> None:
         frame = self.hard_split_fixture().iloc[:3].copy()
         frame["split"] = ["train", "test", "validate"]
         frame.loc[frame.index[1], "pivot_origin"] = "synthetic"
@@ -670,12 +825,26 @@ class LeakageTests(unittest.TestCase):
             min_validate_rows=0,
             ngram_threshold=0.82,
         )
-        self.assertFalse(validation["ok"])
+        self.assertTrue(validation["ok"], validation)
         self.assertEqual(validation["synthetic_eval_rows"], 1)
         self.assertGreater(
             validation["train_evaluation"]["document_overlap"],
             0,
         )
+        strict = validate_splits(
+            frame,
+            target_col="english_sentence",
+            min_test_ratio=0,
+            min_validate_ratio=0,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.82,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            require_human_eval=True,
+            require_document_holdout=True,
+        )
+        self.assertFalse(strict["ok"])
 
     def test_validate_test_target_overlap_is_task_conditioned(self) -> None:
         frame = pd.DataFrame(
@@ -735,6 +904,8 @@ class LeakageTests(unittest.TestCase):
             min_test_rows=0,
             min_validate_rows=0,
             ngram_threshold=0.82,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
         )
 
         self.assertTrue(validation["ok"], validation)
@@ -935,6 +1106,10 @@ class ExposureAuditTests(unittest.TestCase):
                 max_high_exposure_rate=0.0,
             ),
             [],
+        )
+        self.assertEqual(
+            payload["by_split"]["test"]["by_source_corpus"]["unknown"]["rows"],
+            4,
         )
 
     def test_tame_release_gate_rejects_exact_train_test_pair(self) -> None:
@@ -1243,7 +1418,8 @@ class ExperimentManifestTests(unittest.TestCase):
         )
         self.assertIn("model-index:", card)
         self.assertIn("headline result uses `default` metadata", card)
-        self.assertIn("document\ntrain/evaluation conflicts", card)
+        self.assertIn("Document overlap is diagnostic", card)
+        self.assertIn("source-balanced", card)
         self.assertIn("`20260809-210523`", card)
         self.assertNotIn("MADLAD selects", card)
 

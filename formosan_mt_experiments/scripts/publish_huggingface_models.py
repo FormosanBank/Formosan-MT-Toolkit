@@ -381,7 +381,7 @@ weights are public, but the private training corpus is not included.
 | Maximum sequence length | {training['max_length']:,} |
 | Learning rate | {training['learning_rate']:.2g} |
 | Precision | `{training['precision']}` |
-| Checkpoint selection | Human validation `{training['best_metric']}` |
+| Checkpoint selection | Validation `{training['best_metric']}` |
 | Formosan text | `kindOf=standard`, `{profile['mt_standardization']['id']}` |
 | Corpus SHA-256 | `{corpus['sha256']}` |
 | Training profile SHA-256 | `{metrics['profile']['sha256']}` |
@@ -395,8 +395,10 @@ when source bucket or dialect metadata is unavailable.
 
 ## Evaluation
 
-The best checkpoint was selected on human validation chrF2. Test references
-are human sentence pairs; synthetic pivots and lexical entries are train-only.
+The best checkpoint was selected on validation chrF2. Evaluation contains only
+eligible sentence pairs. Human references are preferred within each source;
+validated synthetic pivots are used only where human coverage is insufficient.
+Lexical entries remain train-only.
 The headline result uses `{headline_mode}` metadata controls, so it does not
 assume access to test-set domain or dialect labels.
 
@@ -418,14 +420,15 @@ Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
 |---|---:|---:|---:|---:|
 {by_language}
 
-The corpus gate enforces standard-tier Formosan text, at least 7.5% test and
-2.5% validation per language, human sentence-only evaluation, and zero exact,
-skeleton, one-edit, configured high character n-gram, or document
-train/evaluation conflicts. This release passed all gates: exact
+The corpus gate enforces standard-tier Formosan text, source-balanced
+90/2.5/7.5 train/validation/test proportions, sentence-only evaluation, and
+zero exact, skeleton, one-edit, or configured high character n-gram
+train/evaluation conflicts. Document overlap is diagnostic. This release
+passed all leakage gates: exact
 {corpus_validation['exact_overlap']}, skeleton
 {corpus_validation['skeleton_overlap']}, one-edit
 {corpus_validation['one_edit_conflicts']}, character n-gram
-{corpus_validation['character_ngram_conflicts']}, and document
+{corpus_validation['character_ngram_conflicts']}. Document overlap:
 {corpus_validation['document_overlap']}.
 
 See `eval/metrics.json` for sacreBLEU signatures, per-language, source,

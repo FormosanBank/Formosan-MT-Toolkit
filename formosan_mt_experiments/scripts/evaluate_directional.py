@@ -34,6 +34,7 @@ from mt_common import (
     normalize_target_language,
     read_parallel_csv,
     source_bucket,
+    source_corpus,
     target_col_for,
     target_language_from_direction,
     token_count,
@@ -535,6 +536,8 @@ def main() -> None:
     full = read_parallel_csv(args.input, target_col=args.target_col)
     if "source_bucket" not in full:
         full["source_bucket"] = full["source"].map(source_bucket)
+    if "source_corpus" not in full:
+        full["source_corpus"] = full["source"].map(source_corpus)
     if (
         "kindOf" not in full
         or not full["kindOf"].astype(str).str.lower().eq("standard").all()
@@ -545,19 +548,8 @@ def main() -> None:
     ].copy()
     if evaluation.empty:
         raise SystemExit(f"No rows with split={args.split}")
-    if (
-        evaluation.get(
-            "pivot_origin",
-            pd.Series("original", index=evaluation.index),
-        )
-        .astype(str)
-        .eq("synthetic")
-        .any()
-        or not evaluation["row_type"].astype(str).eq("sentence").all()
-    ):
-        raise SystemExit(
-            "Evaluation rows must be human sentence pairs"
-        )
+    if not evaluation["row_type"].astype(str).eq("sentence").all():
+        raise SystemExit("Evaluation rows must be sentence pairs")
     if (
         not bool_series(
             evaluation["mt_eval_eligible"],
@@ -641,6 +633,7 @@ def main() -> None:
             "direction": args.direction,
             "eval_tier": evaluation.get("eval_tier", ""),
             "source_bucket": evaluation["source_bucket"].astype(str),
+            "source_corpus": evaluation["source_corpus"].astype(str),
             "source": evaluation["source"].astype(str),
             "dialect": evaluation["dialect"].astype(str),
             "pivot_origin": evaluation.get("pivot_origin", "original"),
@@ -739,6 +732,20 @@ def main() -> None:
         "by_source_bucket": group_scores(
             predictions,
             "source_bucket",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_source_corpus": group_scores(
+            predictions,
+            "source_corpus",
+            hypothesis_column="hyp_default",
+            lowercase=args.lowercase_bleu,
+            bleu_tokenize=bleu_tokenize,
+        ),
+        "by_reference_origin": group_scores(
+            predictions,
+            "pivot_origin",
             hypothesis_column="hyp_default",
             lowercase=args.lowercase_bleu,
             bleu_tokenize=bleu_tokenize,

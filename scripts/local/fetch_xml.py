@@ -206,6 +206,15 @@ def is_public_release_xml_path(path: str) -> bool:
     return path.lower().endswith(".xml") and len(parts) >= 3 and parts[0] == "Corpora" and "XML" in parts[:-1]
 
 
+def is_private_release_xml_path(path: str) -> bool:
+    parts = path.split("/")
+    return (
+        path.lower().endswith(".xml")
+        and len(parts) >= 2
+        and parts[0] in {"Final_XML", "XML"}
+    )
+
+
 def read_metadata_cache(name: str, *, max_age: float | None = CACHE_MAX_AGE_SECONDS):
     path = CACHE_DIR / name
     try:
@@ -963,7 +972,6 @@ def main() -> None:
     future_jobs: list[futures.Future[dict[str, DownloadResult]]] = []
 
     with futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        tree_root = "Corpora" if args.public else "Final_XML"
         for repository_ref in tqdm(
             repository_refs,
             desc="Repository XML trees",
@@ -973,12 +981,24 @@ def main() -> None:
             try:
                 reference = repository_ref.requested_ref
                 commit_sha = repository_ref.commit_sha
-                tree = get_tree(
-                    args.org,
-                    repo,
-                    commit_sha,
-                    root_path=tree_root,
-                )
+                if args.public:
+                    tree = get_tree(
+                        args.org,
+                        repo,
+                        commit_sha,
+                        root_path="Corpora",
+                    )
+                else:
+                    tree = []
+                    for private_root in ("Final_XML", "XML"):
+                        tree.extend(
+                            get_tree(
+                                args.org,
+                                repo,
+                                commit_sha,
+                                root_path=private_root,
+                            )
+                        )
             except (requests.RequestException, RuntimeError) as exc:
                 repository_errors.append(f"{repo}: {exc}")
                 continue
@@ -994,8 +1014,9 @@ def main() -> None:
                     item
                     for item in tree
                     if item.get("type") == "blob"
-                    and str(item.get("path") or "").startswith("Final_XML/")
-                    and str(item.get("path") or "").lower().endswith(".xml")
+                    and is_private_release_xml_path(
+                        str(item.get("path") or "")
+                    )
                 ]
 
             queued_counts: Counter[str] = Counter()

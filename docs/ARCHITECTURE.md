@@ -14,9 +14,9 @@ consistent.
 `fetch_xml.py` enumerates repositories visible through GitHub, resolves each
 branch to a commit, rejects truncated trees, and verifies every downloaded blob
 against its Git object ID. Repository, tree, download, checksum, and parse
-failures make the fetch manifest incomplete. Public mode restricts input to the
-public FormosanBank corpus tree. Private mode means every eligible repository
-visible to the token.
+failures make the fetch manifest incomplete. Public mode restricts input to
+`Corpora/**/XML`. Private mode scans both top-level `Final_XML/` and `XML/`
+trees in every eligible repository visible to the token.
 
 One build resolves large repository sets with paginated GraphQL, then downloads,
 parses, and classifies each XML blob once for all requested Formosan languages.
@@ -136,34 +136,38 @@ both expected paths.
 pairwise split labels and builds the model-facing split. It:
 
 1. deduplicates canonical source-target pairs;
-2. locks lexical, morpheme, synthetic, ambiguous-normalization, and
-   MT-evaluation-ineligible rows out of evaluation;
-3. prefers clean, non-easy human sentences meeting the configured token floors,
-   expanding to all clean human sentences only where needed to reach the
-   per-language evaluation floor, and computes normalized plus
-   punctuation/spacing-skeleton keys;
-4. holds out complete source documents with an exact subset allocator that
-   reserves both per-language evaluation floors;
-5. keeps coarse documents intact and permits evaluation-size overshoot for
-   languages where exact 90/2.5/7.5 proportions are impossible;
+2. locks lexical, morpheme, ambiguous-normalization, MT-ineligible, and
+   lexical-like rows out of evaluation;
+3. allocates roughly 90/2.5/7.5 train/validation/test rows independently within
+   every language and source corpus using deterministic Hamilton apportionment;
+4. prefers human sentence references within each source stratum and uses
+   validated synthetic pivot sentences only when human coverage is insufficient;
+5. computes normalized and punctuation/spacing-skeleton keys;
 6. removes one-edit and character 4-gram Jaccard conflicts on both sides across
    train/test and train/validation globally; test/validation separation is
    target-language-task conditioned, with stricter cross-language reuse retained
-   as a diagnostic; conflicting training rows are excluded after the human
+   as a diagnostic; conflicting training rows are excluded after the
    benchmark is selected, rather than shrinking the evaluation set;
-7. fails if any language has less than 7.5% test or 2.5% validation against the
-   complete deduplicated corpus denominator.
+7. fails if language or source-corpus ratios miss their deterministic targets.
 
-The final denominator includes human, synthetic, sentence, and lexical rows.
-This prevents pivot growth from making evaluation statistically negligible.
+The denominator is the deduplicated set of evaluation-eligible sentence rows.
+This includes valid human and synthetic sentences but excludes lexical data,
+which cannot be used in the benchmark. Document overlap is reported as a
+diagnostic because some source corpora serialize thousands of unrelated rows in
+one XML file; treating that file as an indivisible split unit would recreate the
+source imbalance this stage prevents.
+
+`source_corpus` records the exact public corpus root or private repository used
+for split allocation. `source_bucket` remains the coarser domain control used by
+sampling and model tags.
 
 ### 8. Independent Validation
 
 `validate_experiment.py` independently verifies the MT-standard profile and
 alias contract, then recomputes provenance, split ratios,
-document overlap, normalized/skeleton overlap, one-edit conflicts, and exact
-character n-gram conflicts from the emitted CSV. It requires human sentence
-evaluation and MT-standard provenance.
+document overlap, normalized/skeleton overlap, one-edit conflicts, exact
+character n-gram conflicts, lexical eligibility, and per-source split ratios
+from the emitted CSV. It requires sentence-level MT-standard evaluation rows.
 
 `audit_corpus_exposure.py` then runs TAME-MT 0.2.2 with exact native retrieval
 in both MT directions. It reports SourceExposure, TargetExposure,
