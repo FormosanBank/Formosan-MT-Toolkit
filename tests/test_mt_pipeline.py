@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
 import milmmt_runtime as milmmt  # noqa: E402
 import nllb_runtime as nllb  # noqa: E402
+import tokenizer_audit  # noqa: E402
 from audit_corpus_exposure import (  # noqa: E402
     audit_direction,
     build_tame_config,
@@ -67,7 +68,7 @@ from publish_huggingface_models import (  # noqa: E402
     validate_checkpoint,
 )
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
-from train_directional import metric_improved, training_source_texts  # noqa: E402
+from train_directional import metric_improved, metric_value, training_source_texts  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
 from validate_experiment import (  # noqa: E402
     validate_provenance,
@@ -438,6 +439,67 @@ class MilmmtRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, "unexpected mismatch"):
             milmmt.validate_model_tokenizer(model, BadTokenizer())
+
+
+class TokenizerAuditTests(unittest.TestCase):
+    def test_milmmt_audit_reports_sequence_truncation(self) -> None:
+        class Tokenizer:
+            unk_token_id = 99
+
+            def __call__(self, text, **_kwargs):
+                return {
+                    "input_ids": [
+                        99 if character == "?" else ord(character)
+                        for character in str(text)
+                        if not character.isspace()
+                    ]
+                }
+
+            def tokenize(self, word):
+                return list(word)
+
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ami"],
+                "row_id": ["ami-1"],
+                "source": ["repo/example.xml"],
+                "formosan_sentence": ["ab cd"],
+                "english_sentence": ["xy"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "audit.json"
+            with (
+                mock.patch.object(
+                    tokenizer_audit.AutoTokenizer,
+                    "from_pretrained",
+                    return_value=Tokenizer(),
+                ),
+                mock.patch.object(
+                    tokenizer_audit,
+                    "read_parallel_csv",
+                    return_value=frame,
+                ),
+            ):
+                report = tokenizer_audit.audit_tokenizer(
+                    tokenizer_dir=Path("tokenizer"),
+                    input_csv=Path("corpus.csv"),
+                    output_json=output,
+                    output_csv=None,
+                    max_rows_per_lang=0,
+                    model_family="milmmt",
+                    direction="f2en",
+                    max_length=10,
+                )
+
+        amis = next(row for row in report["languages"] if row["lang_code"] == "ami")
+        self.assertEqual(amis["pieces_per_sentence"], 4.0)
+        self.assertEqual(amis["formosan_to_target_piece_ratio"], 2.0)
+        self.assertEqual(amis["training_examples_over_max_length"], 1)
+        self.assertEqual(
+            report["training_examples_over_max_length"][0]["row_id"],
+            "ami-1",
+        )
 
 
 class LeakageTests(unittest.TestCase):
@@ -971,11 +1033,16 @@ class LeakageTests(unittest.TestCase):
 
 class TrainingMetricTests(unittest.TestCase):
     def test_perfect_generation_metrics_and_diagnostics(self) -> None:
-        metrics = score_translations(["hello world", "talima"], ["hello world", "talima"])
+        metrics = score_translations(
+            ["hello world", "talima"],
+            ["hello world", "talima"],
+            sources=["different", "  TALIMA  "],
+        )
         self.assertAlmostEqual(metrics["chrF2"], 100.0)
         self.assertAlmostEqual(metrics["exact_match_rate"], 1.0)
         self.assertAlmostEqual(metrics["empty_output_rate"], 0.0)
         self.assertAlmostEqual(metrics["character_length_ratio"], 1.0)
+        self.assertAlmostEqual(metrics["source_copy_rate"], 0.5)
 
     def test_metric_direction_and_minimum_delta(self) -> None:
         self.assertTrue(metric_improved(20.1, 20.0, "chrF2", 0.05))
@@ -983,6 +1050,20 @@ class TrainingMetricTests(unittest.TestCase):
         self.assertTrue(metric_improved(1.8, 2.0, "mean_token_loss", 0.05))
         self.assertFalse(metric_improved(1.98, 2.0, "mean_token_loss", 0.05))
         self.assertTrue(metric_improved(49.0, 50.0, "TER", 0.05))
+        self.assertTrue(metric_improved(49.0, 50.0, "macro_TER", 0.05))
+
+    def test_macro_metric_weights_languages_equally(self) -> None:
+        metrics = {
+            "generation": {
+                "global": {"chrF2": 80.0},
+                "by_language": {
+                    "ami": {"chrF2": 40.0},
+                    "ssf": {"chrF2": 20.0},
+                },
+            }
+        }
+        self.assertEqual(metric_value(metrics, "chrF2"), 80.0)
+        self.assertEqual(metric_value(metrics, "macro_chrF2"), 30.0)
 
     def test_bootstrap_intervals_are_deterministic_and_ordered(self) -> None:
         kwargs = {
@@ -1055,6 +1136,7 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["tokenizer"], {"mode": "native"})
         self.assertEqual(profile["training_defaults"]["optimizer"], "adamw")
         self.assertEqual(profile["training_defaults"]["lr_scheduler"], "inverse_sqrt")
+        self.assertEqual(profile["training_defaults"]["best_metric"], "macro_chrF2")
         self.assertFalse(profile["training_defaults"]["use_tags"])
         self.assertEqual(profile["generation_defaults"]["beam"], 1)
 

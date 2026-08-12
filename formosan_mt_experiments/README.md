@@ -72,6 +72,7 @@ NLLB generation starts the decoder with EOS and selects the target with
 | Optimizer / schedule | AdamW / inverse square root |
 | Precision | bf16 |
 | Generation | Greedy |
+| Checkpoint selection | Macro validation chrF2 across languages |
 
 MiLMMT follows its official language-name prompt. Formosan names are learned
 during fine-tuning because the released model does not claim native Formosan
@@ -83,6 +84,30 @@ The recipe is based on the
 [GemmaX training code](https://github.com/xiaomi-research/gemmax), and the
 [MiLMMT post-training paper](https://arxiv.org/abs/2608.10812). It adapts the
 official supervised fine-tuning stage, not the multi-model GRPO stage.
+
+Audit native-tokenizer efficiency on training data before choosing a longer
+sequence limit:
+
+```bash
+python scripts/tokenizer_audit.py \
+  --tokenizer "$MODEL" \
+  --input "$PROJECT_DATA/private_no_bible/big_corpus_en_in_domain_hard.csv" \
+  --target-lang english \
+  --model-family milmmt \
+  --direction f2en \
+  --max-length 512 \
+  --split train \
+  --output-json tokenizer_audit_f2en.json \
+  --output-csv tokenizer_audit_f2en.csv
+```
+
+The audit reports sentence and word fragmentation, unknown tokens,
+Formosan-to-target token ratios, sequence-length percentiles, and the number
+of examples that would be truncated. For initial learning-rate pilots, submit
+separate run stamps with exported `LEARNING_RATE=5e-6` and `LEARNING_RATE=1e-5`.
+Keep `2e-5` as the paper-faithful comparison point.
+Use distinct `RUN_STAMP` values and export `SEED=42`, `SEED=43`, or `SEED=44`
+when running replicated final experiments.
 
 ## Slurm Submission
 

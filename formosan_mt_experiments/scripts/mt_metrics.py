@@ -57,6 +57,7 @@ def score_translations(
     hypotheses: Sequence[str],
     references: Sequence[str],
     *,
+    sources: Sequence[str] | None = None,
     lowercase: bool = False,
     bleu_tokenize: str = "13a",
 ) -> dict[str, object]:
@@ -65,6 +66,8 @@ def score_translations(
         raise RuntimeError(f"sacrebleu is required for MT metrics: {_SACREBLEU_ERROR}")
     if len(hypotheses) != len(references):
         raise ValueError("Hypothesis/reference counts do not match.")
+    if sources is not None and len(sources) != len(hypotheses):
+        raise ValueError("Source/hypothesis counts do not match.")
     if not hypotheses:
         raise ValueError("Cannot score an empty corpus.")
 
@@ -86,7 +89,7 @@ def score_translations(
     bleu_score = bleu.corpus_score(hyps, [refs])
     chrf_score = chrf.corpus_score(hyps, [refs])
     ter_score = ter.corpus_score(hyps, [refs])
-    return {
+    metrics = {
         "BLEU": float(bleu_score.score),
         "chrF2": float(chrf_score.score),
         "TER": float(ter_score.score),
@@ -99,6 +102,21 @@ def score_translations(
             "TER": str(ter.get_signature()),
         },
     }
+    if sources is not None:
+        normalized_sources = [" ".join(str(text).casefold().split()) for text in sources]
+        normalized_hypotheses = [" ".join(text.casefold().split()) for text in hyps]
+        metrics["source_copy_rate"] = float(
+            sum(
+                hypothesis == source
+                for hypothesis, source in zip(
+                    normalized_hypotheses,
+                    normalized_sources,
+                    strict=True,
+                )
+            )
+            / len(hyps)
+        )
+    return metrics
 
 
 def percentile(values: list[float], probability: float) -> float:

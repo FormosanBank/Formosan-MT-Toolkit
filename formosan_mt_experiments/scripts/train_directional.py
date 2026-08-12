@@ -370,12 +370,14 @@ def evaluate_generation(
     model.eval()
     hypotheses: list[str] = []
     references: list[str] = []
+    sources: list[str] = []
     by_language: dict[str, dict] = {}
     bleu_tokenize = "zh" if args.direction == "f2zh" else "13a"
     for lang, info in sorted(val_by_lang.items()):
         df = validation_subset(info["df"], lang, args)
         lang_hypotheses: list[str] = []
         lang_references = df["tgt_text"].astype(str).tolist()
+        lang_sources = df["src_text"].astype(str).tolist()
         task = info["task"]
         for start in range(0, len(df), args.generation_batch_size):
             batch = df.iloc[start : start + args.generation_batch_size]
@@ -398,17 +400,24 @@ def evaluate_generation(
         by_language[lang] = {"samples": len(df)} | score_translations(
             lang_hypotheses,
             lang_references,
+            sources=lang_sources,
             bleu_tokenize=bleu_tokenize,
         )
         hypotheses.extend(lang_hypotheses)
         references.extend(lang_references)
+        sources.extend(lang_sources)
     if training_use_cache is not None:
         model.config.use_cache = training_use_cache
     model.train()
     return {
         "samples": len(hypotheses),
         "bleu_tokenize": bleu_tokenize,
-        "global": score_translations(hypotheses, references, bleu_tokenize=bleu_tokenize),
+        "global": score_translations(
+            hypotheses,
+            references,
+            sources=sources,
+            bleu_tokenize=bleu_tokenize,
+        ),
         "by_language": by_language,
     }
 
@@ -416,13 +425,22 @@ def evaluate_generation(
 def metric_value(metrics: dict, name: str) -> float:
     if name == "mean_token_loss":
         return float(metrics[name])
+    if name.startswith("macro_"):
+        metric = name.removeprefix("macro_")
+        values = [
+            float(language_metrics[metric])
+            for language_metrics in metrics["generation"]["by_language"].values()
+        ]
+        if not values:
+            raise ValueError(f"Cannot compute {name} without per-language metrics")
+        return float(np.mean(values))
     return float(metrics["generation"]["global"][name])
 
 
 def metric_improved(current: float, best: float | None, name: str, min_delta: float) -> bool:
     if best is None:
         return True
-    if name in {"mean_token_loss", "TER"}:
+    if name == "mean_token_loss" or name.endswith("TER"):
         return current < best - min_delta
     return current > best + min_delta
 
@@ -721,7 +739,15 @@ def main() -> None:
     parser.add_argument("--validation-max-new-tokens", type=int, default=256)
     parser.add_argument(
         "--best-metric",
-        choices=["chrF2", "BLEU", "TER", "mean_token_loss"],
+        choices=[
+            "chrF2",
+            "BLEU",
+            "TER",
+            "macro_chrF2",
+            "macro_BLEU",
+            "macro_TER",
+            "mean_token_loss",
+        ],
         default=defaults["best_metric"],
         help="Validation metric used for best checkpoint selection and early stopping.",
     )

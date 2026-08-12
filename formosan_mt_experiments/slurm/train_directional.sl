@@ -95,6 +95,12 @@ add_override BATCH_SIZE --batch-size
 add_override GRAD_ACCUM_STEPS --grad-accum-steps
 add_override MAX_LENGTH --max-length
 add_override LEARNING_RATE --learning-rate
+add_override WARMUP_STEPS --warmup-steps
+add_override WEIGHT_DECAY --weight-decay
+add_override MAX_GRAD_NORM --max-grad-norm
+add_override ALPHA --alpha
+add_override EASY_SOURCE_WEIGHT --easy-source-weight
+add_override SEED --seed
 add_override SAVE_INTERVAL --save-interval
 add_override EVAL_INTERVAL --eval-interval
 add_override LOG_INTERVAL --log-interval

@@ -311,6 +311,7 @@ def group_scores(
             **score_translations(
                 subset[hypothesis_column].tolist(),
                 subset["ref"].tolist(),
+                sources=subset["src"].tolist(),
                 lowercase=lowercase,
                 bleu_tokenize=bleu_tokenize,
             ),
@@ -584,6 +585,7 @@ def main() -> None:
             **score_translations(
                 predictions[f"hyp_{mode}"].tolist(),
                 predictions["ref"].tolist(),
+                sources=predictions["src"].tolist(),
                 lowercase=args.lowercase_bleu,
                 bleu_tokenize=bleu_tokenize,
             ),
