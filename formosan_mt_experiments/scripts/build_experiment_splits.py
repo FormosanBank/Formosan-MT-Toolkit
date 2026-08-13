@@ -176,22 +176,130 @@ def globally_unsafe_one_edit_candidates(
     return conflicts
 
 
-def char_ngrams(value: str, size: int = 4) -> frozenset[str]:
-    value = str(value)
-    if not value:
-        return frozenset()
-    if len(value) <= size:
-        return frozenset({value})
-    return frozenset(value[position : position + size] for position in range(len(value) - size + 1))
-
-
 def jaccard_prefix(
-    grams: frozenset[str],
+    grams: frozenset[int],
     threshold: float,
-) -> tuple[str, ...]:
+) -> tuple[int, ...]:
     """PPJoin-style prefix that cannot miss a pair above the threshold."""
     prefix_length = len(grams) - math.ceil(threshold * len(grams)) + 1
     return tuple(sorted(grams)[: max(1, prefix_length)])
+
+
+class NgramSimilarityIndex:
+    """Reusable exact character n-gram lookup for split refinement."""
+
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        column: str,
+        *,
+        by_language: bool,
+        threshold: float,
+    ) -> None:
+        self.threshold = threshold
+        self.by_language = by_language
+        self.languages = frame["lang_code"].astype(str)
+        self.features: dict[int, frozenset[int]] = {}
+        self.prefixes: dict[int, tuple[int, ...]] = {}
+        self.postings: dict[str, dict[int, list[int]]] = {}
+        values = frame[column].astype(str)
+        gram_counts: Counter[str] = Counter()
+        for value in values:
+            if len(value) >= 8:
+                gram_counts.update(
+                    {
+                        value[position : position + 4]
+                        for position in range(len(value) - 3)
+                    }
+                )
+        gram_ids = {
+            gram: index
+            for index, gram in enumerate(
+                sorted(gram_counts, key=lambda gram: (gram_counts[gram], gram))
+            )
+        }
+
+        for index, value in values.items():
+            if len(value) < 8:
+                continue
+            row_index = int(index)
+            grams = frozenset(
+                gram_ids[value[position : position + 4]]
+                for position in range(len(value) - 3)
+            )
+            prefix = jaccard_prefix(grams, threshold)
+            group = self.languages.at[index] if by_language else "_global"
+            group_postings = self.postings.setdefault(group, {})
+            self.features[row_index] = grams
+            self.prefixes[row_index] = prefix
+            for gram in prefix:
+                group_postings.setdefault(gram, []).append(row_index)
+
+    def conflicts(
+        self,
+        reference: pd.Index,
+        candidates: pd.Index,
+        *,
+        same_language: bool = False,
+    ) -> set[int]:
+        if reference.empty or candidates.empty:
+            return set()
+        reference_indexes = {int(index) for index in reference}
+        reference_by_language: dict[str, set[int]] = {}
+        if same_language and not self.by_language:
+            for index in reference_indexes:
+                reference_by_language.setdefault(
+                    self.languages.at[index],
+                    set(),
+                ).add(index)
+
+        conflicts: set[int] = set()
+        threshold = self.threshold
+        for raw_index in candidates:
+            index = int(raw_index)
+            grams = self.features.get(index)
+            if grams is None:
+                continue
+            language = self.languages.at[index]
+            group = language if self.by_language else "_global"
+            active_reference = (
+                reference_by_language.get(language, set())
+                if same_language and not self.by_language
+                else reference_indexes
+            )
+            postings = self.postings.get(group, {})
+            seen: set[int] = set()
+            matched = False
+            for gram in self.prefixes[index]:
+                for other_index in postings.get(gram, ()):
+                    if (
+                        other_index in seen
+                        or other_index not in active_reference
+                    ):
+                        continue
+                    seen.add(other_index)
+                    other = self.features[other_index]
+                    if not (
+                        threshold * len(grams)
+                        <= len(other)
+                        <= len(grams) / threshold
+                    ):
+                        continue
+                    intersection = len(grams & other)
+                    union = len(grams) + len(other) - intersection
+                    if union and intersection / union >= threshold:
+                        conflicts.add(index)
+                        matched = True
+                        break
+                if matched:
+                    break
+        return conflicts
+
+
+@dataclass(frozen=True)
+class SplitNgramIndexes:
+    formosan: NgramSimilarityIndex
+    target: NgramSimilarityIndex
 
 
 def ngram_candidate_conflicts(
@@ -202,84 +310,23 @@ def ngram_candidate_conflicts(
     by_language: bool,
     threshold: float,
 ) -> set[int]:
-    """Deterministic prefix-filtered search with exact Jaccard verification."""
+    """Find candidate conflicts using the reusable exact lookup."""
     if reference.empty or candidates.empty:
         return set()
-    conflicts: set[int] = set()
-    reference_groups = (
-        reference.groupby("lang_code", sort=False)
-        if by_language
-        else [("_global", reference)]
+    combined = pd.concat(
+        [
+            reference[["lang_code", column]],
+            candidates[["lang_code", column]],
+        ],
+        axis=0,
     )
-    candidate_groups = (
-        {str(language): group for language, group in candidates.groupby("lang_code", sort=False)}
-        if by_language
-        else {"_global": candidates}
+    index = NgramSimilarityIndex(
+        combined,
+        column,
+        by_language=by_language,
+        threshold=threshold,
     )
-    for key, reference_group in reference_groups:
-        candidate_group = candidate_groups.get(str(key))
-        if candidate_group is None or candidate_group.empty:
-            continue
-        if len(candidate_group) <= len(reference_group):
-            indexed = {
-                int(index): char_ngrams(value)
-                for index, value in candidate_group[column].astype(str).items()
-                if len(value) >= 8
-            }
-            prefix_index: dict[str, list[int]] = {}
-            for index, grams in indexed.items():
-                for gram in jaccard_prefix(grams, threshold):
-                    prefix_index.setdefault(gram, []).append(index)
-            for value in set(reference_group[column].astype(str)):
-                if len(value) < 8:
-                    continue
-                grams = char_ngrams(value)
-                possible: set[int] = set()
-                for gram in jaccard_prefix(grams, threshold):
-                    possible.update(prefix_index.get(gram, ()))
-                for index in possible:
-                    other = indexed[index]
-                    if not (
-                        threshold * len(grams)
-                        <= len(other)
-                        <= len(grams) / threshold
-                    ):
-                        continue
-                    union = len(grams | other)
-                    if union and len(grams & other) / union >= threshold:
-                        conflicts.add(index)
-        else:
-            indexed = {
-                position: char_ngrams(value)
-                for position, value in enumerate(
-                    set(reference_group[column].astype(str))
-                )
-                if len(value) >= 8
-            }
-            prefix_index = {}
-            for position, grams in indexed.items():
-                for gram in jaccard_prefix(grams, threshold):
-                    prefix_index.setdefault(gram, []).append(position)
-            for index, value in candidate_group[column].astype(str).items():
-                if len(value) < 8:
-                    continue
-                grams = char_ngrams(value)
-                possible: set[int] = set()
-                for gram in jaccard_prefix(grams, threshold):
-                    possible.update(prefix_index.get(gram, ()))
-                for position in possible:
-                    other = indexed[position]
-                    if not (
-                        threshold * len(grams)
-                        <= len(other)
-                        <= len(grams) / threshold
-                    ):
-                        continue
-                    union = len(grams | other)
-                    if union and len(grams & other) / union >= threshold:
-                        conflicts.add(int(index))
-                        break
-    return conflicts
+    return index.conflicts(reference.index, candidates.index)
 
 
 def near_candidate_conflicts(
@@ -289,6 +336,7 @@ def near_candidate_conflicts(
     ngram_threshold: float,
     target_by_language: bool = False,
     include_one_edit: bool = True,
+    ngram_indexes: SplitNgramIndexes | None = None,
 ) -> set[int]:
     conflicts: set[int] = set()
     if include_one_edit:
@@ -304,20 +352,31 @@ def near_candidate_conflicts(
             "_target_skeleton",
             by_language=target_by_language,
         )
-    conflicts |= ngram_candidate_conflicts(
-        reference,
-        candidates,
-        "_formosan_skeleton",
-        by_language=True,
-        threshold=ngram_threshold,
-    )
-    conflicts |= ngram_candidate_conflicts(
-        reference,
-        candidates,
-        "_target_skeleton",
-        by_language=target_by_language,
-        threshold=ngram_threshold,
-    )
+    if ngram_indexes is None:
+        conflicts |= ngram_candidate_conflicts(
+            reference,
+            candidates,
+            "_formosan_skeleton",
+            by_language=True,
+            threshold=ngram_threshold,
+        )
+        conflicts |= ngram_candidate_conflicts(
+            reference,
+            candidates,
+            "_target_skeleton",
+            by_language=target_by_language,
+            threshold=ngram_threshold,
+        )
+    else:
+        conflicts |= ngram_indexes.formosan.conflicts(
+            reference.index,
+            candidates.index,
+        )
+        conflicts |= ngram_indexes.target.conflicts(
+            reference.index,
+            candidates.index,
+            same_language=target_by_language,
+        )
     return conflicts
 
 
@@ -547,6 +606,58 @@ def choose_groups(
     return set(selected)
 
 
+def choose_singleton_groups(
+    frame: pd.DataFrame,
+    indexes: pd.Index,
+    group_ids: pd.Series,
+    assignments: dict[int, str],
+    target_rows: int,
+    *,
+    reserve_rows: int,
+    seed: int,
+) -> set[int]:
+    """Choose row-sized groups without constructing one pandas group per row."""
+    if target_rows <= 0 or indexes.empty:
+        return set()
+    candidate_group_ids = group_ids.loc[indexes]
+    if assignments:
+        unassigned = ~candidate_group_ids.isin(assignments)
+        indexes = indexes[unassigned.to_numpy()]
+        candidate_group_ids = candidate_group_ids.loc[indexes]
+    available = len(indexes)
+    selected_rows = min(target_rows, max(0, available - reserve_rows))
+    if selected_rows <= 0:
+        return set()
+
+    candidates = frame.loc[indexes]
+    synthetic = (
+        candidates.get(
+            "pivot_origin",
+            pd.Series("original", index=candidates.index),
+        )
+        .astype(str)
+        .eq("synthetic")
+    )
+    average_tokens = (
+        candidates["_formosan_tokens"] + candidates["_target_tokens"]
+    ) / 2
+    rng = random.Random(seed)
+    ranked = pd.DataFrame(
+        {
+            "group_id": candidate_group_ids.astype("int64"),
+            "synthetic": synthetic.astype("int8"),
+            "average_tokens": average_tokens.astype("float64"),
+            "tie_breaker": [rng.random() for _ in range(available)],
+        },
+        index=indexes,
+    ).sort_values(
+        ["synthetic", "average_tokens", "tie_breaker", "group_id"],
+        ascending=[True, False, True, True],
+        kind="stable",
+    )
+    return set(ranked["group_id"].head(selected_rows).astype(int))
+
+
 def apply_registry(
     frame: pd.DataFrame,
     group_ids: pd.Series,
@@ -668,6 +779,7 @@ def fill_assignments(
     attempts: int,
 ) -> None:
     eligible = frame[candidate_mask]
+    singleton_groups = group_ids.is_unique
     stratum_indexes = {
         (str(language), str(corpus)): group.index
         for (language, corpus), group in eligible.groupby(
@@ -698,19 +810,32 @@ def fill_assignments(
                 0,
                 reserve_target - int(current.eq(other_split).sum()),
             )
-            groups = choose_groups(
-                candidate_groups(
+            target_rows = max(0, target - current_rows)
+            choice_seed = seed + offset * 997 + seed_offset
+            if singleton_groups:
+                groups = choose_singleton_groups(
                     frame,
                     indexes,
-                    candidate_mask,
                     group_ids,
                     assignments,
-                ),
-                max(0, target - current_rows),
-                reserve_rows=reserve_rows,
-                seed=seed + offset * 997 + seed_offset,
-                attempts=attempts,
-            )
+                    target_rows,
+                    reserve_rows=reserve_rows,
+                    seed=choice_seed,
+                )
+            else:
+                groups = choose_groups(
+                    candidate_groups(
+                        frame,
+                        indexes,
+                        candidate_mask,
+                        group_ids,
+                        assignments,
+                    ),
+                    target_rows,
+                    reserve_rows=reserve_rows,
+                    seed=choice_seed,
+                    attempts=attempts,
+                )
             for group in groups:
                 assignments[group] = split_name
             current = stratum_group_ids.map(assignments)
@@ -726,6 +851,7 @@ def exclude_test_conflicts_with_validation(
     *,
     ngram_threshold: float,
     include_one_edit: bool = True,
+    ngram_indexes: SplitNgramIndexes | None = None,
 ) -> dict[str, int]:
     validate = frame[split.eq("validate")]
     test = frame[split.eq("test")]
@@ -735,6 +861,7 @@ def exclude_test_conflicts_with_validation(
         ngram_threshold=ngram_threshold,
         target_by_language=True,
         include_one_edit=include_one_edit,
+        ngram_indexes=ngram_indexes,
     )
     conflict_groups = {
         int(group_id)
@@ -762,6 +889,7 @@ def block_evaluation_conflicts_with_training(
     *,
     ngram_threshold: float,
     include_one_edit: bool = True,
+    ngram_indexes: SplitNgramIndexes | None = None,
 ) -> dict[str, int]:
     training = frame[split.eq("train")]
     evaluation = frame[split.isin({"test", "validate"})]
@@ -770,6 +898,7 @@ def block_evaluation_conflicts_with_training(
         evaluation,
         ngram_threshold=ngram_threshold,
         include_one_edit=include_one_edit,
+        ngram_indexes=ngram_indexes,
     )
     conflict_groups = {
         int(group_id)
@@ -872,6 +1001,20 @@ def build_hard_split(
         + frame["source"].astype(str)
     )
     group_ids = leakage_group_ids(frame)
+    ngram_indexes = SplitNgramIndexes(
+        formosan=NgramSimilarityIndex(
+            frame,
+            "_formosan_skeleton",
+            by_language=True,
+            threshold=ngram_threshold,
+        ),
+        target=NgramSimilarityIndex(
+            frame,
+            "_target_skeleton",
+            by_language=False,
+            threshold=ngram_threshold,
+        ),
+    )
     synthetic, human_candidate, candidate_mask = (
         evaluation_masks(
             frame,
@@ -967,6 +1110,7 @@ def build_hard_split(
             validate_test_blocked_indexes,
             ngram_threshold=ngram_threshold,
             include_one_edit=False,
+            ngram_indexes=ngram_indexes,
         )
         if iteration["conflicting_eval_rows"]:
             iteration["train_eval_conflicting_rows"] = 0
@@ -987,6 +1131,7 @@ def build_hard_split(
             train_eval_blocked_indexes,
             ngram_threshold=ngram_threshold,
             include_one_edit=False,
+            ngram_indexes=ngram_indexes,
         )
         iteration["train_eval_conflicting_rows"] = train_eval_iteration[
             "conflicting_eval_rows"
@@ -1034,17 +1179,20 @@ def build_hard_split(
         train,
         evaluation,
         ngram_threshold=ngram_threshold,
+        ngram_indexes=ngram_indexes,
     )
     validate_test_near = near_candidate_conflicts(
         test,
         validate,
         ngram_threshold=ngram_threshold,
         target_by_language=True,
+        ngram_indexes=ngram_indexes,
     )
     validate_test_near_global = near_candidate_conflicts(
         test,
         validate,
         ngram_threshold=ngram_threshold,
+        ngram_indexes=ngram_indexes,
     )
     if final_near or validate_test_near:
         raise SystemExit(

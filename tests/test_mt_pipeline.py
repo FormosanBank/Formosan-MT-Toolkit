@@ -27,6 +27,7 @@ from audit_corpus_exposure import (  # noqa: E402
 )
 from build_experiment_splits import (  # noqa: E402
     GroupCandidate,
+    NgramSimilarityIndex,
     build_hard_split,
     choose_groups,
     ngram_candidate_conflicts,
@@ -641,6 +642,34 @@ class LeakageTests(unittest.TestCase):
             ),
             {100},
         )
+
+    def test_cached_ngram_index_matches_streaming_join(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ami", "ami", "ami", "bnn", "bnn"],
+                "text": [
+                    "abcdefghijklmnopqrstuvwxyz",
+                    "abcdefghijklmnopqrstuvwxzz",
+                    "completely unrelated value",
+                    "abcdefghijklmnopqrstuvwxyz",
+                    "another unrelated sentence",
+                ],
+            },
+            index=[10, 11, 12, 13, 14],
+        )
+        reference = frame.loc[[10, 14]]
+        candidates = frame.loc[[11, 12, 13]]
+        for by_language, expected in ((False, {11, 13}), (True, {11})):
+            index = NgramSimilarityIndex(
+                frame,
+                "text",
+                by_language=by_language,
+                threshold=0.82,
+            )
+            self.assertEqual(
+                index.conflicts(reference.index, candidates.index),
+                expected,
+            )
 
     def test_split_targets_use_all_pairs_as_denominator(self) -> None:
         self.assertEqual(

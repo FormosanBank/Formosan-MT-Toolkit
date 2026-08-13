@@ -13,6 +13,7 @@ from pathlib import Path
 
 import nllb_runtime as nllb
 import pandas as pd
+from build_experiment_splits import NgramSimilarityIndex
 from experiment_config import (
     DEFAULT_PROFILE,
     load_corpus_pipeline_config,
@@ -198,121 +199,12 @@ def one_edit_conflict_count(
     return len(conflicts)
 
 
-def char_ngrams(value: str, size: int = 4) -> frozenset[str]:
-    if not value:
-        return frozenset()
-    if len(value) <= size:
-        return frozenset({value})
-    return frozenset(
-        value[position : position + size]
-        for position in range(len(value) - size + 1)
-    )
-
-
-def jaccard_prefix(
-    grams: frozenset[str],
-    threshold: float,
-) -> tuple[str, ...]:
-    prefix_length = len(grams) - math.ceil(threshold * len(grams)) + 1
-    return tuple(sorted(grams)[: max(1, prefix_length)])
-
-
-def ngram_conflict_count(
-    reference: pd.DataFrame,
-    candidates: pd.DataFrame,
-    column: str,
-    *,
-    by_language: bool,
-    threshold: float,
-) -> int:
-    """Find high character n-gram similarity with an exact prefix join."""
-    if reference.empty or candidates.empty:
-        return 0
-    conflicts: set[int] = set()
-    reference_groups = (
-        reference.groupby("lang_code", sort=False)
-        if by_language
-        else [("_global", reference)]
-    )
-    candidate_groups = (
-        {
-            str(language): group
-            for language, group in candidates.groupby("lang_code", sort=False)
-        }
-        if by_language
-        else {"_global": candidates}
-    )
-    for language, reference_group in reference_groups:
-        candidate_group = candidate_groups.get(str(language))
-        if candidate_group is None:
-            continue
-        if len(candidate_group) <= len(reference_group):
-            indexed = {
-                int(index): char_ngrams(value)
-                for index, value in candidate_group[column].astype(str).items()
-                if len(value) >= 8
-            }
-            prefix_index: dict[str, list[int]] = {}
-            for index, grams in indexed.items():
-                for gram in jaccard_prefix(grams, threshold):
-                    prefix_index.setdefault(gram, []).append(index)
-            for value in set(reference_group[column].astype(str)):
-                if len(value) < 8:
-                    continue
-                grams = char_ngrams(value)
-                possible: set[int] = set()
-                for gram in jaccard_prefix(grams, threshold):
-                    possible.update(prefix_index.get(gram, ()))
-                for index in possible:
-                    other = indexed[index]
-                    if not (
-                        threshold * len(grams)
-                        <= len(other)
-                        <= len(grams) / threshold
-                    ):
-                        continue
-                    union = len(grams | other)
-                    if union and len(grams & other) / union >= threshold:
-                        conflicts.add(index)
-        else:
-            indexed = {
-                position: char_ngrams(value)
-                for position, value in enumerate(
-                    set(reference_group[column].astype(str))
-                )
-                if len(value) >= 8
-            }
-            prefix_index = {}
-            for position, grams in indexed.items():
-                for gram in jaccard_prefix(grams, threshold):
-                    prefix_index.setdefault(gram, []).append(position)
-            for index, value in candidate_group[column].astype(str).items():
-                if len(value) < 8:
-                    continue
-                grams = char_ngrams(value)
-                possible: set[int] = set()
-                for gram in jaccard_prefix(grams, threshold):
-                    possible.update(prefix_index.get(gram, ()))
-                for position in possible:
-                    other = indexed[position]
-                    if not (
-                        threshold * len(grams)
-                        <= len(other)
-                        <= len(grams) / threshold
-                    ):
-                        continue
-                    union = len(grams | other)
-                    if union and len(grams & other) / union >= threshold:
-                        conflicts.add(int(index))
-                        break
-    return len(conflicts)
-
-
 def pairwise_leakage(
     left: pd.DataFrame,
     right: pd.DataFrame,
     *,
-    ngram_threshold: float,
+    formosan_ngram_index: NgramSimilarityIndex,
+    target_ngram_index: NgramSimilarityIndex,
     formosan_by_language: bool = True,
     target_by_language: bool = False,
 ) -> dict[str, object]:
@@ -367,19 +259,15 @@ def pairwise_leakage(
         ),
     }
     character_ngram = {
-        "formosan": ngram_conflict_count(
-            left,
-            right,
-            "_formosan_skeleton",
-            by_language=True,
-            threshold=ngram_threshold,
+        "formosan": len(
+            formosan_ngram_index.conflicts(left.index, right.index)
         ),
-        "target": ngram_conflict_count(
-            left,
-            right,
-            "_target_skeleton",
-            by_language=target_by_language,
-            threshold=ngram_threshold,
+        "target": len(
+            target_ngram_index.conflicts(
+                left.index,
+                right.index,
+                same_language=target_by_language,
+            )
         ),
     }
     return {
@@ -489,6 +377,18 @@ def validate_splits(
     test = keyed[split.eq("test")]
     validate = keyed[split.eq("validate")]
     evaluation = keyed[split.isin(EVAL_SPLITS)]
+    formosan_ngram_index = NgramSimilarityIndex(
+        keyed,
+        "_formosan_skeleton",
+        by_language=True,
+        threshold=ngram_threshold,
+    )
+    target_ngram_index = NgramSimilarityIndex(
+        keyed,
+        "_target_skeleton",
+        by_language=False,
+        threshold=ngram_threshold,
+    )
 
     pivot_origin = keyed.get(
         "pivot_origin",
@@ -728,18 +628,21 @@ def validate_splits(
     train_eval = pairwise_leakage(
         train,
         evaluation,
-        ngram_threshold=ngram_threshold,
+        formosan_ngram_index=formosan_ngram_index,
+        target_ngram_index=target_ngram_index,
     )
     validate_test = pairwise_leakage(
         test,
         validate,
-        ngram_threshold=ngram_threshold,
         target_by_language=True,
+        formosan_ngram_index=formosan_ngram_index,
+        target_ngram_index=target_ngram_index,
     )
     validate_test_cross_language_diagnostic = pairwise_leakage(
         test,
         validate,
-        ngram_threshold=ngram_threshold,
+        formosan_ngram_index=formosan_ngram_index,
+        target_ngram_index=target_ngram_index,
     )
     duplicate_pairs = int(keyed["_pair_key"].duplicated().sum())
     ok = (
