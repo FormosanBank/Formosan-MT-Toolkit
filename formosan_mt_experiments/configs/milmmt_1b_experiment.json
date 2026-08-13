@@ -25,6 +25,7 @@
     "min_formosan_tokens": 4,
     "min_target_tokens": 4,
     "source_ratio_tolerance": 0.02,
+    "ratio_basis": "all_deduplicated_pairs_by_language_and_source_corpus",
     "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
     "character_ngram_jaccard_threshold": 0.82,
     "tiers": ["in_domain_hard"],

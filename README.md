@@ -105,8 +105,9 @@ Production builds fail unless all of these conditions hold:
 - lexemes, morphemes, and rows that fail sentence QC or configured length
   requirements are training-only; source provenance never determines row
   eligibility;
-- each language/source corpus contributes roughly 90% of its eligible sentence
-  rows to train, 7.5% to test, and 2.5% to validation;
+- each language reserves at least 7.5% of all deduplicated pairs for test and
+  2.5% for validation, using only eligible sentence rows; source-corpus targets
+  follow the same proportions where eligible capacity permits;
 - evaluation references are sentence-level, with human rows preferred before
   validated synthetic pivot rows;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage

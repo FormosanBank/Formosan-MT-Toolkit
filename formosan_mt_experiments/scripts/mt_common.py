@@ -311,49 +311,87 @@ def evaluation_candidate_mask(
     )
 
 
-def apportioned_counts(
+def weighted_apportioned_counts(
+    weights: Mapping[str, int],
     capacities: Mapping[str, int],
     total: int,
 ) -> dict[str, int]:
-    """Hamilton-apportion ``total`` rows without exceeding each capacity."""
-    capacities = {
-        str(key): max(0, int(value))
-        for key, value in capacities.items()
-        if int(value) > 0
+    """Apportion ``total`` by source weights without exceeding capacities."""
+    keys = sorted(set(weights) | set(capacities))
+    normalized_weights = {
+        key: max(0, int(weights.get(key, 0)))
+        for key in keys
     }
-    available = sum(capacities.values())
-    total = min(max(0, int(total)), available)
-    if not capacities or total == 0:
-        return {key: 0 for key in capacities}
-    quotas = {
-        key: total * capacity / available
-        for key, capacity in capacities.items()
+    normalized_capacities = {
+        key: max(0, int(capacities.get(key, 0)))
+        for key in keys
     }
-    allocated = {
-        key: min(capacities[key], math.floor(quota))
-        for key, quota in quotas.items()
+    available = sum(normalized_capacities.values())
+    if total < 0 or total > available:
+        raise ValueError(
+            f"Cannot apportion {total:,} rows from {available:,} eligible rows"
+        )
+    allocated = {key: 0 for key in keys}
+    remaining = total
+    active = {
+        key
+        for key in keys
+        if normalized_capacities[key] > 0
     }
-    remaining = total - sum(allocated.values())
-    order = sorted(
-        capacities,
-        key=lambda key: (
-            -(quotas[key] - math.floor(quotas[key])),
-            -capacities[key],
-            key,
-        ),
-    )
-    while remaining:
-        progressed = False
-        for key in order:
-            if allocated[key] >= capacities[key]:
+    while remaining and active:
+        weight_total = sum(normalized_weights[key] for key in active)
+        if weight_total <= 0:
+            active_weights = {
+                key: normalized_capacities[key] - allocated[key]
+                for key in active
+            }
+            weight_total = sum(active_weights.values())
+        else:
+            active_weights = {
+                key: normalized_weights[key]
+                for key in active
+            }
+        quotas = {
+            key: remaining * active_weights[key] / weight_total
+            for key in active
+        }
+        saturated = {
+            key
+            for key in active
+            if quotas[key] >= normalized_capacities[key] - allocated[key]
+        }
+        if saturated:
+            for key in saturated:
+                amount = normalized_capacities[key] - allocated[key]
+                allocated[key] += amount
+                remaining -= amount
+            active -= saturated
+            continue
+
+        floors = {
+            key: math.floor(quota)
+            for key, quota in quotas.items()
+        }
+        for key, amount in floors.items():
+            allocated[key] += amount
+            remaining -= amount
+        for key in sorted(
+            active,
+            key=lambda value: (
+                -(quotas[value] - floors[value]),
+                -active_weights[value],
+                value,
+            ),
+        ):
+            if remaining == 0:
+                break
+            if allocated[key] >= normalized_capacities[key]:
                 continue
             allocated[key] += 1
             remaining -= 1
-            progressed = True
-            if remaining == 0:
-                break
-        if not progressed:
-            raise RuntimeError("Could not apportion split targets within capacities")
+        break
+    if remaining:
+        raise RuntimeError("Could not apportion source targets within capacities")
     return allocated
 
 

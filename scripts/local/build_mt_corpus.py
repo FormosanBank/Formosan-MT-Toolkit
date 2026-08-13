@@ -1224,6 +1224,8 @@ def build_hard_splits(
                     str(args.min_target_tokens),
                     "--source-ratio-tolerance",
                     str(args.source_ratio_tolerance),
+                    "--split-report",
+                    str(out_dir / "report_in_domain_hard.json"),
                     "--report",
                     str(out_dir / "validation_in_domain_hard.json"),
                 ],

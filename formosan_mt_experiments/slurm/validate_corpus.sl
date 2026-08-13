@@ -31,9 +31,16 @@ esac
 INPUT="${INPUT:-${PROJECT_DATA}/${CORPUS_NAME}/big_corpus_${SHORT}_${TIER}.csv}"
 OUTPUT_JSON="${OUTPUT_JSON:-${PROJECT_DATA}/${CORPUS_NAME}/provenance/validate_${SHORT}_${TIER}_runtime.json}"
 PROFILE="${PROFILE:-${EXP_DIR}/configs/default_experiment.json}"
+SPLIT_REPORT="${SPLIT_REPORT:-${PROJECT_DATA}/${CORPUS_NAME}/provenance/split_${SHORT}_${TIER}.json}"
+
+SPLIT_REPORT_ARGS=()
+if [[ -f "${SPLIT_REPORT}" ]]; then
+  SPLIT_REPORT_ARGS=(--split-report "${SPLIT_REPORT}")
+fi
 
 srun --cpu-bind=cores python -u "${EXP_DIR}/scripts/validate_experiment.py" \
   --input "${INPUT}" \
   --profile "${PROFILE}" \
   --target-lang "${TARGET_LANG}" \
+  "${SPLIT_REPORT_ARGS[@]}" \
   --output-json "${OUTPUT_JSON}"

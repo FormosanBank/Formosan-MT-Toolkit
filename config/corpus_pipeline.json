@@ -52,7 +52,7 @@
     "lexical_eval": false,
     "synthetic_eval": true,
     "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
-    "ratio_basis": "mt_eligible_sentence_rows_by_language_and_source_corpus",
+    "ratio_basis": "all_deduplicated_pairs_by_language_and_source_corpus",
     "headline_tier": "in_domain_hard"
   },
   "exposure_audit": {

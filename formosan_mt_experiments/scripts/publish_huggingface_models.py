@@ -323,8 +323,9 @@ Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
 |---|---:|---:|---:|---:|
 {by_language}
 
-The corpus gate enforces standard-tier Formosan text, source-balanced
-90/2.5/7.5 train/validation/test proportions, sentence-only evaluation, and
+The corpus gate enforces standard-tier Formosan text, 2.5/7.5
+validation/test proportions from all deduplicated pairs, capacity-aware source
+balance, sentence-only evaluation, and
 zero exact, skeleton, one-edit, or configured high character n-gram
 train/evaluation conflicts. Document overlap is diagnostic. This release
 passed all leakage gates: exact

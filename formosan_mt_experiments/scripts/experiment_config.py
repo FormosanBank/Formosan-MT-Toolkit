@@ -26,6 +26,7 @@ SHARED_SPLIT_FIELDS = (
     "min_formosan_tokens",
     "min_target_tokens",
     "source_ratio_tolerance",
+    "ratio_basis",
     "synthetic_eval_policy",
     "character_ngram_jaccard_threshold",
     "headline_tier",

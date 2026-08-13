@@ -149,28 +149,31 @@ pairwise split labels and builds the model-facing split. It:
 1. deduplicates canonical source-target pairs;
 2. locks lexical, morpheme, ambiguous-normalization, MT-ineligible, and
    lexical-like rows out of evaluation;
-3. allocates roughly 90/2.5/7.5 train/validation/test rows independently within
-   every language and source corpus using deterministic Hamilton apportionment;
+3. reserves 2.5/7.5 validation/test rows from all deduplicated pairs in every
+   language, then apportions eligible sentences by source with deterministic,
+   capacity-aware Hamilton allocation;
 4. prefers human sentence references within each source stratum and uses
    validated synthetic pivot sentences only when human coverage is insufficient;
 5. computes normalized and punctuation/spacing-skeleton keys;
-6. removes one-edit and character 4-gram Jaccard conflicts on both sides across
-   train/test and train/validation globally; test/validation separation is
-   target-language-task conditioned, with stricter cross-language reuse retained
-   as a diagnostic; conflicting training rows are excluded after the
-   benchmark is selected, rather than shrinking the evaluation set;
+6. removes held-out candidates with one-edit or character 4-gram Jaccard
+   conflicts, then refills evaluation from clean candidates; test/validation
+   separation is target-language-task conditioned, with stricter cross-language
+   reuse retained as a diagnostic; no training rows are discarded to create
+   the benchmark;
 7. fails if language or source-corpus ratios miss their deterministic targets.
 
 `config/corpus_pipeline.json` is the canonical split policy. Corpus builds,
 independent validation, and model profiles load the same values; profile drift
 fails before training.
 
-The denominator is the deduplicated set of evaluation-eligible sentence rows.
-This includes valid human and synthetic sentences but excludes lexical data,
-which cannot be used in the benchmark. Document overlap is reported as a
-diagnostic because some source corpora serialize thousands of unrelated rows in
-one XML file; treating that file as an indivisible split unit would recreate the
-source imbalance this stage prevents.
+The ratio denominator is every deduplicated pair in each language. Test reserves
+7.5% and validation reserves 2.5% of that total, but both splits are populated
+only with evaluation-eligible sentences. Source-corpus targets use the same
+all-pair denominator and are constrained by each source's eligible capacity;
+unfillable lexical-source shares are redistributed within the language.
+Document overlap is reported as a diagnostic because some source corpora
+serialize thousands of unrelated rows in one XML file; treating that file as an
+indivisible split unit would recreate the source imbalance this stage prevents.
 
 Eligibility is row-based. A repository or path classified as `dictionary`,
 `classroom`, or another provenance domain is not excluded automatically. A

@@ -16,7 +16,6 @@ from columnar_cache import write_columnar_cache
 from experiment_config import load_corpus_pipeline_config
 from mt_common import (
     add_normalized_columns,
-    apportioned_counts,
     bool_series,
     bucket_counts,
     evaluation_candidate_mask,
@@ -27,6 +26,7 @@ from mt_common import (
     split_counts_by_language,
     target_col_for,
     target_tag_for,
+    weighted_apportioned_counts,
     write_json,
 )
 
@@ -50,6 +50,7 @@ def one_edit_conflicts(
     column: str,
     *,
     by_language: bool = True,
+    ignore_same_index: bool = False,
 ) -> set[int]:
     """Return train indexes whose text is within one character edit of eval."""
     conflicts: set[int] = set()
@@ -72,25 +73,67 @@ def one_edit_conflicts(
             continue
         if training.empty:
             continue
-        eval_values = {str(value) for value in evaluation[column] if str(value)}
-        eval_deletions = {
-            value[:position] + value[position + 1 :]
-            for value in eval_values
-            for position in range(len(value))
-        }
-        for index, raw_value in training[column].items():
+        eval_values: Counter[str] = Counter()
+        eval_value_owner: dict[str, int] = {}
+        eval_deletions: Counter[str] = Counter()
+        eval_deletion_owner: dict[str, int] = {}
+        for eval_index, raw_value in evaluation[column].items():
             value = str(raw_value)
             if not value:
                 continue
-            if value in eval_values or value in eval_deletions:
-                conflicts.add(int(index))
-                continue
-            if any(
-                value[:position] + value[position + 1 :] in eval_values
-                or value[:position] + value[position + 1 :] in eval_deletions
+            index = int(eval_index)
+            eval_values[value] += 1
+            eval_value_owner.setdefault(value, index)
+            for deletion in {
+                value[:position] + value[position + 1 :]
                 for position in range(len(value))
+            }:
+                eval_deletions[deletion] += 1
+                eval_deletion_owner.setdefault(deletion, index)
+
+        def matches_other(
+            counts: Counter[str],
+            owners: dict[str, int],
+            value: str,
+            index: int,
+        ) -> bool:
+            count = counts[value]
+            if not count:
+                return False
+            if not ignore_same_index or owners[value] != index:
+                return True
+            return count > 1
+
+        for index, raw_value in training[column].items():
+            index = int(index)
+            value = str(raw_value)
+            if not value:
+                continue
+            if matches_other(eval_values, eval_value_owner, value, index) or matches_other(
+                eval_deletions,
+                eval_deletion_owner,
+                value,
+                index,
             ):
-                conflicts.add(int(index))
+                conflicts.add(index)
+                continue
+            for deletion in {
+                value[:position] + value[position + 1 :]
+                for position in range(len(value))
+            }:
+                if matches_other(
+                    eval_values,
+                    eval_value_owner,
+                    deletion,
+                    index,
+                ) or matches_other(
+                    eval_deletions,
+                    eval_deletion_owner,
+                    deletion,
+                    index,
+                ):
+                    conflicts.add(index)
+                    break
     return conflicts
 
 
@@ -100,13 +143,37 @@ def one_edit_candidate_conflicts(
     column: str,
     *,
     by_language: bool,
+    ignore_same_index: bool = False,
 ) -> set[int]:
     return one_edit_conflicts(
         candidates,
         reference,
         column,
         by_language=by_language,
+        ignore_same_index=ignore_same_index,
     )
+
+
+def globally_unsafe_one_edit_candidates(
+    frame: pd.DataFrame,
+    candidate_mask: pd.Series,
+) -> set[int]:
+    candidates = frame[candidate_mask]
+    conflicts = one_edit_candidate_conflicts(
+        frame,
+        candidates,
+        "_target_skeleton",
+        by_language=False,
+        ignore_same_index=True,
+    )
+    conflicts |= one_edit_candidate_conflicts(
+        frame,
+        candidates,
+        "_formosan_skeleton",
+        by_language=True,
+        ignore_same_index=True,
+    )
+    return conflicts
 
 
 def char_ngrams(value: str, size: int = 4) -> frozenset[str]:
@@ -221,19 +288,22 @@ def near_candidate_conflicts(
     *,
     ngram_threshold: float,
     target_by_language: bool = False,
+    include_one_edit: bool = True,
 ) -> set[int]:
-    conflicts = one_edit_candidate_conflicts(
-        reference,
-        candidates,
-        "_formosan_skeleton",
-        by_language=True,
-    )
-    conflicts |= one_edit_candidate_conflicts(
-        reference,
-        candidates,
-        "_target_skeleton",
-        by_language=target_by_language,
-    )
+    conflicts: set[int] = set()
+    if include_one_edit:
+        conflicts |= one_edit_candidate_conflicts(
+            reference,
+            candidates,
+            "_formosan_skeleton",
+            by_language=True,
+        )
+        conflicts |= one_edit_candidate_conflicts(
+            reference,
+            candidates,
+            "_target_skeleton",
+            by_language=target_by_language,
+        )
     conflicts |= ngram_candidate_conflicts(
         reference,
         candidates,
@@ -263,27 +333,25 @@ def leakage_group_ids(frame: pd.DataFrame) -> pd.Series:
 
 
 def split_targets(
+    total_rows: int,
     eligible_total: int,
     test_ratio: float,
     val_ratio: float,
     min_test_rows: int,
     min_validate_rows: int,
 ) -> tuple[int, int]:
-    """Size evaluation sets from MT-eligible sentence rows."""
-    if eligible_total <= 0:
+    """Size evaluation from all pairs and fail when quality capacity is short."""
+    if total_rows <= 0:
         return 0, 0
-    desired_test = max(math.ceil(eligible_total * test_ratio), min_test_rows)
-    desired_validate = max(math.ceil(eligible_total * val_ratio), min_validate_rows)
-    if desired_test + desired_validate <= eligible_total:
-        return desired_test, desired_validate
-    eval_ratio = test_ratio + val_ratio
-    test_share = test_ratio / eval_ratio if eval_ratio else 0.75
-    test = max(1, round(eligible_total * test_share))
-    validate = eligible_total - test
-    if eligible_total >= 2 and validate == 0:
-        test -= 1
-        validate = 1
-    return test, validate
+    desired_test = max(math.ceil(total_rows * test_ratio), min_test_rows)
+    desired_validate = max(math.ceil(total_rows * val_ratio), min_validate_rows)
+    required = desired_test + desired_validate
+    if required > eligible_total:
+        raise ValueError(
+            f"All-pair split requires {required:,} evaluation rows from "
+            f"{eligible_total:,} eligible sentences across {total_rows:,} pairs"
+        )
+    return desired_test, desired_validate
 
 
 def deduplicate_input(
@@ -550,23 +618,33 @@ def source_stratum_targets(
     for language, language_frame in frame.groupby("lang_code", sort=True):
         language_key = str(language)
         eligible = language_frame[candidate_mask.loc[language_frame.index]]
-        capacities = {
+        source_rows = {
+            str(bucket): len(group)
+            for bucket, group in language_frame.groupby("_source_corpus", sort=True)
+        }
+        eligible_capacities = {
             str(bucket): len(group)
             for bucket, group in eligible.groupby("_source_corpus", sort=True)
         }
-        test_total, validate_total = split_targets(
-            len(eligible),
-            test_ratio,
-            val_ratio,
-            min_test_rows,
-            min_validate_rows,
-        )
+        try:
+            test_total, validate_total = split_targets(
+                len(language_frame),
+                len(eligible),
+                test_ratio,
+                val_ratio,
+                min_test_rows,
+                min_validate_rows,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"{language_key}: {exc}") from exc
         language_targets[language_key] = (test_total, validate_total)
-        evaluation_by_source = apportioned_counts(
-            capacities,
+        evaluation_by_source = weighted_apportioned_counts(
+            source_rows,
+            eligible_capacities,
             test_total + validate_total,
         )
-        validate_by_source = apportioned_counts(
+        validate_by_source = weighted_apportioned_counts(
+            source_rows,
             evaluation_by_source,
             validate_total,
         )
@@ -647,6 +725,7 @@ def exclude_test_conflicts_with_validation(
     blocked_indexes: set[int],
     *,
     ngram_threshold: float,
+    include_one_edit: bool = True,
 ) -> dict[str, int]:
     validate = frame[split.eq("validate")]
     test = frame[split.eq("test")]
@@ -655,6 +734,7 @@ def exclude_test_conflicts_with_validation(
         test,
         ngram_threshold=ngram_threshold,
         target_by_language=True,
+        include_one_edit=include_one_edit,
     )
     conflict_groups = {
         int(group_id)
@@ -669,6 +749,39 @@ def exclude_test_conflicts_with_validation(
         "conflicting_eval_rows": len(conflicts),
         "conflicting_groups": len(conflict_groups),
         "validate_test_conflicting_rows": len(conflicts),
+    }
+
+
+def block_evaluation_conflicts_with_training(
+    frame: pd.DataFrame,
+    split: pd.Series,
+    group_ids: pd.Series,
+    candidate_mask: pd.Series,
+    assignments: dict[int, str],
+    blocked_indexes: set[int],
+    *,
+    ngram_threshold: float,
+    include_one_edit: bool = True,
+) -> dict[str, int]:
+    training = frame[split.eq("train")]
+    evaluation = frame[split.isin({"test", "validate"})]
+    conflicts = near_candidate_conflicts(
+        training,
+        evaluation,
+        ngram_threshold=ngram_threshold,
+        include_one_edit=include_one_edit,
+    )
+    conflict_groups = {
+        int(group_id)
+        for group_id in group_ids.loc[list(conflicts)]
+    }
+    for group_id in conflict_groups:
+        assignments.pop(group_id, None)
+    candidate_mask.loc[list(conflicts)] = False
+    blocked_indexes.update(conflicts)
+    return {
+        "conflicting_eval_rows": len(conflicts),
+        "conflicting_groups": len(conflict_groups),
     }
 
 
@@ -803,11 +916,33 @@ def build_hard_split(
         candidate_mask,
         registry_in,
     )
+    registry_groups = set(assignments)
+    one_edit_blocked_indexes = globally_unsafe_one_edit_candidates(
+        frame,
+        candidate_mask,
+    )
     effective_candidate_mask = candidate_mask.copy()
+    effective_candidate_mask.loc[list(one_edit_blocked_indexes)] = False
     validate_test_blocked_indexes: set[int] = set()
+    train_eval_blocked_indexes: set[int] = set()
     near_iterations: list[dict[str, int]] = []
     max_iterations = int(group_ids.nunique()) + 1
     for _ in range(max_iterations):
+        source_targets, current_targets = source_stratum_targets(
+            frame,
+            effective_candidate_mask,
+            test_ratio=test_ratio,
+            val_ratio=val_ratio,
+            min_test_rows=min_test_rows,
+            min_validate_rows=min_validate_rows,
+        )
+        if current_targets != targets:
+            raise SystemExit(
+                "Similarity filtering left insufficient eligible rows for "
+                "the all-pair language targets"
+            )
+        for group_id in set(assignments) - registry_groups:
+            assignments.pop(group_id)
         fill_assignments(
             frame,
             group_ids,
@@ -831,9 +966,33 @@ def build_hard_split(
             assignments,
             validate_test_blocked_indexes,
             ngram_threshold=ngram_threshold,
+            include_one_edit=False,
         )
+        if iteration["conflicting_eval_rows"]:
+            iteration["train_eval_conflicting_rows"] = 0
+            near_iterations.append(iteration)
+            continue
+        split = materialize_splits(
+            frame,
+            group_ids,
+            effective_candidate_mask,
+            assignments,
+        )
+        train_eval_iteration = block_evaluation_conflicts_with_training(
+            frame,
+            split,
+            group_ids,
+            effective_candidate_mask,
+            assignments,
+            train_eval_blocked_indexes,
+            ngram_threshold=ngram_threshold,
+            include_one_edit=False,
+        )
+        iteration["train_eval_conflicting_rows"] = train_eval_iteration[
+            "conflicting_eval_rows"
+        ]
         near_iterations.append(iteration)
-        if iteration["conflicting_eval_rows"] == 0:
+        if train_eval_iteration["conflicting_eval_rows"] == 0:
             break
     else:
         raise SystemExit("Near-duplicate split stabilization did not converge")
@@ -845,14 +1004,6 @@ def build_hard_split(
         assignments,
     )
     heldout_group_non_eval = split.eq("excluded")
-    evaluation = frame[split.isin({"test", "validate"})]
-    training = frame[split.eq("train")]
-    near_train_indexes = near_candidate_conflicts(
-        evaluation,
-        training,
-        ngram_threshold=ngram_threshold,
-    )
-    split.loc[list(near_train_indexes)] = "excluded"
     frame["split"] = split
     frame["eval_tier"] = TIER
     frame["source_bucket"] = frame["_source_bucket"]
@@ -869,9 +1020,6 @@ def build_hard_split(
     exclusion_reason.loc[
         list(validate_test_blocked_indexes)
     ] = "near_duplicate_between_test_and_validation"
-    exclusion_reason.loc[
-        list(near_train_indexes)
-    ] = "near_duplicate_of_evaluation"
     excluded = frame[split.eq("excluded")].copy()
     excluded["exclusion_reason"] = exclusion_reason.loc[
         excluded.index
@@ -956,7 +1104,7 @@ def build_hard_split(
                 ),
             }
         )
-        if counts["test"] < target_test or counts["validate"] < target_validate:
+        if counts["test"] != target_test or counts["validate"] != target_validate:
             ratio_shortfalls[str(language)] = {
                 "test": counts["test"],
                 "target_test": target_test,
@@ -974,7 +1122,7 @@ def build_hard_split(
         eligible_language = language_frame[
             candidate_mask.loc[language_frame.index]
         ]
-        eligible_distribution = Counter(eligible_language["_source_corpus"])
+        all_distribution = Counter(language_frame["_source_corpus"])
         split_distributions = {
             split_name: Counter(
                 eligible_language[
@@ -986,15 +1134,15 @@ def build_hard_split(
         source_distribution_tvd[language_key] = {}
         for split_name, distribution in split_distributions.items():
             total = sum(distribution.values())
-            eligible_total = sum(eligible_distribution.values())
+            all_total = sum(all_distribution.values())
             source_distribution_tvd[language_key][split_name] = (
                 0.5
                 * sum(
                     abs(
-                        eligible_distribution[bucket] / max(eligible_total, 1)
+                        all_distribution[bucket] / max(all_total, 1)
                         - distribution[bucket] / max(total, 1)
                     )
-                    for bucket in set(eligible_distribution) | set(distribution)
+                    for bucket in set(all_distribution) | set(distribution)
                 )
             )
         for bucket, source_frame in language_frame.groupby(
@@ -1004,11 +1152,15 @@ def build_hard_split(
             eligible_source = source_frame[
                 candidate_mask.loc[source_frame.index]
             ]
+            similarity_safe_source = source_frame[
+                effective_candidate_mask.loc[source_frame.index]
+            ]
             target_test, target_validate = source_targets.get(
                 (language_key, bucket_key),
                 (0, 0),
             )
-            counts = Counter(eligible_source["split"])
+            counts = Counter(source_frame["split"])
+            eligible_counts = Counter(eligible_source["split"])
             synthetic_source = eligible_source.get(
                 "pivot_origin",
                 pd.Series("original", index=eligible_source.index),
@@ -1016,16 +1168,24 @@ def build_hard_split(
             source_reports[language_key][bucket_key] = {
                 "input_rows": len(source_frame),
                 "eligible_sentence_rows": len(eligible_source),
+                "similarity_safe_sentence_rows": len(similarity_safe_source),
                 "eligible_human_rows": int((~synthetic_source).sum()),
                 "eligible_synthetic_rows": int(synthetic_source.sum()),
                 "train_rows": counts["train"],
                 "test_rows": counts["test"],
                 "validate_rows": counts["validate"],
                 "excluded_rows": counts["excluded"],
+                "eligible_train_rows": eligible_counts["train"],
                 "target_test_rows": target_test,
                 "target_validate_rows": target_validate,
-                "test_fraction": counts["test"] / max(len(eligible_source), 1),
+                "test_fraction": counts["test"] / max(len(source_frame), 1),
                 "validate_fraction": (
+                    counts["validate"] / max(len(source_frame), 1)
+                ),
+                "test_fraction_of_eligible_sentences": (
+                    counts["test"] / max(len(eligible_source), 1)
+                ),
+                "validate_fraction_of_eligible_sentences": (
                     counts["validate"] / max(len(eligible_source), 1)
                 ),
                 "synthetic_test_rows": int(
@@ -1039,8 +1199,8 @@ def build_hard_split(
                 ),
             }
             if (
-                counts["test"] < target_test
-                or counts["validate"] < target_validate
+                counts["test"] != target_test
+                or counts["validate"] != target_validate
             ):
                 source_shortfalls[language_key][bucket_key] = {
                     "test": counts["test"],
@@ -1062,9 +1222,14 @@ def build_hard_split(
         ).sum()
     )
     overlaps = overlap_summary(train, evaluation)
+    output_complete = len(output) == len(frame) and excluded.empty
     report = {
         "schema_version": 3,
-        "complete": not ratio_shortfalls and not source_shortfalls,
+        "complete": (
+            output_complete
+            and not ratio_shortfalls
+            and not source_shortfalls
+        ),
         "tier": TIER,
         "input_rows": len(frame) + len(duplicate_rows),
         "deduplicated_input_rows": len(frame),
@@ -1074,11 +1239,14 @@ def build_hard_split(
         "excluded_heldout_group_rows": int(
             heldout_group_non_eval.sum()
         ),
-        "excluded_near_duplicate_train_rows": len(
-            near_train_indexes
-        ),
-        "excluded_validate_test_near_duplicate_rows": len(
+        "blocked_validate_test_candidate_rows": len(
             validate_test_blocked_indexes
+        ),
+        "blocked_global_one_edit_candidate_rows": len(
+            one_edit_blocked_indexes
+        ),
+        "blocked_train_evaluation_candidate_rows": len(
+            train_eval_blocked_indexes
         ),
         "synthetic_eval_rows": int(
             (
@@ -1142,18 +1310,20 @@ def build_hard_split(
         "languages": language_reports,
         "source_strata": source_reports,
         "source_distribution_total_variation": source_distribution_tvd,
-        "ratio_basis": "mt_eligible_sentence_rows_by_language_and_source_corpus",
+        "ratio_basis": SPLIT_DEFAULTS["ratio_basis"],
         "required_ratios": {"test": test_ratio, "validate": val_ratio},
         "ratio_shortfalls": ratio_shortfalls,
         "source_ratio_shortfalls": source_shortfalls,
         "benchmark_registry_input": str(registry_in) if registry_in else None,
         "benchmark_registry_stats": registry_stats,
     }
-    if ratio_shortfalls or source_shortfalls:
+    if not output_complete or ratio_shortfalls or source_shortfalls:
         raise SystemExit(
             "Could not construct source-balanced sentence evaluation sets: "
             + json.dumps(
                 {
+                    "output_rows": len(output),
+                    "deduplicated_input_rows": len(frame),
                     "languages": ratio_shortfalls,
                     "sources": source_shortfalls,
                 },

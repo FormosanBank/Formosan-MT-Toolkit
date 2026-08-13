@@ -48,6 +48,7 @@ from mt_common import (  # noqa: E402
     source_bucket,
     source_corpus,
     special_tokens_from_corpus,
+    weighted_apportioned_counts,
 )
 from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from mt_standardization import (  # noqa: E402
@@ -587,6 +588,24 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertEqual(one_edit_conflicts(training, evaluation, "text"), {1, 2, 3})
 
+    def test_one_edit_self_comparison_only_marks_real_neighbors(self) -> None:
+        rows = pd.DataFrame(
+            {
+                "lang_code": ["ami", "ami", "ami"],
+                "text": ["malikoda", "malikoda", "unrelated"],
+            },
+            index=[1, 2, 3],
+        )
+        self.assertEqual(
+            one_edit_conflicts(
+                rows,
+                rows,
+                "text",
+                ignore_same_index=True,
+            ),
+            {1, 2},
+        )
+
     def test_streaming_ngram_join_finds_conflicts_with_either_side_smaller(self) -> None:
         base = "abcdefghijklmnopqrstuvwxyz" * 4
         near = base[:50] + "X" + base[51:]
@@ -623,9 +642,10 @@ class LeakageTests(unittest.TestCase):
             {100},
         )
 
-    def test_split_targets_use_eligible_sentences_as_denominator(self) -> None:
+    def test_split_targets_use_all_pairs_as_denominator(self) -> None:
         self.assertEqual(
             split_targets(
+                total_rows=1_000,
                 eligible_total=1_000,
                 test_ratio=0.075,
                 val_ratio=0.025,
@@ -636,6 +656,7 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertEqual(
             split_targets(
+                total_rows=20_000,
                 eligible_total=20_000,
                 test_ratio=0.075,
                 val_ratio=0.025,
@@ -643,6 +664,36 @@ class LeakageTests(unittest.TestCase):
                 min_validate_rows=0,
             ),
             (1_500, 500),
+        )
+        self.assertEqual(
+            split_targets(
+                total_rows=20_000,
+                eligible_total=5_000,
+                test_ratio=0.075,
+                val_ratio=0.025,
+                min_test_rows=0,
+                min_validate_rows=0,
+            ),
+            (1_500, 500),
+        )
+        with self.assertRaisesRegex(ValueError, "requires 2,000"):
+            split_targets(
+                total_rows=20_000,
+                eligible_total=1_999,
+                test_ratio=0.075,
+                val_ratio=0.025,
+                min_test_rows=0,
+                min_validate_rows=0,
+            )
+
+    def test_weighted_apportionment_redistributes_capacity_shortfall(self) -> None:
+        self.assertEqual(
+            weighted_apportioned_counts(
+                {"lexical": 900, "narrative": 100},
+                {"lexical": 20, "narrative": 100},
+                100,
+            ),
+            {"lexical": 20, "narrative": 80},
         )
 
     def test_source_domain_does_not_override_row_eligibility(self) -> None:
@@ -756,6 +807,15 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(len(excluded), 0)
         self.assertTrue(report["complete"])
+        language = report["languages"]["ami"]
+        self.assertEqual(language["rows_total"], 300)
+        self.assertEqual(language["test_rows"], 23)
+        self.assertEqual(language["validate_rows"], 8)
+        self.assertGreaterEqual(language["test_fraction_of_all_input_rows"], 0.075)
+        self.assertGreaterEqual(
+            language["validate_fraction_of_all_input_rows"],
+            0.025,
+        )
 
         provenance = validate_provenance(output)
         validation = validate_splits(
@@ -766,9 +826,11 @@ class LeakageTests(unittest.TestCase):
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
+            split_report=report,
         )
         self.assertTrue(provenance["ok"], provenance)
         self.assertTrue(validation["ok"], validation)
+        self.assertFalse(validation["split_report_errors"])
 
         contaminated = output.copy()
         contaminated["translation_kind"] = ""
@@ -849,8 +911,48 @@ class LeakageTests(unittest.TestCase):
             )
         self.assertLess(
             report["source_distribution_total_variation"]["ami"]["test"],
-            0.02,
+            0.025,
         )
+
+    def test_hard_split_redistributes_lexical_source_shortfall(self) -> None:
+        raw = self.hard_split_fixture()
+        source_a = raw.index[:150]
+        raw.loc[source_a, "source"] = "FormosanBank/Corpora/SourceA/XML/lexical.xml"
+        raw.loc[source_a, "row_type"] = "lexeme"
+        raw.loc[~raw.index.isin(source_a), "source"] = (
+            "FormosanBank/Corpora/SourceB/XML/sentences.xml"
+        )
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        output, _, _, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+
+        source_a_report = report["source_strata"]["ami"]["SourceA"]
+        source_b_report = report["source_strata"]["ami"]["SourceB"]
+        self.assertEqual(source_a_report["target_test_rows"], 0)
+        self.assertEqual(source_a_report["target_validate_rows"], 0)
+        self.assertEqual(
+            source_b_report["target_test_rows"]
+            + source_b_report["target_validate_rows"],
+            31,
+        )
+        evaluation = output[output["split"].isin({"test", "validate"})]
+        self.assertTrue(evaluation["row_type"].eq("sentence").all())
 
     def test_hard_split_uses_synthetic_sentences_only_as_fallback(self) -> None:
         raw = self.hard_split_fixture()
@@ -880,10 +982,13 @@ class LeakageTests(unittest.TestCase):
         self.assertTrue(evaluation["row_type"].eq("sentence").all())
         self.assertEqual(report["lexical_like_eval_rows"], 0)
 
-    def test_near_synthetic_training_rows_are_excluded_not_eval(self) -> None:
+    def test_unsafe_evaluation_candidates_are_replaced_not_excluded(self) -> None:
         raw = self.hard_split_fixture()
         near_synthetic = []
-        human = raw[raw["pivot_origin"].eq("original") & raw["row_type"].eq("sentence")]
+        human = raw[
+            raw["pivot_origin"].eq("original")
+            & raw["row_type"].eq("sentence")
+        ].head(20)
         for _, row in human.iterrows():
             near_synthetic.append(
                 {
@@ -924,21 +1029,64 @@ class LeakageTests(unittest.TestCase):
         )
 
         self.assertTrue(report["complete"])
-        self.assertGreater(
-            report["excluded_near_duplicate_train_rows"],
-            0,
-        )
-        self.assertTrue(excluded["exclusion_reason"].eq("near_duplicate_of_evaluation").any())
+        self.assertGreater(report["blocked_global_one_edit_candidate_rows"], 0)
+        self.assertTrue(excluded.empty)
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
+        self.assertEqual(len(output), report["deduplicated_input_rows"])
         language = report["languages"]["ami"]
         self.assertGreaterEqual(
-            language["test_fraction_of_eligible_sentences"],
+            language["test_fraction_of_all_input_rows"],
             0.075,
         )
         self.assertGreaterEqual(
-            language["validate_fraction_of_eligible_sentences"],
+            language["validate_fraction_of_all_input_rows"],
             0.025,
+        )
+
+    def test_validate_test_conflicts_are_reallocated_across_sources(self) -> None:
+        raw = self.hard_split_fixture()
+        source_a = raw["source"].str.contains(r"doc-(?:[0-9]|1[0-4])\.xml", regex=True)
+        raw.loc[source_a, "source"] = "FormosanBank/Corpora/SourceA/XML/a.xml"
+        raw.loc[~source_a, "source"] = "FormosanBank/Corpora/SourceB/XML/b.xml"
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        output, _, _, report = build_hard_split(
+            keyed,
+            target_col="english_sentence",
+            test_ratio=0.075,
+            val_ratio=0.025,
+            seed=42,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            attempts=20,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+            registry_in=None,
+        )
+
+        language = report["languages"]["ami"]
+        self.assertEqual(language["test_rows"], language["target_test_rows"])
+        self.assertEqual(
+            language["validate_rows"],
+            language["target_validate_rows"],
+        )
+        self.assertFalse(report["ratio_shortfalls"])
+        self.assertFalse(report["source_ratio_shortfalls"])
+        for source in report["source_strata"]["ami"].values():
+            self.assertEqual(source["test_rows"], source["target_test_rows"])
+            self.assertEqual(
+                source["validate_rows"],
+                source["target_validate_rows"],
+            )
+        self.assertTrue(
+            output[output["split"].isin({"test", "validate"})]["row_type"]
+            .eq("sentence")
+            .all()
         )
 
     def test_independent_validator_reports_synthetic_and_document_overlap(self) -> None:
@@ -1580,7 +1728,7 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("model-index:", card)
         self.assertIn("headline result uses `default` metadata", card)
         self.assertIn("Document overlap is diagnostic", card)
-        self.assertIn("source-balanced", card)
+        self.assertIn("capacity-aware source", card)
         self.assertIn("`20260809-210523`", card)
         self.assertIn("nllb-200", card)
 

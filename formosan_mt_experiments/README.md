@@ -24,11 +24,11 @@ Use only `big_corpus_<en|zh>_in_domain_hard.csv` from a completed v3 provenance
 bundle. Before model setup, `scripts/validate_experiment.py` verifies:
 
 - the corpus, profile, standardization namespace, and artifact hashes;
-- roughly 90/2.5/7.5 train/validation/test proportions within every language
-  and source corpus;
+- at least 2.5/7.5 validation/test proportions from all deduplicated pairs in
+  every language, with capacity-aware source-corpus representation;
 - sentence references only in evaluation, preferring human rows before valid
   synthetic pivot fallbacks;
-- no lexical, morpheme, lexical-source, short, or ambiguous-normalization
+- no lexical, morpheme, short, or ambiguous-normalization
   evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts
   across split boundaries.

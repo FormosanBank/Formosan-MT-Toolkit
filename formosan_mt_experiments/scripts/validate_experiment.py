@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import unicodedata
@@ -30,6 +31,7 @@ from mt_common import (
     source_bucket,
     source_corpus,
     target_col_for,
+    weighted_apportioned_counts,
     write_json,
 )
 
@@ -466,6 +468,7 @@ def validate_splits(
     source_ratio_tolerance: float = SPLIT_DEFAULTS["source_ratio_tolerance"],
     require_human_eval: bool = False,
     require_document_holdout: bool = False,
+    split_report: dict[str, object] | None = None,
 ) -> dict[str, object]:
     target_language = (
         "chinese" if target_col == "chinese_sentence" else "english"
@@ -545,21 +548,42 @@ def validate_splits(
 
     ratios: dict[str, dict[str, object]] = {}
     ratio_failures: dict[str, dict[str, object]] = {}
+    split_report_errors: list[str] = []
+    report_languages = (
+        split_report.get("languages", {})
+        if isinstance(split_report, dict)
+        else {}
+    )
+    if split_report is not None:
+        if split_report.get("complete") is not True:
+            split_report_errors.append("split report is incomplete")
+        if split_report.get("ratio_basis") != SPLIT_DEFAULTS["ratio_basis"]:
+            split_report_errors.append("split report ratio basis does not match policy")
     for language, group in keyed.groupby("lang_code", sort=True):
+        language_key = str(language)
         group_candidate = candidate.loc[group.index]
         eligible_group = group[group_candidate]
-        group_split = eligible_group["split"].astype(str).str.lower()
-        total = len(eligible_group)
+        group_split = group["split"].astype(str).str.lower()
+        report_language = report_languages.get(language_key, {})
+        total = int(report_language.get("rows_total", len(group)))
         test_rows = int(group_split.eq("test").sum())
         validate_rows = int(group_split.eq("validate").sum())
-        required_test = max(math.ceil(total * min_test_ratio), min_test_rows)
-        required_validate = max(
-            math.ceil(total * min_validate_ratio),
-            min_validate_rows,
+        required_test = int(
+            report_language.get(
+                "target_test_rows",
+                max(math.ceil(total * min_test_ratio), min_test_rows),
+            )
+        )
+        required_validate = int(
+            report_language.get(
+                "target_validate_rows",
+                max(math.ceil(total * min_validate_ratio), min_validate_rows),
+            )
         )
         values = {
             "rows": total,
-            "all_rows": len(group),
+            "output_rows": len(group),
+            "eligible_sentence_rows": len(eligible_group),
             "train": int(group_split.eq("train").sum()),
             "test": test_rows,
             "validate": validate_rows,
@@ -568,62 +592,127 @@ def validate_splits(
             "required_test": required_test,
             "required_validate": required_validate,
         }
-        ratios[str(language)] = values
-        if test_rows < required_test or validate_rows < required_validate:
-            ratio_failures[str(language)] = values
+        ratios[language_key] = values
+        ratio_mismatch = (
+            test_rows != required_test or validate_rows != required_validate
+            if split_report is not None
+            else test_rows < required_test or validate_rows < required_validate
+        )
+        if ratio_mismatch:
+            ratio_failures[language_key] = values
+    missing_report_languages = sorted(set(report_languages) - set(ratios))
+    if missing_report_languages:
+        split_report_errors.append(
+            "split report languages absent from corpus: "
+            + ", ".join(missing_report_languages)
+        )
 
     source_ratios: dict[str, dict[str, dict[str, object]]] = {}
     source_ratio_failures: dict[str, dict[str, dict[str, object]]] = {}
     source_distribution_tvd: dict[str, dict[str, float]] = {}
     for language, language_frame in keyed.groupby("lang_code", sort=True):
         language_key = str(language)
-        language_candidate = language_frame[
+        eligible_language = language_frame[
             candidate.loc[language_frame.index]
         ]
-        eligible_distribution = Counter(language_candidate["_source_corpus"])
+        report_sources = (
+            split_report.get("source_strata", {}).get(language_key, {})
+            if isinstance(split_report, dict)
+            else {}
+        )
+        if report_sources:
+            all_distribution = Counter(
+                {
+                    str(bucket): int(values["input_rows"])
+                    for bucket, values in report_sources.items()
+                }
+            )
+            evaluation_targets = {
+                str(bucket): int(values["target_test_rows"])
+                + int(values["target_validate_rows"])
+                for bucket, values in report_sources.items()
+            }
+            validate_targets = {
+                str(bucket): int(values["target_validate_rows"])
+                for bucket, values in report_sources.items()
+            }
+        else:
+            all_distribution = Counter(language_frame["_source_corpus"])
+            eligible_distribution = Counter(eligible_language["_source_corpus"])
+            language_test = max(
+                math.ceil(len(language_frame) * min_test_ratio),
+                min_test_rows,
+            )
+            language_validate = max(
+                math.ceil(len(language_frame) * min_validate_ratio),
+                min_validate_rows,
+            )
+            evaluation_targets = weighted_apportioned_counts(
+                all_distribution,
+                eligible_distribution,
+                language_test + language_validate,
+            )
+            validate_targets = weighted_apportioned_counts(
+                all_distribution,
+                evaluation_targets,
+                language_validate,
+            )
         source_ratios[language_key] = {}
         source_ratio_failures[language_key] = {}
         source_distribution_tvd[language_key] = {}
         for split_name in ("test", "validate"):
             distribution = Counter(
-                language_candidate[
-                    language_candidate["split"].astype(str).str.lower().eq(split_name)
+                eligible_language[
+                    eligible_language["split"].astype(str).str.lower().eq(split_name)
                 ]["_source_corpus"]
             )
             total = sum(distribution.values())
-            eligible_total = sum(eligible_distribution.values())
+            all_total = sum(all_distribution.values())
             source_distribution_tvd[language_key][split_name] = 0.5 * sum(
                 abs(
-                    eligible_distribution[bucket] / max(eligible_total, 1)
+                    all_distribution[bucket] / max(all_total, 1)
                     - distribution[bucket] / max(total, 1)
                 )
-                for bucket in set(eligible_distribution) | set(distribution)
+                for bucket in set(all_distribution) | set(distribution)
             )
-        for bucket, source_frame in language_candidate.groupby(
-            "_source_corpus", sort=True
-        ):
+        output_sources = {
+            str(bucket): source_frame
+            for bucket, source_frame in language_frame.groupby(
+                "_source_corpus", sort=True
+            )
+        }
+        for bucket in sorted(set(output_sources) | set(all_distribution)):
+            source_frame = output_sources.get(
+                bucket,
+                language_frame.iloc[0:0],
+            )
             bucket_key = str(bucket)
             source_split = source_frame["split"].astype(str).str.lower()
-            total = len(source_frame)
+            total = int(all_distribution.get(bucket_key, len(source_frame)))
+            eligible_rows = int(candidate.loc[source_frame.index].sum())
             test_rows = int(source_split.eq("test").sum())
             validate_rows = int(source_split.eq("validate").sum())
-            row_tolerance = max(1, math.ceil(total * source_ratio_tolerance))
-            required_test = max(0, math.floor(total * min_test_ratio) - row_tolerance)
-            required_validate = max(
-                0,
-                math.floor(total * min_validate_ratio) - row_tolerance,
+            target_validate = validate_targets.get(bucket_key, 0)
+            target_test = evaluation_targets.get(bucket_key, 0) - target_validate
+            row_tolerance = (
+                0
+                if report_sources
+                else max(1, math.ceil(total * source_ratio_tolerance))
             )
-            allowed_test = math.ceil(total * min_test_ratio) + row_tolerance
-            allowed_validate = (
-                math.ceil(total * min_validate_ratio) + row_tolerance
-            )
+            required_test = max(0, target_test - row_tolerance)
+            required_validate = max(0, target_validate - row_tolerance)
+            allowed_test = target_test + row_tolerance
+            allowed_validate = target_validate + row_tolerance
             values = {
-                "eligible_sentence_rows": total,
+                "rows": total,
+                "eligible_sentence_rows": eligible_rows,
                 "train": int(source_split.eq("train").sum()),
                 "test": test_rows,
                 "validate": validate_rows,
                 "test_ratio": test_rows / total,
                 "validate_ratio": validate_rows / total,
+                "target_test": target_test,
+                "target_validate": target_validate,
                 "test_bounds": [required_test, allowed_test],
                 "validate_bounds": [required_validate, allowed_validate],
             }
@@ -657,6 +746,7 @@ def validate_splits(
         not unknown_splits
         and not ratio_failures
         and not source_ratio_failures
+        and not split_report_errors
         and (not require_human_eval or synthetic_eval_rows == 0)
         and mt_ineligible_eval_rows == 0
         and ambiguous_normalization_eval_rows == 0
@@ -700,6 +790,8 @@ def validate_splits(
             "min_test_rows": min_test_rows,
             "min_validate_rows": min_validate_rows,
         },
+        "ratio_basis": SPLIT_DEFAULTS["ratio_basis"],
+        "split_report_errors": split_report_errors,
         "ratios_by_language": ratios,
         "ratio_failures": ratio_failures,
         "ratios_by_language_and_source": source_ratios,
@@ -768,6 +860,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--target-col")
+    parser.add_argument(
+        "--split-report",
+        type=Path,
+        help="Original hard-split report used to validate all-pair targets.",
+    )
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--direction", choices=direction_choices())
     parser.add_argument(
@@ -841,6 +938,12 @@ def main() -> None:
         raise SystemExit("Input must have a split column")
 
     provenance = validate_provenance(frame)
+    split_report = None
+    if args.split_report:
+        try:
+            split_report = json.loads(args.split_report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Cannot read split report {args.split_report}: {exc}") from exc
     split_validation = validate_splits(
         frame,
         target_col=target_col,
@@ -854,6 +957,7 @@ def main() -> None:
         source_ratio_tolerance=args.source_ratio_tolerance,
         require_human_eval=args.require_human_eval,
         require_document_holdout=args.require_document_holdout_report,
+        split_report=split_report,
     )
     report: dict[str, object] = {
         "schema_version": 3,
@@ -863,6 +967,14 @@ def main() -> None:
         "target_language": target_lang,
         "target_column": target_col,
         "profile": profile_record(args.profile),
+        "split_report": (
+            {
+                "path": str(args.split_report),
+                "sha256": sha256_file(args.split_report),
+            }
+            if args.split_report
+            else None
+        ),
         "rows": len(frame),
         "provenance_validation": provenance,
         "split_validation": split_validation,
