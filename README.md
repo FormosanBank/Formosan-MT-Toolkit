@@ -102,8 +102,9 @@ Production builds fail unless all of these conditions hold:
   structures are excluded from model corpora;
 - DeepL is limited to MT-eligible sentence rows with at least four Formosan and
   pivot-source units; completion is explicit and every response is validated;
-- lexemes, morphemes, lexical source corpora, and short lexical-like rows are
-  training-only;
+- lexemes, morphemes, and rows that fail sentence QC or configured length
+  requirements are training-only; source provenance never determines row
+  eligibility;
 - each language/source corpus contributes roughly 90% of its eligible sentence
   rows to train, 7.5% to test, and 2.5% to validation;
 - evaluation references are sentence-level, with human rows preferred before

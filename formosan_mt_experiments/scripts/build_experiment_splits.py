@@ -15,7 +15,6 @@ import pandas as pd
 from columnar_cache import write_columnar_cache
 from experiment_config import load_corpus_pipeline_config
 from mt_common import (
-    EASY_BUCKETS,
     add_normalized_columns,
     apportioned_counts,
     bool_series,
@@ -41,7 +40,6 @@ class GroupCandidate:
     eligible_rows: int
     total_rows: int
     non_eval_rows: int
-    easy_fraction: float
     average_tokens: float
     synthetic_fraction: float = 0.0
 
@@ -366,7 +364,6 @@ def candidate_groups(
                 eligible_rows=len(eligible),
                 total_rows=len(group),
                 non_eval_rows=len(group) - len(eligible),
-                easy_fraction=float(eligible["_source_bucket"].isin(EASY_BUCKETS).mean()),
                 average_tokens=float(
                     (eligible["_formosan_tokens"] + eligible["_target_tokens"]).mean()
                     / 2
@@ -404,7 +401,6 @@ def choose_groups(
         candidates,
         key=lambda group: (
             group.synthetic_fraction,
-            group.easy_fraction,
             group.non_eval_rows / max(group.eligible_rows, 1),
             -group.average_tokens,
             tie_breakers[group.group_id],
@@ -429,15 +425,15 @@ def choose_groups(
     # registry or leakage component groups more than one row together.
     states: dict[
         int,
-        tuple[tuple[float, float, float, float, int, int], tuple[int, ...]],
+        tuple[tuple[float, float, float, int, int], tuple[int, ...]],
     ] = {
-        0: ((0.0, 0.0, 0.0, 0.0, 0, 0), ()),
+        0: ((0.0, 0.0, 0.0, 0, 0), ()),
     }
     for candidate in ordered:
         weight = candidate.eligible_rows
         additions: dict[
             int,
-            tuple[tuple[float, float, float, float, int, int], tuple[int, ...]],
+            tuple[tuple[float, float, float, int, int], tuple[int, ...]],
         ] = {}
         for rows, (cost, selected) in list(states.items()):
             next_rows = rows + weight
@@ -446,10 +442,9 @@ def choose_groups(
             next_cost = (
                 cost[0] + candidate.synthetic_fraction * weight,
                 cost[1] + candidate.non_eval_rows,
-                cost[2] + candidate.easy_fraction * weight,
-                cost[3] - candidate.average_tokens * weight,
-                cost[4] + 1,
-                cost[5] + quality_rank[candidate.group_id],
+                cost[2] - candidate.average_tokens * weight,
+                cost[3] + 1,
+                cost[4] + quality_rank[candidate.group_id],
             )
             next_selected = (*selected, candidate.group_id)
             previous = states.get(next_rows) or additions.get(next_rows)

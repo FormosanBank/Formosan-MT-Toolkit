@@ -172,6 +172,12 @@ diagnostic because some source corpora serialize thousands of unrelated rows in
 one XML file; treating that file as an indivisible split unit would recreate the
 source imbalance this stage prevents.
 
+Eligibility is row-based. A repository or path classified as `dictionary`,
+`classroom`, or another provenance domain is not excluded automatically. A
+structurally typed sentence may enter evaluation when it passes MT
+standardization, ambiguity, gloss, and configured token-length gates. Explicit
+lexemes and morphemes remain training-only.
+
 `source_corpus` records the exact public corpus root or private repository used
 for split allocation. It is never a model tag. `source_bucket` is restricted to
 the fixed domains `dictionary`, `classroom`, `narrative`, `linguistic`,

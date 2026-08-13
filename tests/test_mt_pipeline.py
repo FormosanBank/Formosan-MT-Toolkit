@@ -551,7 +551,6 @@ class LeakageTests(unittest.TestCase):
                 eligible_rows=rows,
                 total_rows=rows,
                 non_eval_rows=0,
-                easy_fraction=0,
                 average_tokens=10,
             )
             for group_id, rows in enumerate((104, 86, 16, 4))
@@ -646,7 +645,7 @@ class LeakageTests(unittest.TestCase):
             (1_500, 500),
         )
 
-    def test_word_list_sources_are_not_evaluation_candidates(self) -> None:
+    def test_source_domain_does_not_override_row_eligibility(self) -> None:
         row = self.hard_split_fixture().iloc[[0]].copy()
         row["source"] = "Formosan-ILRDF-42-Language-Practice-Word-Lists/Final_XML/Atayal/word-list.xml"
         row["formosan_sentence"] = "one two three four"
@@ -656,6 +655,14 @@ class LeakageTests(unittest.TestCase):
             target_col="english_sentence",
             target_lang="english",
         )
+        candidates = evaluation_candidate_mask(
+            normalized,
+            min_formosan_tokens=4,
+            min_target_tokens=4,
+        )
+        self.assertTrue(bool(candidates.iloc[0]))
+
+        normalized.loc[normalized.index[0], "row_type"] = "lexeme"
         candidates = evaluation_candidate_mask(
             normalized,
             min_formosan_tokens=4,

@@ -82,7 +82,6 @@ DOMAIN_BUCKETS = (
     "unknown",
 )
 EASY_BUCKETS = ("dictionary", "classroom")
-LEXICAL_SOURCE_BUCKETS = ("dictionary",)
 MT_STANDARD_NAMESPACE = "formosan-mt"
 MT_STANDARD_REQUIRED_COLUMNS = (
     "kindOf",
@@ -283,31 +282,21 @@ def evaluation_candidate_mask(
 ) -> pd.Series:
     """Return sentence-quality rows that may be used in dev or test.
 
-    Some source dictionaries encode entries as ``S`` elements. Structural type
-    alone is therefore insufficient: known lexical sources and short entries
-    are also kept out of evaluation.
+    Provenance domains do not determine row quality. Structurally typed
+    sentences are eligible regardless of source when they pass QC and the
+    configured length requirements.
     """
     required = {
         "row_type",
         "mt_eval_eligible",
         "mt_normalization_confidence",
-        "_source_bucket",
         "_formosan_tokens",
         "_target_tokens",
     }
     require_columns(frame, required, "evaluation eligibility")
     flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
-    source = frame.get("source", pd.Series("", index=frame.index)).astype(str)
-    lexical_path = source.str.contains(
-        r"(?:^|[/_\-])(?:dict(?:s|ionary|ionaries)?|lexic(?:on|ons|al)?|"
-        r"glossar(?:y|ies)|word[-_ ]?lists?|vocab(?:ulary|ularies)?)(?:[/_\-.]|$)",
-        case=False,
-        regex=True,
-    )
     return (
         frame["row_type"].astype(str).str.casefold().eq("sentence")
-        & ~frame["_source_bucket"].isin(LEXICAL_SOURCE_BUCKETS)
-        & ~lexical_path
         & ~flags.str.contains(
             r"(?:contains_unclear|unknown_row_type)",
             regex=True,
