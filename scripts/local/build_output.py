@@ -182,6 +182,7 @@ def format_rule_summary(build_root: Path, reports: list[dict[str, Any]]) -> str:
         "QC repairs": Counter(),
         "MT cleaning": Counter(),
         "MT flags": Counter(),
+        "XML unit exclusions": Counter(),
         "English removals": Counter(),
         "English text cleaning": Counter(),
         "Chinese removals": Counter(),
@@ -190,11 +191,24 @@ def format_rule_summary(build_root: Path, reports: list[dict[str, Any]]) -> str:
     finding_records: Counter[str] = Counter()
     finding_rules: dict[str, set[str]] = {}
     for report in reports:
-        qc, mt, en, zh = _language_manifests(build_root, str(report["code"]))
+        code = str(report["code"])
+        qc, mt, en, zh = _language_manifests(build_root, code)
+        extraction = _load(
+            build_root / "raw_corpora" / f"{code}_en.extraction.json"
+        ) or _load(
+            build_root / "raw_corpora" / f"{code}_zh.extraction.json"
+        )
         inventory = mt.get("inventory", {})
         totals["QC repairs"].update(qc.get("repair_inventory", {}).get("counts", {}))
         totals["MT cleaning"].update(inventory.get("rule_counts", {}))
         totals["MT flags"].update(inventory.get("reason_counts", {}))
+        totals["XML unit exclusions"].update(
+            {
+                name: count
+                for name, count in extraction.get("counts", {}).items()
+                if str(name).endswith("_excluded")
+            }
+        )
         totals["English removals"].update(en.get("filter_rule_counts", {}))
         totals["English text cleaning"].update(en.get("transformation_counts", {}))
         totals["Chinese removals"].update(zh.get("filter_rule_counts", {}))

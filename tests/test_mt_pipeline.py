@@ -106,6 +106,18 @@ class ColumnarCacheTests(unittest.TestCase):
 
 def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:
     output = frame.copy()
+    row_type = output.get(
+        "row_type",
+        pd.Series("sentence", index=output.index),
+    ).astype(str)
+    if "xml_unit_context" not in output:
+        output["xml_unit_context"] = row_type.map(
+            {
+                "sentence": "sentence",
+                "lexeme": "standalone_word",
+                "morpheme": "standalone_morpheme",
+            }
+        ).fillna("unknown")
     output["kindOf"] = "standard"
     output["standard_namespace"] = "formosan-mt"
     output["formosan_mt_standard"] = output["formosan_sentence"].astype(str)
@@ -875,6 +887,23 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertFalse(contaminated_validation["ok"])
         self.assertEqual(contaminated_validation["gloss_translation_rows"], 1)
+
+        lexical_contamination = output.copy()
+        lexeme_index = lexical_contamination.index[
+            lexical_contamination["row_type"].eq("lexeme")
+        ][0]
+        lexical_contamination.loc[lexeme_index, "english_sentence"] = "wash-face"
+        lexical_validation = validate_splits(
+            lexical_contamination,
+            target_col="english_sentence",
+            min_test_ratio=0.075,
+            min_validate_ratio=0.025,
+            min_test_rows=5,
+            min_validate_rows=2,
+            ngram_threshold=0.82,
+        )
+        self.assertFalse(lexical_validation["ok"])
+        self.assertEqual(lexical_validation["lexical_quality_rows"], 1)
 
     def test_hard_split_is_deterministic_for_identical_input(self) -> None:
         keyed = add_normalized_columns(

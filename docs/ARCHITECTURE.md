@@ -96,7 +96,11 @@ type, target metadata, and transform hashes.
 
 English and Chinese outputs are collected in one XML traversal. Each target
 still receives its own ordered CSV, counters, file inventory, and extraction
-manifest.
+manifest. Sentence-internal `<W>` elements are interlinear annotations rather
+than independent translation pairs and are counted but not extracted. A `<W>`
+may become a train-only lexeme only when it has no `S`, `W`, or `M` ancestor.
+Every emitted row records this decision in `xml_unit_context`; structurally
+ambiguous word units continue to filtering and are quarantined there.
 
 ### 5. MT Filtering
 
@@ -109,7 +113,11 @@ checks quarantine or reject questionable rows. Targets explicitly marked as
 quarantined only when multiple recognized grammatical tags occur in
 interlinear separators such as `.`, `-`, or `=`. Ordinary parenthetical text,
 hyphenation, acronyms, literal translations, and free translations are
-preserved. Exact pairs are deduplicated,
+preserved for sentences. Standalone lexical targets receive stricter checks:
+recognized grammatical codes and morphological boundaries are quarantined as
+glosses, while unresolved hyphen or slash notation is quarantined as an
+ambiguous lexical translation. Natural dictionary words and definitions are
+retained as train-only data. Exact pairs are deduplicated,
 and every input row is conserved as accepted, rejected, quarantined, or
 deduplicated in a ledger. This stage never assigns data splits.
 

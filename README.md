@@ -8,10 +8,10 @@ evaluation code.
 
 The supported workflow is corpus pipeline v3. It keeps the supplied XML
 `kindOf="standard"` tier, derives a separate model-facing standardization,
-records every transformation, keeps lexical rows in training, and creates
-source-balanced hard evaluation splits. Human sentence references
-are preferred; validated pivot sentences are used only when a source lacks
-enough human parallel sentences.
+records every transformation, keeps approved standalone lexical rows in
+training, and creates source-balanced hard evaluation splits. Human sentence
+references are preferred; validated pivot sentences are used only when a
+source lacks enough human parallel sentences.
 
 ## Quick Start
 
@@ -98,13 +98,13 @@ Production builds fail unless all of these conditions hold:
 - existing nonempty `kindOf="standard"` tiers are preserved;
 - model text comes from the separate, versioned `formosan-mt` namespace;
 - malformed, missing, rejected, quarantined, and deduplicated rows are logged;
-- explicit interlinear gloss targets and high-confidence annotation-bearing target
-  structures are excluded from model corpora;
+- sentence-internal `<W>` annotations, explicit interlinear gloss targets, and
+  detected morphological gloss structures are excluded from model corpora;
 - DeepL is limited to MT-eligible sentence rows with at least four Formosan and
   pivot-source units; completion is explicit and every response is validated;
-- lexemes, morphemes, and rows that fail sentence QC or configured length
-  requirements are training-only; source provenance never determines row
-  eligibility;
+- only structurally standalone `<W>` entries with natural target text may enter
+  as train-only lexemes; ambiguous lexical structures and translations are
+  quarantined; source provenance never determines row eligibility;
 - each language reserves at least 7.5% of all deduplicated pairs for test and
   2.5% for validation, using only eligible sentence rows; source-corpus targets
   follow the same proportions where eligible capacity permits;

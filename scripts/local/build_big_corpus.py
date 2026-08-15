@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
-from corpus_quality import target_gloss_reason
+from corpus_quality import lexical_quality_reason, target_gloss_reason
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
 PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
@@ -50,6 +50,7 @@ CANONICAL_SUFFIX = [
     "qc_revision",
     "dialect",
     "row_type",
+    "xml_unit_context",
     "formosan_original",
     "formosan_standard",
     "formosan_original_raw",
@@ -143,18 +144,31 @@ def require_gloss_free(
         "translation_kind",
         pd.Series("", index=frame.index),
     )
+    row_types = frame.get("row_type", pd.Series("", index=frame.index))
+    unit_contexts = frame.get(
+        "xml_unit_context",
+        pd.Series("", index=frame.index),
+    )
     contaminated_count = 0
     sample_positions: list[int] = []
-    for position, (target, translation_kind) in enumerate(
+    for position, (target, translation_kind, row_type, unit_context) in enumerate(
         zip(
             frame[target_column].astype(str),
             translation_kinds,
+            row_types,
+            unit_contexts,
             strict=True,
         )
     ):
         reason = target_gloss_reason(
             target,
             translation_kind=translation_kind,
+            target_language=target_language,
+        )
+        reason = reason or lexical_quality_reason(
+            target,
+            row_type=row_type,
+            xml_unit_context=unit_context,
             target_language=target_language,
         )
         if reason:

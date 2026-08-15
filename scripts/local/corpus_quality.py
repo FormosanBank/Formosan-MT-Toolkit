@@ -62,8 +62,14 @@ GLOSS_TAGS = frozenset(
     RED REL RL RV SG STA STAT SUB TOP TR UV VBLZ VCL
     """.split()
 )
+LEXICAL_GLOSS_TAGS = GLOSS_TAGS | frozenset(
+    {"DEIC", "EN", "EN1", "EN2", "NEUT", "NM", "REFL", "SA", "STIM", "THM"}
+)
 GLOSS_PART_RE = re.compile(r"[.=_-]+")
 PERSON_NUMBER_GLOSS_RE = re.compile(r"^[123](?:SG|PL)(?:INCL|EXCL)?$")
+GENERIC_GLOSS_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
+LEXICAL_STRONG_BOUNDARY_RE = re.compile(r"\S[=_]\S")
+LEXICAL_AMBIGUOUS_BOUNDARY_RE = re.compile(r"\S[-/]\S")
 GLOSS_TOKEN_EDGE_PUNCTUATION = "()[]{}<>,;:!?\"“”‘’'"
 
 
@@ -197,6 +203,68 @@ def target_gloss_reason(
     return ""
 
 
+def is_gloss_code(value: str) -> bool:
+    return (
+        value in LEXICAL_GLOSS_TAGS
+        or PERSON_NUMBER_GLOSS_RE.fullmatch(value) is not None
+        or GENERIC_GLOSS_CODE_RE.fullmatch(value) is not None
+    )
+
+
+def has_lexical_morphological_gloss(
+    value: object,
+    *,
+    target_language: str,
+) -> bool:
+    """Detect high-confidence gloss notation in lexical target strings."""
+    text = str(value).strip()
+    if not text:
+        return False
+    if has_annotation_gloss_structure(text) or LEXICAL_STRONG_BOUNDARY_RE.search(text):
+        return True
+
+    tokens = text.split()
+    for raw_token in tokens:
+        token = raw_token.strip(GLOSS_TOKEN_EDGE_PUNCTUATION)
+        if len(tokens) == 1 and is_gloss_code(token):
+            return True
+        if not GLOSS_PART_RE.search(token):
+            continue
+        parts = [part for part in GLOSS_PART_RE.split(token) if part]
+        if any(is_gloss_code(part) for part in parts):
+            return True
+
+    if target_language == "chinese":
+        return bool(LEXICAL_AMBIGUOUS_BOUNDARY_RE.search(text) and re.search(r"[A-Z]", text))
+    return False
+
+
+def lexical_quality_reason(
+    value: object,
+    *,
+    row_type: object,
+    xml_unit_context: object,
+    target_language: str,
+) -> str:
+    """Return a reason that keeps questionable word glosses out of MT."""
+    normalized_type = str(row_type or "").strip().casefold()
+    if normalized_type not in {"lexeme", "morpheme"}:
+        return ""
+    if normalized_type == "lexeme" and str(xml_unit_context or "").strip() != "standalone_word":
+        return "ambiguous_lexical_structure"
+    if has_lexical_morphological_gloss(
+        value,
+        target_language=target_language,
+    ):
+        return "target_morphological_gloss"
+
+    text = str(value).strip()
+    if LEXICAL_AMBIGUOUS_BOUNDARY_RE.search(text):
+        if target_language == "chinese" or len(text.split()) == 1:
+            return "ambiguous_lexical_translation"
+    return ""
+
+
 def fertility_reason(
     source: str,
     target: str,
@@ -247,6 +315,14 @@ def quality_decision(
     if gloss_reason:
         disposition = "rejected" if gloss_reason == "target_gloss_translation" else "quarantine"
         return QualityDecision(disposition, gloss_reason)
+    lexical_reason = lexical_quality_reason(
+        target,
+        row_type=row_type,
+        xml_unit_context=row.get("xml_unit_context", ""),
+        target_language=target_language,
+    )
+    if lexical_reason:
+        return QualityDecision("quarantine", lexical_reason)
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
@@ -353,6 +429,7 @@ def apply_quality_rules(
                 "formosan_mt_standard",
                 "contains_unclear",
                 "translation_kind",
+                "xml_unit_context",
             ]
         )
     )

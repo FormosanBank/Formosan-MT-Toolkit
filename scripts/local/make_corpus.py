@@ -58,6 +58,7 @@ OUTPUT_COLUMNS = [
     "qc_revision",
     "dialect",
     "row_type",
+    "xml_unit_context",
     "formosan_original",
     "formosan_standard",
     "formosan_original_raw",
@@ -108,6 +109,7 @@ class ExtractedPair:
     qc_revision: str
     dialect: str
     row_type: str
+    xml_unit_context: str
     formosan_original: str
     formosan_standard: str
     formosan_original_raw: str
@@ -153,6 +155,36 @@ def direct_form(element: ET.Element, kind_of: str) -> ET.Element | None:
 
 def row_type_for_tag(tag: str) -> str:
     return {"S": "sentence", "W": "lexeme", "M": "morpheme"}[tag]
+
+
+def xml_unit_context(
+    element: ET.Element,
+    parents: dict[ET.Element, ET.Element],
+) -> str:
+    """Classify XML units by structure without relying on source paths."""
+    if element.tag == "S":
+        return "sentence"
+
+    ancestor_tags: list[str] = []
+    parent = parents.get(element)
+    while parent is not None:
+        ancestor_tags.append(parent.tag)
+        parent = parents.get(parent)
+
+    if element.tag == "W":
+        if "S" in ancestor_tags:
+            return "sentence_word"
+        if any(tag in {"W", "M"} for tag in ancestor_tags):
+            return "ambiguous_word"
+        return "standalone_word"
+
+    if "S" in ancestor_tags:
+        return "sentence_morpheme"
+    if "W" in ancestor_tags:
+        return "word_morpheme"
+    if "M" in ancestor_tags:
+        return "ambiguous_morpheme"
+    return "standalone_morpheme"
 
 
 def wanted_tags(units: set[str]) -> set[str]:
@@ -369,6 +401,11 @@ def extract_file_targets(
     relative = str(xml_path.relative_to(xml_dir))
     source_path = f"{provenance['repository']}/{provenance['source_path']}"
     pairs = {target: [] for target in targets}
+    parents = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
 
     unit_index = 0
     for element in root.iter():
@@ -380,6 +417,11 @@ def extract_file_targets(
             continue
         for target_stats in stats.values():
             target_stats[f"{element.tag.lower()}_units_seen"] += 1
+        unit_context = xml_unit_context(element, parents)
+        if unit_context == "sentence_word":
+            for target_stats in stats.values():
+                target_stats["sentence_nested_word_units_excluded"] += 1
+            continue
         final_xml_id = (element.get("id") or "").strip()
         locator = (relative, element.tag, element_index, final_xml_id)
         qc_record = (
@@ -477,6 +519,7 @@ def extract_file_targets(
                             target_text,
                             target_language,
                             row_type_for_tag(element.tag),
+                            unit_context,
                         ]
                     ).encode("utf-8")
                 )
@@ -511,6 +554,7 @@ def extract_file_targets(
                     qc_revision=qc_revision,
                     dialect=dialect,
                     row_type=row_type_for_tag(element.tag),
+                    xml_unit_context=unit_context,
                     formosan_original=original_text,
                     formosan_standard=source_standard,
                     formosan_original_raw=original_text,

@@ -93,6 +93,14 @@ class SummaryFormattingTests(unittest.TestCase):
                         "filter_rule_counts": {"deduplicated:duplicate_pair": initial - accepted},
                     },
                 )
+            self.write_json(
+                root / "raw_corpora" / "ami_en.extraction.json",
+                {
+                    "counts": {
+                        "sentence_nested_word_units_excluded": 12,
+                    }
+                },
+            )
 
             summary = format_language_summary(
                 root,
@@ -110,6 +118,10 @@ class SummaryFormattingTests(unittest.TestCase):
             self.assertIn("zh 11->8", summary)
             self.assertIn("QC repairs: remove zero width characters=2", rules)
             self.assertIn("MT cleaning: remove hyphen boundary=5", rules)
+            self.assertIn(
+                "XML unit exclusions: sentence nested word units excluded=12",
+                rules,
+            )
             self.assertIn("QC findings: SOFT=4 across 1 rules", rules)
 
 

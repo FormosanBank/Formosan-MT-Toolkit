@@ -43,6 +43,8 @@ from corpus_quality import (  # noqa: E402
     apply_quality_rules,
     deduplicate_pairs,
     has_annotation_gloss_structure,
+    has_lexical_morphological_gloss,
+    lexical_quality_reason,
     normalize_dataframe,
     normalize_text,
 )
@@ -1195,6 +1197,52 @@ class AcquisitionTests(unittest.TestCase):
 
 
 class ExtractionAndCleaningTests(unittest.TestCase):
+    def test_extraction_excludes_sentence_words_and_classifies_standalone_words(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "sample.xml"
+            path.write_text(
+                '<?xml version="1.0"?>'
+                '<TEXT xmlns:xml="http://www.w3.org/XML/1998/namespace" '
+                'xml:lang="ami">'
+                '<S id="s1"><FORM kindOf="standard">malu cira.</FORM>'
+                '<TRANSL xml:lang="eng">He is well.</TRANSL>'
+                '<W id="nested"><FORM kindOf="standard">malu</FORM>'
+                '<TRANSL xml:lang="eng">STAT-good</TRANSL></W></S>'
+                '<ENTRY><W id="standalone"><FORM kindOf="standard">mafu</FORM>'
+                '<TRANSL xml:lang="eng">can be swallowed</TRANSL></W></ENTRY>'
+                '<W id="outer"><FORM kindOf="standard">outer</FORM>'
+                '<W id="ambiguous"><FORM kindOf="standard">inner</FORM>'
+                '<TRANSL xml:lang="eng">inside</TRANSL></W></W>'
+                '</TEXT>',
+                encoding="utf-8",
+            )
+            rows, stats = extract_file(
+                path,
+                xml_dir=directory,
+                provenance={
+                    "repository": "FixtureRepo",
+                    "repository_commit": "a" * 40,
+                    "source_path": "sample.xml",
+                },
+                target_codes={"eng"},
+                tags={"W"},
+                mt_records=mt_records_for_xml(path, directory),
+            )
+
+            self.assertEqual(
+                {row.xml_id: row.xml_unit_context for row in rows},
+                {
+                    "standalone": "standalone_word",
+                    "ambiguous": "ambiguous_word",
+                },
+            )
+            self.assertEqual(stats["w_units_seen"], 4)
+            self.assertEqual(
+                stats["sentence_nested_word_units_excluded"],
+                1,
+            )
+
     def test_combined_extraction_matches_independent_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -1484,6 +1532,95 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertFalse(has_annotation_gloss_structure("Aki is here (today)."))
         self.assertFalse(has_annotation_gloss_structure("The ISO-639 language code."))
 
+    def test_standalone_lexemes_require_natural_target_text(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("mafu", row_type="lexeme"),
+                "row_id": "natural",
+                "ami": "mafu",
+                "english": "can be swallowed",
+                "row_type": "lexeme",
+                "xml_unit_context": "standalone_word",
+                "translation_kind": "",
+                "source": "Dictionary/sample.xml",
+            },
+            {
+                **mt_contract_fields("maicangen", row_type="lexeme"),
+                "row_id": "morphological",
+                "ami": "maicangen",
+                "english": "NEUT-dry-EN2",
+                "row_type": "lexeme",
+                "xml_unit_context": "standalone_word",
+                "translation_kind": "",
+                "source": "Dictionary/sample.xml",
+            },
+            {
+                **mt_contract_fields("malaliop", row_type="lexeme"),
+                "row_id": "ambiguous-target",
+                "ami": "malaliop",
+                "english": "wash-face",
+                "row_type": "lexeme",
+                "xml_unit_context": "standalone_word",
+                "translation_kind": "",
+                "source": "Dictionary/sample.xml",
+            },
+            {
+                **mt_contract_fields("inner", row_type="lexeme"),
+                "row_id": "ambiguous-structure",
+                "ami": "inner",
+                "english": "inside",
+                "row_type": "lexeme",
+                "xml_unit_context": "ambiguous_word",
+                "translation_kind": "",
+                "source": "Dictionary/sample.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(
+            pd.DataFrame(rows),
+            "ami",
+            "english",
+        )
+        accepted, rejected, counts = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(set(accepted["row_id"]), {"natural"})
+        reasons = dict(
+            zip(
+                rejected["row_id"],
+                rejected["disposition_reason"],
+                strict=True,
+            )
+        )
+        self.assertEqual(
+            reasons,
+            {
+                "morphological": "target_morphological_gloss",
+                "ambiguous-target": "ambiguous_lexical_translation",
+                "ambiguous-structure": "ambiguous_lexical_structure",
+            },
+        )
+        self.assertEqual(counts["accepted:ok"], 1)
+        self.assertTrue(
+            has_lexical_morphological_gloss(
+                "主焦-SA-什麼=完成",
+                target_language="chinese",
+            )
+        )
+        self.assertEqual(
+            lexical_quality_reason(
+                "互相-拿",
+                row_type="lexeme",
+                xml_unit_context="standalone_word",
+                target_language="chinese",
+            ),
+            "ambiguous_lexical_translation",
+        )
+
     def test_aggregate_gate_refuses_gloss_contamination(self) -> None:
         frame = pd.DataFrame(
             {
@@ -1498,6 +1635,23 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 target_column="english_sentence",
                 target_language="english",
                 path=Path("fixture.csv"),
+            )
+
+        lexical = pd.DataFrame(
+            {
+                "source_record_id": ["ambiguous-lexeme"],
+                "english_sentence": ["wash-face"],
+                "translation_kind": [""],
+                "row_type": ["lexeme"],
+                "xml_unit_context": ["standalone_word"],
+            }
+        )
+        with self.assertRaises(SystemExit):
+            require_gloss_free(
+                lexical,
+                target_column="english_sentence",
+                target_language="english",
+                path=Path("lexical.csv"),
             )
 
     def test_quality_and_dedupe_conserve_every_input_row(self) -> None:
@@ -1580,6 +1734,7 @@ class PivotContractTests(unittest.TestCase):
                 "kindOf": "standard",
                 "dialect": "Coastal",
                 "row_type": "sentence",
+                "xml_unit_context": "sentence",
                 "pivot_origin": "original",
                 "quality_flags": "",
             }

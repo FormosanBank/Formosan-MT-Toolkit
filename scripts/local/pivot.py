@@ -75,6 +75,7 @@ BASE_COLUMNS = [
     "source",
     "dialect",
     "row_type",
+    "xml_unit_context",
 ]
 PROVENANCE_COLUMNS = [
     "pivot_origin",

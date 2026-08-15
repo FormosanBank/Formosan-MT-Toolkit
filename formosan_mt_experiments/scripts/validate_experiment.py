@@ -40,7 +40,10 @@ SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
-from corpus_quality import has_annotation_gloss_structure  # noqa: E402
+from corpus_quality import (  # noqa: E402
+    has_annotation_gloss_structure,
+    lexical_quality_reason,
+)
 
 EVAL_SPLITS = {"validate", "valid", "val", "test"}
 REQUIRED_PROVENANCE = {
@@ -58,6 +61,7 @@ REQUIRED_PROVENANCE = {
     "qc_transform_id",
     "qc_revision",
     "row_type",
+    "xml_unit_context",
     "formosan_original_raw",
     "formosan_source_standard",
     "formosan_mt_standard",
@@ -437,6 +441,30 @@ def validate_splits(
         if target_language == "english"
         else 0
     )
+    unit_context = keyed.get(
+        "xml_unit_context",
+        pd.Series("", index=keyed.index),
+    )
+    lexical_mask = keyed["row_type"].astype(str).str.casefold().isin(
+        {"lexeme", "morpheme"}
+    )
+    lexical_rows = keyed[lexical_mask]
+    lexical_quality_rows = sum(
+        bool(
+            lexical_quality_reason(
+                target,
+                row_type=row_type,
+                xml_unit_context=context,
+                target_language=target_language,
+            )
+        )
+        for target, row_type, context in zip(
+            lexical_rows[target_col].astype(str),
+            lexical_rows["row_type"],
+            unit_context.loc[lexical_rows.index],
+            strict=True,
+        )
+    )
     candidate = evaluation_candidate_mask(
         keyed,
         min_formosan_tokens=min_formosan_tokens,
@@ -658,6 +686,7 @@ def validate_splits(
         and lexical_like_eval_rows == 0
         and gloss_translation_rows == 0
         and annotation_gloss_rows == 0
+        and lexical_quality_rows == 0
         and duplicate_pairs == 0
         and bool(train_eval["ok"])
         and bool(validate_test["ok"])
@@ -682,6 +711,7 @@ def validate_splits(
         "lexical_like_eval_rows": lexical_like_eval_rows,
         "gloss_translation_rows": gloss_translation_rows,
         "annotation_gloss_rows": annotation_gloss_rows,
+        "lexical_quality_rows": lexical_quality_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
         "validate_test_cross_language_diagnostic": (
@@ -906,7 +936,8 @@ def main() -> None:
         "  eval: "
         f"synthetic={split_validation['synthetic_eval_rows']:,}, "
         f"lexical-like={split_validation['lexical_like_eval_rows']:,}, "
-        f"gloss={split_validation['gloss_translation_rows'] + split_validation['annotation_gloss_rows']:,}"
+        f"gloss={split_validation['gloss_translation_rows'] + split_validation['annotation_gloss_rows']:,}, "
+        f"lexical-quality={split_validation['lexical_quality_rows']:,}"
     )
     print(
         "  train/eval conflicts: "
