@@ -1121,6 +1121,8 @@ def build_hard_splits(
             "test_ratio": args.test_ratio,
             "min_formosan_tokens": args.min_formosan_tokens,
             "min_target_tokens": args.min_target_tokens,
+            "min_combined_tokens": args.min_combined_tokens,
+            "min_punctuated_combined_tokens": args.min_punctuated_combined_tokens,
             "min_test_rows": args.min_test_rows,
             "min_validate_rows": args.min_validate_rows,
             "ngram_jaccard_threshold": args.ngram_jaccard_threshold,
@@ -1180,6 +1182,10 @@ def build_hard_splits(
                 str(args.min_formosan_tokens),
                 "--min-target-tokens",
                 str(args.min_target_tokens),
+                "--min-combined-tokens",
+                str(args.min_combined_tokens),
+                "--min-punctuated-combined-tokens",
+                str(args.min_punctuated_combined_tokens),
                 "--min-test-rows",
                 str(args.min_test_rows),
                 "--min-validate-rows",
@@ -1222,6 +1228,10 @@ def build_hard_splits(
                     str(args.min_formosan_tokens),
                     "--min-target-tokens",
                     str(args.min_target_tokens),
+                    "--min-combined-tokens",
+                    str(args.min_combined_tokens),
+                    "--min-punctuated-combined-tokens",
+                    str(args.min_punctuated_combined_tokens),
                     "--source-ratio-tolerance",
                     str(args.source_ratio_tolerance),
                     "--split-report",
@@ -1666,6 +1676,16 @@ def parse_args() -> argparse.Namespace:
         "--min-target-tokens",
         type=int,
         default=PIPELINE_CONFIG["splits"]["min_target_tokens"],
+    )
+    parser.add_argument(
+        "--min-combined-tokens",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_combined_tokens"],
+    )
+    parser.add_argument(
+        "--min-punctuated-combined-tokens",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["min_punctuated_combined_tokens"],
     )
     parser.add_argument(
         "--min-test-rows",

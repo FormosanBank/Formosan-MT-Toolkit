@@ -7,7 +7,7 @@
     "qc_revision": "acc3ec9f3137a59b9661e446a750ee1606720394"
   },
   "cleaning": {
-    "profile": "formosan-mt-v3.2",
+    "profile": "formosan-mt-v3.3",
     "unicode_normalization": "NFC",
     "require_standard_form": true,
     "preserve_structural_row_type": true,
@@ -47,8 +47,10 @@
     "min_validate_rows": 0,
     "character_ngram_jaccard_threshold": 0.82,
     "source_ratio_tolerance": 0.02,
-    "min_formosan_tokens": 4,
-    "min_target_tokens": 4,
+    "min_formosan_tokens": 2,
+    "min_target_tokens": 2,
+    "min_combined_tokens": 6,
+    "min_punctuated_combined_tokens": 5,
     "lexical_eval": false,
     "synthetic_eval": true,
     "synthetic_eval_policy": "human_preferred_source_stratified_fallback",

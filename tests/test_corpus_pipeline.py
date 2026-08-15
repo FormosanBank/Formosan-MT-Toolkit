@@ -47,6 +47,7 @@ from corpus_quality import (  # noqa: E402
     lexical_quality_reason,
     normalize_dataframe,
     normalize_text,
+    target_units,
 )
 from fetch_xml import (  # noqa: E402
     classify_xml,
@@ -1505,6 +1506,36 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 "translation_kind": "free",
                 "source": "Stories/example.xml",
             },
+            {
+                **mt_contract_fields("babalivan sanglav ita."),
+                "row_id": "mixed-case-gloss",
+                "ami": "babalivan sanglav ita.",
+                "english": "buy-LndF-frequently vegetable that-place/there",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("nibuLubuLluan kuaDa Lulay."),
+                "row_id": "gloss-chain",
+                "ami": "nibuLubuLluan kuaDa Lulay.",
+                "english": "That child was-being-instructed-and-instructed",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("masalaw ku takaraw anini."),
+                "row_id": "normal-hyphen-chain",
+                "ami": "masalaw ku takaraw anini.",
+                "english": "This is a state-of-the-art method.",
+                "kindOf": "standard",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Stories/example.xml",
+            },
         ]
         frame = pd.DataFrame(rows)
         normalized, _ = normalize_dataframe(frame, "ami", "english")
@@ -1516,7 +1547,10 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             keep_redactions=False,
         )
 
-        self.assertEqual(set(accepted["row_id"]), {"normal-parenthetical", "normal-acronym"})
+        self.assertEqual(
+            set(accepted["row_id"]),
+            {"normal-parenthetical", "normal-acronym", "normal-hyphen-chain"},
+        )
         reasons = dict(
             zip(
                 rejected["row_id"],
@@ -1526,11 +1560,132 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         )
         self.assertEqual(reasons["labelled-gloss"], "target_gloss_translation")
         self.assertEqual(reasons["unlabelled-annotation"], "target_annotation_gloss")
+        self.assertEqual(reasons["mixed-case-gloss"], "target_annotation_gloss")
+        self.assertEqual(reasons["gloss-chain"], "target_annotation_gloss")
         self.assertEqual(counts["rejected:target_gloss_translation"], 1)
-        self.assertEqual(counts["quarantine:target_annotation_gloss"], 1)
+        self.assertEqual(counts["quarantine:target_annotation_gloss"], 3)
         self.assertTrue(has_annotation_gloss_structure("catch (AF-Imp)"))
         self.assertFalse(has_annotation_gloss_structure("Aki is here (today)."))
         self.assertFalse(has_annotation_gloss_structure("The ISO-639 language code."))
+        self.assertFalse(has_annotation_gloss_structure("a state-of-the-art method"))
+
+    def test_chinese_gloss_and_obvious_alignment_failures_are_quarantined(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("babalivan sanglav ita."),
+                "row_id": "chinese-gloss",
+                "ami": "babalivan sanglav ita.",
+                "chinese": "互相-拿",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("one two three four five six seven eight nine ten eleven twelve"),
+                "row_id": "truncated",
+                "ami": "one two three four five six seven eight nine ten eleven twelve",
+                "chinese": "去打獵",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("maolah ci aki to ISO 639."),
+                "row_id": "normal-acronym",
+                "ami": "maolah ci aki to ISO 639.",
+                "chinese": "這是ISO-639語言代碼。",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Stories/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(
+            pd.DataFrame(rows),
+            "ami",
+            "chinese",
+        )
+        accepted, rejected, _ = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="chinese",
+            target_language="chinese",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(set(accepted["row_id"]), {"normal-acronym"})
+        reasons = dict(
+            zip(
+                rejected["row_id"],
+                rejected["disposition_reason"],
+                strict=True,
+            )
+        )
+        self.assertEqual(reasons["chinese-gloss"], "target_annotation_gloss")
+        self.assertEqual(reasons["truncated"], "obvious_alignment_mismatch")
+        self.assertEqual(target_units("他是誰？", "chinese"), 3)
+
+    def test_alignment_flags_keep_explanations_train_only(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("one two three four five six seven"),
+                "row_id": "heading",
+                "ami": "one two three four five six seven",
+                "english": "Work Objectives",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+            {
+                **mt_contract_fields("mukesi na puran"),
+                "row_id": "definition",
+                "ami": "mukesi na puran",
+                "english": "a ceremonial nut; compare another traditional form (used at harvest)",
+                "row_type": "sentence",
+                "source": "Dictionary/example.xml",
+            },
+            {
+                **mt_contract_fields("one two three four five"),
+                "row_id": "short-heading",
+                "ami": "one two three four five",
+                "english": "Those Children",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+            {
+                **mt_contract_fields("kupongluswa acele."),
+                "row_id": "compact-sentence",
+                "ami": "kupongluswa acele.",
+                "english": "I will bring you some water.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(
+            pd.DataFrame(rows),
+            "ami",
+            "english",
+        )
+        accepted, rejected, _ = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(
+            set(accepted["row_id"]),
+            {"definition", "short-heading", "compact-sentence"},
+        )
+        self.assertEqual(
+            rejected.iloc[0]["disposition_reason"],
+            "target_heading_alignment_mismatch",
+        )
+        flags = dict(zip(accepted["row_id"], accepted["quality_flags"], strict=True))
+        self.assertIn("definition_like_sentence", flags["definition"])
+        self.assertIn("lexical_content_sentence", flags["definition"])
+        self.assertIn("heading_like_target", flags["short-heading"])
+        self.assertIn("target_fragment", flags["short-heading"])
+        self.assertEqual(flags["compact-sentence"], "")
 
     def test_standalone_lexemes_require_natural_target_text(self) -> None:
         rows = [

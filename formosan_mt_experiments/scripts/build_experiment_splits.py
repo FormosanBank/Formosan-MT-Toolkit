@@ -453,6 +453,8 @@ def evaluation_masks(
     *,
     min_formosan_tokens: int,
     min_target_tokens: int,
+    min_combined_tokens: int,
+    min_punctuated_combined_tokens: int,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     synthetic = (
         frame.get("pivot_origin", pd.Series("original", index=frame.index))
@@ -463,6 +465,8 @@ def evaluation_masks(
         frame,
         min_formosan_tokens=min_formosan_tokens,
         min_target_tokens=min_target_tokens,
+        min_combined_tokens=min_combined_tokens,
+        min_punctuated_combined_tokens=min_punctuated_combined_tokens,
     )
     human_candidate = candidate & ~synthetic
     return synthetic, human_candidate, candidate
@@ -969,6 +973,8 @@ def build_hard_split(
     seed: int,
     min_formosan_tokens: int,
     min_target_tokens: int,
+    min_combined_tokens: int,
+    min_punctuated_combined_tokens: int,
     attempts: int,
     min_test_rows: int,
     min_validate_rows: int,
@@ -1020,6 +1026,8 @@ def build_hard_split(
             frame,
             min_formosan_tokens=min_formosan_tokens,
             min_target_tokens=min_target_tokens,
+            min_combined_tokens=min_combined_tokens,
+            min_punctuated_combined_tokens=min_punctuated_combined_tokens,
         )
     )
     source_targets, targets = source_stratum_targets(
@@ -1366,6 +1374,8 @@ def build_hard_split(
                 output,
                 min_formosan_tokens=min_formosan_tokens,
                 min_target_tokens=min_target_tokens,
+                min_combined_tokens=min_combined_tokens,
+                min_punctuated_combined_tokens=min_punctuated_combined_tokens,
             )
         ).sum()
     )
@@ -1379,6 +1389,12 @@ def build_hard_split(
             and not source_shortfalls
         ),
         "tier": TIER,
+        "evaluation_length_policy": {
+            "min_formosan_tokens": min_formosan_tokens,
+            "min_target_tokens": min_target_tokens,
+            "min_combined_tokens": min_combined_tokens,
+            "min_punctuated_combined_tokens": min_punctuated_combined_tokens,
+        },
         "input_rows": len(frame) + len(duplicate_rows),
         "deduplicated_input_rows": len(frame),
         "duplicate_rows_removed": len(duplicate_rows),
@@ -1566,6 +1582,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=SPLIT_DEFAULTS["min_target_tokens"],
     )
+    parser.add_argument(
+        "--min-combined-tokens",
+        type=int,
+        default=SPLIT_DEFAULTS["min_combined_tokens"],
+    )
+    parser.add_argument(
+        "--min-punctuated-combined-tokens",
+        type=int,
+        default=SPLIT_DEFAULTS["min_punctuated_combined_tokens"],
+    )
     parser.add_argument("--min-test-rows", type=int, default=SPLIT_DEFAULTS["min_test_rows"])
     parser.add_argument(
         "--min-validate-rows",
@@ -1596,6 +1622,10 @@ def main() -> None:
         raise SystemExit("Split ratios must sum to 1.0")
     if not 0.5 <= args.ngram_jaccard_threshold <= 1.0:
         raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
+    if min(args.min_formosan_tokens, args.min_target_tokens) < 1:
+        raise SystemExit("Evaluation per-side token minimums must be positive")
+    if args.min_punctuated_combined_tokens > args.min_combined_tokens:
+        raise SystemExit("Punctuated combined minimum cannot exceed the general combined minimum")
 
     target_language = normalize_target_language(args.target_lang, args.target_col)
     target_col = args.target_col or target_col_for(target_language)
@@ -1613,6 +1643,8 @@ def main() -> None:
         seed=args.seed,
         min_formosan_tokens=args.min_formosan_tokens,
         min_target_tokens=args.min_target_tokens,
+        min_combined_tokens=args.min_combined_tokens,
+        min_punctuated_combined_tokens=args.min_punctuated_combined_tokens,
         attempts=args.selection_attempts,
         min_test_rows=args.min_test_rows,
         min_validate_rows=args.min_validate_rows,

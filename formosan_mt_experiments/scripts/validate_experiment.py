@@ -41,8 +41,8 @@ SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
 from corpus_quality import (  # noqa: E402
-    has_annotation_gloss_structure,
     lexical_quality_reason,
+    target_gloss_reason,
 )
 
 EVAL_SPLITS = {"validate", "valid", "val", "test"}
@@ -357,6 +357,10 @@ def validate_splits(
     ngram_threshold: float,
     min_formosan_tokens: int = SPLIT_DEFAULTS["min_formosan_tokens"],
     min_target_tokens: int = SPLIT_DEFAULTS["min_target_tokens"],
+    min_combined_tokens: int = SPLIT_DEFAULTS["min_combined_tokens"],
+    min_punctuated_combined_tokens: int = SPLIT_DEFAULTS[
+        "min_punctuated_combined_tokens"
+    ],
     source_ratio_tolerance: float = SPLIT_DEFAULTS["source_ratio_tolerance"],
     require_human_eval: bool = False,
     require_document_holdout: bool = False,
@@ -437,9 +441,18 @@ def validate_splits(
         translation_kind.isin({"gloss", "interlinear-gloss"}).sum()
     )
     annotation_gloss_rows = int(
-        keyed[target_col].astype(str).map(has_annotation_gloss_structure).sum()
-        if target_language == "english"
-        else 0
+        keyed[target_col]
+        .astype(str)
+        .map(
+            lambda target: bool(
+                target_gloss_reason(
+                    target,
+                    translation_kind="",
+                    target_language=target_language,
+                )
+            )
+        )
+        .sum()
     )
     unit_context = keyed.get(
         "xml_unit_context",
@@ -469,6 +482,8 @@ def validate_splits(
         keyed,
         min_formosan_tokens=min_formosan_tokens,
         min_target_tokens=min_target_tokens,
+        min_combined_tokens=min_combined_tokens,
+        min_punctuated_combined_tokens=min_punctuated_combined_tokens,
     )
     lexical_like_eval_rows = int(
         (split.isin(EVAL_SPLITS) & ~candidate).sum()
@@ -487,6 +502,16 @@ def validate_splits(
             split_report_errors.append("split report is incomplete")
         if split_report.get("ratio_basis") != SPLIT_DEFAULTS["ratio_basis"]:
             split_report_errors.append("split report ratio basis does not match policy")
+        expected_length_policy = {
+            "min_formosan_tokens": min_formosan_tokens,
+            "min_target_tokens": min_target_tokens,
+            "min_combined_tokens": min_combined_tokens,
+            "min_punctuated_combined_tokens": min_punctuated_combined_tokens,
+        }
+        if split_report.get("evaluation_length_policy") != expected_length_policy:
+            split_report_errors.append(
+                "split report evaluation length policy does not match validation"
+            )
     for language, group in keyed.groupby("lang_code", sort=True):
         language_key = str(language)
         group_candidate = candidate.loc[group.index]
@@ -838,6 +863,16 @@ def parse_args() -> argparse.Namespace:
         default=split_defaults["min_target_tokens"],
     )
     parser.add_argument(
+        "--min-combined-tokens",
+        type=int,
+        default=split_defaults["min_combined_tokens"],
+    )
+    parser.add_argument(
+        "--min-punctuated-combined-tokens",
+        type=int,
+        default=split_defaults["min_punctuated_combined_tokens"],
+    )
+    parser.add_argument(
         "--source-ratio-tolerance",
         type=float,
         default=split_defaults["source_ratio_tolerance"],
@@ -887,6 +922,8 @@ def main() -> None:
         ngram_threshold=args.ngram_jaccard_threshold,
         min_formosan_tokens=args.min_formosan_tokens,
         min_target_tokens=args.min_target_tokens,
+        min_combined_tokens=args.min_combined_tokens,
+        min_punctuated_combined_tokens=args.min_punctuated_combined_tokens,
         source_ratio_tolerance=args.source_ratio_tolerance,
         require_human_eval=args.require_human_eval,
         require_document_holdout=args.require_document_holdout_report,

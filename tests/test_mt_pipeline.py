@@ -751,6 +751,8 @@ class LeakageTests(unittest.TestCase):
             normalized,
             min_formosan_tokens=4,
             min_target_tokens=4,
+            min_combined_tokens=8,
+            min_punctuated_combined_tokens=8,
         )
         self.assertTrue(bool(candidates.iloc[0]))
 
@@ -759,8 +761,80 @@ class LeakageTests(unittest.TestCase):
             normalized,
             min_formosan_tokens=4,
             min_target_tokens=4,
+            min_combined_tokens=8,
+            min_punctuated_combined_tokens=8,
         )
         self.assertFalse(bool(candidates.iloc[0]))
+
+    def test_compact_sentence_eligibility_uses_joint_content(self) -> None:
+        frame = add_mt_contract(
+            pd.DataFrame(
+                [
+                    {
+                        "row_id": "balanced",
+                        "lang_code": "ami",
+                        "formosan_sentence": "maita ku su",
+                        "english_sentence": "Please come here",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "",
+                    },
+                    {
+                        "row_id": "short-question",
+                        "lang_code": "ami",
+                        "formosan_sentence": "“ima su?”",
+                        "english_sentence": "\"Who are you?\"",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "",
+                    },
+                    {
+                        "row_id": "short-fragment",
+                        "lang_code": "ami",
+                        "formosan_sentence": "ima su",
+                        "english_sentence": "who are you",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "",
+                    },
+                    {
+                        "row_id": "single-unit",
+                        "lang_code": "ami",
+                        "formosan_sentence": "millemungku",
+                        "english_sentence": "I have got a parasol",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "",
+                    },
+                    {
+                        "row_id": "definition",
+                        "lang_code": "ami",
+                        "formosan_sentence": "aru ku su",
+                        "english_sentence": "a long lexical explanation",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "definition_like_sentence",
+                    },
+                ]
+            )
+        )
+        normalized = add_normalized_columns(
+            frame,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        candidates = evaluation_candidate_mask(
+            normalized,
+            min_formosan_tokens=2,
+            min_target_tokens=2,
+            min_combined_tokens=6,
+            min_punctuated_combined_tokens=5,
+        )
+
+        self.assertEqual(
+            set(normalized.loc[candidates, "row_id"]),
+            {"balanced", "short-question"},
+        )
 
     @staticmethod
     def hard_split_fixture() -> pd.DataFrame:
@@ -834,6 +908,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
@@ -867,6 +943,10 @@ class LeakageTests(unittest.TestCase):
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             split_report=report,
         )
         self.assertTrue(provenance["ok"], provenance)
@@ -918,6 +998,8 @@ class LeakageTests(unittest.TestCase):
             "seed": 42,
             "min_formosan_tokens": 1,
             "min_target_tokens": 1,
+            "min_combined_tokens": 2,
+            "min_punctuated_combined_tokens": 2,
             "attempts": 20,
             "min_test_rows": 5,
             "min_validate_rows": 2,
@@ -953,6 +1035,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
@@ -993,6 +1077,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=0,
             min_validate_rows=0,
@@ -1029,6 +1115,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
@@ -1079,6 +1167,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
@@ -1120,6 +1210,8 @@ class LeakageTests(unittest.TestCase):
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
@@ -1176,6 +1268,8 @@ class LeakageTests(unittest.TestCase):
             ngram_threshold=0.82,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
             require_human_eval=True,
             require_document_holdout=True,
         )
@@ -1241,6 +1335,8 @@ class LeakageTests(unittest.TestCase):
             ngram_threshold=0.82,
             min_formosan_tokens=1,
             min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
         )
 
         self.assertTrue(validation["ok"], validation)

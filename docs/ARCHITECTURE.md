@@ -107,13 +107,22 @@ ambiguous word units continue to filtering and are quarantined there.
 `filter_split_corpus.py` performs conservative NFC, control-character,
 HTML-entity, and whitespace normalization. It does not run English Moses rules
 on Formosan/Chinese, NFKC the model text, or delete parenthetical spans.
-Language/script, redaction, identity, markup, repetition, and broad fertility
-checks quarantine or reject questionable rows. Targets explicitly marked as
-`gloss` or `interlinear-gloss` are rejected. Unlabelled English targets are
-quarantined only when multiple recognized grammatical tags occur in
-interlinear separators such as `.`, `-`, or `=`. Ordinary parenthetical text,
-hyphenation, acronyms, literal translations, and free translations are
-preserved for sentences. Standalone lexical targets receive stricter checks:
+Language/script, redaction, identity, markup, repetition, and fertility checks
+quarantine or reject questionable rows. High-confidence alignment failures,
+such as a long Formosan sentence paired with a two- or three-unit heading or
+translation fragment, are quarantined before pivoting or splitting. Long
+explanatory targets paired with very short Formosan text are retained for
+training but marked evaluation-ineligible. Short unpunctuated English
+fragments and lexical-looking sentence records are also retained only for
+training rather than being treated as clean sentence references. Targets
+explicitly marked as `gloss` or `interlinear-gloss` are rejected. Unlabelled
+English targets are
+quarantined when recognized or mixed-case grammatical codes occur in
+interlinear separators, or when a target contains a long gloss-style hyphen
+chain. Chinese morpheme-by-morpheme targets using ASCII gloss boundaries are
+handled the same way. Ordinary parenthetical text, normal hyphenation,
+acronyms, literal translations, and free translations are preserved for
+sentences. Standalone lexical targets receive stricter checks:
 recognized grammatical codes and morphological boundaries are quarantined as
 glosses, while unresolved hyphen or slash notation is quarantined as an
 ambiguous lexical translation. Natural dictionary words and definitions are
@@ -186,8 +195,13 @@ indivisible split unit would recreate the source imbalance this stage prevents.
 Eligibility is row-based. A repository or path classified as `dictionary`,
 `classroom`, or another provenance domain is not excluded automatically. A
 structurally typed sentence may enter evaluation when it passes MT
-standardization, ambiguity, gloss, and configured token-length gates. Explicit
-lexemes and morphemes remain training-only.
+standardization, ambiguity, gloss, alignment, and compact-sentence gates.
+Each side must contain at least two information-bearing units. The pair must
+contain at least six units in total, or five when both sides have terminal
+sentence punctuation. Punctuation does not count as a Chinese unit. This keeps
+one-word entries and fragments in training while allowing compact questions
+and clauses into evaluation. Explicit lexemes, morphemes, explanatory
+definition rows, and extreme length-asymmetry rows remain training-only.
 
 `source_corpus` records the exact public corpus root or private repository used
 for split allocation. It is never a model tag. `source_bucket` is restricted to

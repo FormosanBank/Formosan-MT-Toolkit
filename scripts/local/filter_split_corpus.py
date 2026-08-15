@@ -202,6 +202,13 @@ def filter_rule_counts(rows: pd.DataFrame) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def quality_flag_counts(rows: pd.DataFrame) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for values in rows.get("quality_flags", pd.Series(dtype=str)).astype(str):
+        counts.update(value for value in values.split("|") if value)
+    return dict(sorted(counts.items()))
+
+
 def print_filter_rule_summary(report: dict[str, object]) -> None:
     print(f"\nMT filtering rule summary [{Path(str(report['input'])).name}]")
     print(
@@ -242,6 +249,18 @@ def print_filter_rule_summary(report: dict[str, object]) -> None:
             )
     else:
         print("  Removed or quarantined: none")
+    accepted_flags = {
+        str(flag): int(count)
+        for flag, count in dict(report.get("quality_flag_counts", {})).items()
+        if int(count) > 0
+    }
+    if accepted_flags:
+        print("  Accepted with train-only or audit flags:")
+        for flag, count in sorted(
+            accepted_flags.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            print(f"    {flag.replace('_', ' ')}: {count:,}")
     print(f"  Rejection ledger: {report['rejection_ledger']}")
 
 
@@ -350,6 +369,7 @@ def main() -> None:
         "reason_counts": reason_counts(rejected.get("disposition_reason", pd.Series(dtype=str)).astype(str)),
         "decision_counts": dict(sorted(decision_counts.items())),
         "filter_rule_counts": per_rule_counts,
+        "quality_flag_counts": quality_flag_counts(accepted),
         "transformation_counts": dict(sorted(transformation_counts.items())),
         "row_type_counts": reason_counts(accepted["row_type"].astype(str)),
         "rejection_ledger": str(rejection_path),

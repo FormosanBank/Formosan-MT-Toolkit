@@ -109,9 +109,12 @@ def skeleton_text(value: object) -> str:
 
 
 def token_count(value: object) -> int:
-    """Whitespace token count for Formosan/English-like text."""
+    """Count whitespace-delimited units that contain letters or numbers."""
     text = normalize_text(value)
-    return 0 if not text else len(text.split())
+    return sum(
+        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token)
+        for token in text.split()
+    )
 
 
 def cjk_token_count(value: object) -> int:
@@ -121,8 +124,12 @@ def cjk_token_count(value: object) -> int:
         return 0
     cjk_chars = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text)
     non_cjk = re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", " ", text)
-    non_cjk_tokens = [tok for tok in non_cjk.split() if tok]
-    return len(cjk_chars) + len(non_cjk_tokens)
+    return len(cjk_chars) + token_count(non_cjk)
+
+
+def has_terminal_punctuation(value: object) -> bool:
+    text = str(value or "").rstrip().rstrip("\"'”’)]}》」』").rstrip()
+    return bool(text) and text[-1] in ".!?。！？"
 
 
 def normalize_target_language(target_lang: str | None = None, target_col: str | None = None) -> str:
@@ -267,6 +274,8 @@ def add_normalized_columns(
     out["_pair_skeleton"] = out["_formosan_skeleton"] + PAIR_SEP + out["_target_skeleton"]
     out["_formosan_tokens"] = out["formosan_sentence"].map(token_count)
     out["_target_tokens"] = out[target_col].map(lambda x: target_token_count(x, target_lang=lang))
+    out["_formosan_terminal"] = out["formosan_sentence"].map(has_terminal_punctuation)
+    out["_target_terminal"] = out[target_col].map(has_terminal_punctuation)
     out["_short_entry"] = (out["_formosan_tokens"] <= 2) & (out["_target_tokens"] <= 3)
     out["_is_lexeme"] = out["row_type"].isin({"lexeme", "morpheme"})
     out["_lang_source_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"]
@@ -279,6 +288,8 @@ def evaluation_candidate_mask(
     *,
     min_formosan_tokens: int,
     min_target_tokens: int,
+    min_combined_tokens: int,
+    min_punctuated_combined_tokens: int,
 ) -> pd.Series:
     """Return sentence-quality rows that may be used in dev or test.
 
@@ -292,13 +303,24 @@ def evaluation_candidate_mask(
         "mt_normalization_confidence",
         "_formosan_tokens",
         "_target_tokens",
+        "_formosan_terminal",
+        "_target_terminal",
     }
     require_columns(frame, required, "evaluation eligibility")
     flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
+    combined_tokens = frame["_formosan_tokens"] + frame["_target_tokens"]
+    compact_punctuated_sentence = (
+        combined_tokens.ge(min_punctuated_combined_tokens)
+        & frame["_formosan_terminal"]
+        & frame["_target_terminal"]
+    )
+    sufficient_content = combined_tokens.ge(min_combined_tokens) | compact_punctuated_sentence
     return (
         frame["row_type"].astype(str).str.casefold().eq("sentence")
         & ~flags.str.contains(
-            r"(?:contains_unclear|unknown_row_type)",
+            r"(?:contains_unclear|unknown_row_type|definition_like_sentence|"
+            r"heading_like_target|length_asymmetry|lexical_content_sentence|"
+            r"target_fragment)",
             regex=True,
         )
         & bool_series(
@@ -308,6 +330,7 @@ def evaluation_candidate_mask(
         & ~frame["mt_normalization_confidence"].astype(str).eq("ambiguous")
         & frame["_formosan_tokens"].ge(min_formosan_tokens)
         & frame["_target_tokens"].ge(min_target_tokens)
+        & sufficient_content
     )
 
 

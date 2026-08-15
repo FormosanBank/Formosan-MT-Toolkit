@@ -25,6 +25,8 @@ SHARED_SPLIT_FIELDS = (
     "min_validate_rows",
     "min_formosan_tokens",
     "min_target_tokens",
+    "min_combined_tokens",
+    "min_punctuated_combined_tokens",
     "source_ratio_tolerance",
     "ratio_basis",
     "synthetic_eval_policy",

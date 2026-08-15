@@ -1067,6 +1067,16 @@ def synthetic_row(
     )
     if decision.disposition != "accepted":
         return None, f"pivot_quality:{decision.reason}"
+    row["quality_flags"] = "|".join(
+        sorted(
+            set(
+                [
+                    *[value for value in str(row.get("quality_flags") or "").split("|") if value],
+                    *decision.flags,
+                ]
+            )
+        )
+    )
     return row, ""
 
 

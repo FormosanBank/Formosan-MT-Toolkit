@@ -66,11 +66,27 @@ LEXICAL_GLOSS_TAGS = GLOSS_TAGS | frozenset(
     {"DEIC", "EN", "EN1", "EN2", "NEUT", "NM", "REFL", "SA", "STIM", "THM"}
 )
 GLOSS_PART_RE = re.compile(r"[.=_-]+")
+GLOSS_CHAIN_RE = re.compile(r"[=_-]+")
 PERSON_NUMBER_GLOSS_RE = re.compile(r"^[123](?:SG|PL)(?:INCL|EXCL)?$")
 GENERIC_GLOSS_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
+MIXED_CASE_GLOSS_CODE_RE = re.compile(
+    r"^(?=.{2,8}$)(?=.*[a-z])(?=(?:[^A-Z]*[A-Z]){2})[A-Za-z][A-Za-z0-9]*$"
+)
 LEXICAL_STRONG_BOUNDARY_RE = re.compile(r"\S[=_]\S")
 LEXICAL_AMBIGUOUS_BOUNDARY_RE = re.compile(r"\S[-/]\S")
 GLOSS_TOKEN_EDGE_PUNCTUATION = "()[]{}<>,;:!?\"“”‘’'"
+TERMINAL_PUNCTUATION = ".!?。！？"
+TRAILING_CLOSERS = "\"'”’)]}》」』"
+ENGLISH_TITLE_WORD_RE = re.compile(r"^[A-Z][A-Za-z'’-]*$")
+CHINESE_LATIN_GLOSS_BOUNDARY_RE = re.compile(
+    r"(?:[\u3400-\u9FFF][=_-][A-Za-z]|[A-Za-z][=_-][\u3400-\u9FFF])"
+)
+CHINESE_STRONG_GLOSS_BOUNDARY_RE = re.compile(
+    r"[\u3400-\u9FFF]=[\u3400-\u9FFF]"
+)
+CHINESE_SHORT_GLOSS_BOUNDARY_RE = re.compile(
+    r"[\u3400-\u9FFF]-[\u3400-\u9FFF]"
+)
 
 
 @dataclass(frozen=True)
@@ -131,7 +147,10 @@ def is_only_punctuation_or_symbols(value: str) -> bool:
 
 
 def token_count(value: str) -> int:
-    return len(value.split()) if value.strip() else 0
+    return sum(
+        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token)
+        for token in value.split()
+    )
 
 
 def target_units(value: str, target_language: str) -> int:
@@ -140,6 +159,11 @@ def target_units(value: str, target_language: str) -> int:
         non_cjk = CJK_RE.sub(" ", value)
         return cjk + token_count(non_cjk)
     return token_count(value)
+
+
+def has_terminal_punctuation(value: str) -> bool:
+    text = value.rstrip().rstrip(TRAILING_CLOSERS).rstrip()
+    return bool(text) and text[-1] in TERMINAL_PUNCTUATION
 
 
 def normalized_row_type(value: object, source_path: object) -> str:
@@ -168,22 +192,30 @@ def has_annotation_gloss_structure(value: str) -> bool:
     """Detect unlabelled interlinear notation without matching normal prose."""
     gloss_hits = 0
     separated_tokens = 0
+    long_gloss_chain = False
     tokens = value.split()
     for raw_token in tokens:
         token = raw_token.strip(GLOSS_TOKEN_EDGE_PUNCTUATION)
+        has_boundary = GLOSS_PART_RE.search(token) is not None
+        has_morphological_boundary = GLOSS_CHAIN_RE.search(token) is not None
         parts = [part for part in GLOSS_PART_RE.split(token) if part]
         token_hits = sum(
-            part in GLOSS_TAGS or PERSON_NUMBER_GLOSS_RE.fullmatch(part) is not None
+            is_annotation_gloss_code(
+                part,
+                allow_mixed_case=has_morphological_boundary,
+            )
             for part in parts
         )
+        long_gloss_chain = long_gloss_chain or len(GLOSS_CHAIN_RE.findall(token)) >= 4
         if not token_hits:
             continue
         gloss_hits += token_hits
-        if GLOSS_PART_RE.search(token):
+        if has_boundary:
             separated_tokens += 1
 
     return (
-        separated_tokens >= 2
+        long_gloss_chain
+        or separated_tokens >= 2
         or (separated_tokens >= 1 and gloss_hits >= 2)
         or (separated_tokens >= 1 and len(tokens) <= 3)
     )
@@ -198,16 +230,50 @@ def target_gloss_reason(
     """Return a stable rejection reason for explicit or unlabelled glosses."""
     if normalized_translation_kind(translation_kind) in NON_TRANSLATION_KINDS:
         return "target_gloss_translation"
-    if target_language == "english" and has_annotation_gloss_structure(str(value)):
+    text = str(value)
+    if has_annotation_gloss_structure(text):
         return "target_annotation_gloss"
+    if target_language == "chinese":
+        if (
+            CHINESE_LATIN_GLOSS_BOUNDARY_RE.search(text)
+            or CHINESE_STRONG_GLOSS_BOUNDARY_RE.search(text)
+            or (
+                target_units(text, "chinese") <= 6
+                and not has_terminal_punctuation(text)
+                and CHINESE_SHORT_GLOSS_BOUNDARY_RE.search(text)
+            )
+        ):
+            return "target_annotation_gloss"
     return ""
 
 
-def is_gloss_code(value: str) -> bool:
+def is_explicit_gloss_code(value: str) -> bool:
     return (
         value in LEXICAL_GLOSS_TAGS
         or PERSON_NUMBER_GLOSS_RE.fullmatch(value) is not None
         or GENERIC_GLOSS_CODE_RE.fullmatch(value) is not None
+    )
+
+
+def is_annotation_gloss_code(
+    value: str,
+    *,
+    allow_mixed_case: bool,
+) -> bool:
+    return (
+        value in LEXICAL_GLOSS_TAGS
+        or PERSON_NUMBER_GLOSS_RE.fullmatch(value) is not None
+        or (
+            allow_mixed_case
+            and MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None
+        )
+    )
+
+
+def is_gloss_code(value: str) -> bool:
+    return (
+        is_explicit_gloss_code(value)
+        or MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None
     )
 
 
@@ -280,6 +346,100 @@ def fertility_reason(
     return "extreme_fertility" if ratio < low or ratio > high else ""
 
 
+def is_english_heading(value: str) -> bool:
+    """Return true for short title-case labels, not ordinary punctuated text."""
+    text = value.strip()
+    if not text or has_terminal_punctuation(text):
+        return False
+    words = [word.strip("()[]{}<>,;:\"“”‘’'") for word in text.split()]
+    words = [word for word in words if word]
+    return 2 <= len(words) <= 4 and all(
+        ENGLISH_TITLE_WORD_RE.fullmatch(word) is not None for word in words
+    )
+
+
+def alignment_quality(
+    source: str,
+    target: str,
+    *,
+    target_language: str,
+    row_type: str,
+    source_path: object = "",
+) -> tuple[str, tuple[str, ...]]:
+    """Find high-confidence alignment failures and risky explanatory rows."""
+    if row_type != "sentence":
+        return "", ()
+
+    source_units = token_count(source)
+    target_count = target_units(target, target_language)
+    if (
+        (source_units >= 10 and target_count <= 2)
+        or (source_units >= 12 and target_count <= 3)
+    ):
+        return "obvious_alignment_mismatch", ()
+    heading_like_target = (
+        target_language == "english"
+        and target_count <= 3
+        and is_english_heading(target)
+    )
+    if source_units >= 7 and heading_like_target:
+        return "target_heading_alignment_mismatch", ()
+
+    flags: list[str] = []
+    if source_units >= 4 and heading_like_target:
+        flags.append("heading_like_target")
+    target_is_punctuated = has_terminal_punctuation(target)
+    if (
+        target_language == "english"
+        and source_units >= 4
+        and target_count <= 3
+        and not target_is_punctuated
+    ):
+        flags.append("target_fragment")
+    first_target_letter = next(
+        (
+            character
+            for character in target
+            if unicodedata.category(character)[0] == "L"
+        ),
+        "",
+    )
+    path_is_lexical = any(
+        hint in str(source_path or "").casefold() for hint in LEXICAL_PATH_HINTS
+    )
+    english_lexical_evidence = target_language == "english" and (
+        ";" in target
+        or target.lstrip().startswith("(")
+        or (first_target_letter and first_target_letter.islower())
+    )
+    if (
+        source_units <= 4
+        and (
+            english_lexical_evidence
+            or (
+                target_count <= 12
+                and not target_is_punctuated
+                and path_is_lexical
+            )
+        )
+    ):
+        flags.append("lexical_content_sentence")
+    if source_units <= 3 and target_count >= 18:
+        flags.append("length_asymmetry")
+    explanatory_markers = (
+        (";" in target or "cf." in target.casefold() or target.count("(") >= 2)
+        if target_language == "english"
+        else (
+            "；" in target
+            or ";" in target
+            or target.count("（") + target.count("(") >= 1
+        )
+    )
+    if source_units <= 3 and target_count >= 8 and explanatory_markers:
+        flags.append("definition_like_sentence")
+    return "", tuple(flags)
+
+
 def quality_decision(
     row: Mapping[str, object],
     *,
@@ -307,14 +467,8 @@ def quality_decision(
         return QualityDecision("rejected", "source_artifact_marker")
     if "*" in source:
         return QualityDecision("rejected", "source_annotation_marker")
-    gloss_reason = target_gloss_reason(
-        target,
-        translation_kind=row.get("translation_kind", ""),
-        target_language=target_language,
-    )
-    if gloss_reason:
-        disposition = "rejected" if gloss_reason == "target_gloss_translation" else "quarantine"
-        return QualityDecision(disposition, gloss_reason)
+    if normalized_translation_kind(row.get("translation_kind", "")) in NON_TRANSLATION_KINDS:
+        return QualityDecision("rejected", "target_gloss_translation")
     lexical_reason = lexical_quality_reason(
         target,
         row_type=row_type,
@@ -323,6 +477,13 @@ def quality_decision(
     )
     if lexical_reason:
         return QualityDecision("quarantine", lexical_reason)
+    gloss_reason = target_gloss_reason(
+        target,
+        translation_kind="",
+        target_language=target_language,
+    )
+    if gloss_reason:
+        return QualityDecision("quarantine", gloss_reason)
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
@@ -360,6 +521,16 @@ def quality_decision(
     if len(source_key) >= 4 and source_key == target_key:
         return QualityDecision("quarantine", "source_target_identity")
 
+    alignment_reason, alignment_flags = alignment_quality(
+        source,
+        target,
+        target_language=target_language,
+        row_type=row_type,
+        source_path=row.get("source", ""),
+    )
+    if alignment_reason:
+        return QualityDecision("quarantine", alignment_reason)
+    flags.extend(alignment_flags)
     fertility = fertility_reason(source, target, target_language, row_type)
     if fertility:
         return QualityDecision("quarantine", fertility)

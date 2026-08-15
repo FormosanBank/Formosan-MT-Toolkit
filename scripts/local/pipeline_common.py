@@ -58,6 +58,17 @@ def load_pipeline_config() -> dict[str, Any]:
         != "human_preferred_source_stratified_fallback"
         or not isinstance(splits.get("source_ratio_tolerance"), (int, float))
         or not 0 <= splits["source_ratio_tolerance"] <= 1
+        or any(
+            not isinstance(splits.get(field), int) or splits[field] < 1
+            for field in (
+                "min_formosan_tokens",
+                "min_target_tokens",
+                "min_combined_tokens",
+                "min_punctuated_combined_tokens",
+            )
+        )
+        or splits["min_punctuated_combined_tokens"]
+        > splits["min_combined_tokens"]
         or splits.get("headline_tier") != "in_domain_hard"
     ):
         raise RuntimeError("Corpus pipeline has an invalid hard-split policy")
