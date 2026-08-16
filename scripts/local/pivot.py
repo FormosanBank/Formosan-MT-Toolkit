@@ -40,6 +40,7 @@ from corpus_quality import (
     normalize_text,
     quality_decision,
     target_gloss_reason,
+    target_metadata_reason,
     target_units,
     token_count,
 )
@@ -218,6 +219,9 @@ def pivot_candidate_reason(row: Mapping[str, Any], direction: Direction) -> str:
     )
     if gloss_reason:
         return gloss_reason
+    metadata_reason = target_metadata_reason(source_text, source=formosan)
+    if metadata_reason:
+        return metadata_reason
     return ""
 
 

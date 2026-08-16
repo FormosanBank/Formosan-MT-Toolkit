@@ -206,8 +206,11 @@ contain at least six units in total, or five when both sides have terminal
 sentence punctuation. Punctuation does not count as a Chinese unit. Rows with
 at most two Formosan units and at most three target units remain train-only,
 even when punctuated. Longer compact questions and clauses may enter
-evaluation. Explicit lexemes, morphemes, explanatory
-definition rows, and extreme length-asymmetry rows remain training-only.
+evaluation. Explicit lexemes, morphemes, explanatory definition rows, and
+either side above 384 units remain training-only. Clear extreme length
+misalignments and embedded missing markers are rejected. Provenance notes,
+translation commentary, and unaligned numbered multi-sense references are
+quarantined before aggregation and cannot be sent through the pivot stage.
 
 `source_corpus` records the exact public corpus root or private repository used
 for split allocation. It is never a model tag. `source_bucket` is restricted to

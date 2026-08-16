@@ -65,10 +65,12 @@ def load_pipeline_config() -> dict[str, Any]:
                 "min_target_tokens",
                 "min_combined_tokens",
                 "min_punctuated_combined_tokens",
+                "max_eval_units_per_side",
             )
         )
         or splits["min_punctuated_combined_tokens"]
         > splits["min_combined_tokens"]
+        or splits["max_eval_units_per_side"] < 1
         or splits.get("headline_tier") != "in_domain_hard"
     ):
         raise RuntimeError("Corpus pipeline has an invalid hard-split policy")

@@ -48,6 +48,7 @@ from corpus_quality import (  # noqa: E402
     lexical_quality_reason,
     normalize_dataframe,
     normalize_text,
+    target_metadata_reason,
     target_units,
 )
 from fetch_xml import (  # noqa: E402
@@ -1852,6 +1853,34 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertEqual(reasons["direct-analysis"], "target_linguistic_analysis")
         self.assertEqual(reasons["equals-analysis"], "target_linguistic_analysis")
 
+    def test_embedded_reference_metadata_is_detected_without_rejecting_aligned_lists(self) -> None:
+        self.assertEqual(
+            target_metadata_reason("A translation [translation missing] here."),
+            "embedded_missing_translation_marker",
+        )
+        self.assertEqual(
+            target_metadata_reason("The fox ran. (Source: Aesop)"),
+            "target_provenance_note",
+        )
+        self.assertEqual(
+            target_metadata_reason("Literal translation: carry on the shoulder"),
+            "target_translation_commentary",
+        )
+        self.assertEqual(
+            target_metadata_reason(
+                "1. My feelings are hurt. 2. I have heart pain.",
+                source="makeluk ku sunis",
+            ),
+            "target_numbered_multi_reference",
+        )
+        self.assertEqual(
+            target_metadata_reason(
+                "1. First sentence. 2. Second sentence.",
+                source="1. qani sa. 2. qasa sa.",
+            ),
+            "",
+        )
+
     def test_sentence_shaped_lexical_material_is_train_only(self) -> None:
         _, english_flags = alignment_quality(
             "mafu qani",
@@ -1871,6 +1900,15 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertIn("definition_like_sentence", english_flags)
         self.assertIn("length_asymmetry", english_flags)
         self.assertIn("lexical_content_sentence", chinese_flags)
+
+        long_source_reason, _ = alignment_quality(
+            "one two three four five six seven eight nine ten eleven twelve "
+            "thirteen fourteen fifteen sixteen seventeen eighteen",
+            "This is a short title",
+            target_language="english",
+            row_type="sentence",
+        )
+        self.assertEqual(long_source_reason, "obvious_alignment_mismatch")
 
     def test_alignment_flags_keep_explanations_train_only(self) -> None:
         rows = [

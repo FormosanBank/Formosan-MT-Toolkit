@@ -290,6 +290,7 @@ def evaluation_candidate_mask(
     min_target_tokens: int,
     min_combined_tokens: int,
     min_punctuated_combined_tokens: int,
+    max_eval_units_per_side: int = 384,
 ) -> pd.Series:
     """Return sentence-quality rows that may be used in dev or test.
 
@@ -333,6 +334,8 @@ def evaluation_candidate_mask(
         & ~frame["_short_entry"]
         & frame["_formosan_tokens"].ge(min_formosan_tokens)
         & frame["_target_tokens"].ge(min_target_tokens)
+        & frame["_formosan_tokens"].le(max_eval_units_per_side)
+        & frame["_target_tokens"].le(max_eval_units_per_side)
         & sufficient_content
     )
 

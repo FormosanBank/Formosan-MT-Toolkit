@@ -27,6 +27,12 @@ MISSING_TRANSLATION_RE = re.compile(
     r"無翻譯|缺翻譯|n/?a|null|nan)\s*$",
     re.IGNORECASE,
 )
+EMBEDDED_MISSING_TRANSLATION_RE = re.compile(
+    r"[\[\u3010(\uff08]\s*(?:translation\s+(?:missing|unavailable|not\s+available)|"
+    r"missing\s+translation|no\s+translation|\u7121\u7ffb\u8b6f|\u7f3a\u7ffb\u8b6f)\s*"
+    r"[\]\u3011)\uff09]",
+    re.IGNORECASE,
+)
 TARGET_META_RE = re.compile(
     r"^\s*[\[\【(（]\s*(?:介|虛|虚|名|動|动|形|副|代|助|連|连|量|嘆|叹|"
     r"語助|语助|語氣|语气|疑問|疑问|感嘆|感叹|pos|particle|prep(?:osition)?|"
@@ -135,6 +141,18 @@ TARGET_PROMPT_PREFIX_RE = re.compile(
     r"^\s*(?:source|target|translation|reference|english|chinese|formosan)\s*:\s*",
     re.IGNORECASE,
 )
+TARGET_PROVENANCE_NOTE_RE = re.compile(
+    r"(?:^|[\s(\uff08\[])(?:source|sources|citation|reference|references|note)\s*:\s*"
+    r"(?:https?://|www\.|[A-Z][A-Za-z0-9'\u2019.-]*)|"
+    r"(?:\u8cc7\u6599\u4f86\u6e90|\u4f86\u6e90|\u51fa\u8655)\s*[:\uff1a]\s*\S",
+    re.IGNORECASE,
+)
+TARGET_TRANSLATION_COMMENTARY_RE = re.compile(
+    r"\b(?:literal|word[- ]for[- ]word|free)\s+translation\s*:\s*\S|"
+    r"(?:\u76f4\u8b6f|\u9010\u5b57\u7ffb\u8b6f|\u610f\u8b6f)\s*[:\uff1a]\s*\S",
+    re.IGNORECASE,
+)
+NUMBERED_REFERENCE_RE = re.compile(r"(?:^|\s)\(?([1-9]\d?)\)?[.)\u3001:\uff1a]\s*")
 VOCABULARY_MAPPING_RE = re.compile(
     r"[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f'\u2019-]{0,30}\s*"
     r"[\uff08(][^\uff09)\n]{0,20}[\u3400-\u9fff][^\uff09)\n]{0,20}[\uff09)]"
@@ -323,6 +341,32 @@ def target_gloss_reason(
             )
         ):
             return "target_annotation_gloss"
+    return ""
+
+
+def has_numbered_sequence(value: object) -> bool:
+    numbered = [int(item) for item in NUMBERED_REFERENCE_RE.findall(str(value))]
+    return any(
+        second == first + 1
+        for first, second in zip(numbered, numbered[1:], strict=False)
+    )
+
+
+def target_metadata_reason(value: object, *, source: object = "") -> str:
+    """Detect reference metadata and multi-sense entries embedded in targets."""
+    text = str(value).strip()
+    if EMBEDDED_MISSING_TRANSLATION_RE.search(text):
+        return "embedded_missing_translation_marker"
+    if TARGET_PROVENANCE_NOTE_RE.search(text):
+        return "target_provenance_note"
+    if TARGET_TRANSLATION_COMMENTARY_RE.search(text):
+        return "target_translation_commentary"
+    if (
+        has_numbered_sequence(text)
+        and not has_numbered_sequence(source)
+        and token_count(str(source)) <= 12
+    ):
+        return "target_numbered_multi_reference"
     return ""
 
 
@@ -552,6 +596,7 @@ def alignment_quality(
     if (
         (source_units >= 10 and target_count <= 2)
         or (source_units >= 12 and target_count <= 3)
+        or (source_units >= 18 and target_count <= 5)
     ):
         return "obvious_alignment_mismatch", ()
     heading_like_target = (
@@ -663,6 +708,14 @@ def quality_decision(
     )
     if gloss_reason:
         return QualityDecision("quarantine", gloss_reason)
+    metadata_reason = target_metadata_reason(target, source=source)
+    if metadata_reason:
+        disposition = (
+            "rejected"
+            if metadata_reason == "embedded_missing_translation_marker"
+            else "quarantine"
+        )
+        return QualityDecision(disposition, metadata_reason)
     if has_malformed_escaping(source):
         return QualityDecision("quarantine", "malformed_source_escaping")
     if has_malformed_escaping(target):

@@ -455,6 +455,7 @@ def evaluation_masks(
     min_target_tokens: int,
     min_combined_tokens: int,
     min_punctuated_combined_tokens: int,
+    max_eval_units_per_side: int,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     synthetic = (
         frame.get("pivot_origin", pd.Series("original", index=frame.index))
@@ -467,6 +468,7 @@ def evaluation_masks(
         min_target_tokens=min_target_tokens,
         min_combined_tokens=min_combined_tokens,
         min_punctuated_combined_tokens=min_punctuated_combined_tokens,
+        max_eval_units_per_side=max_eval_units_per_side,
     )
     human_candidate = candidate & ~synthetic
     return synthetic, human_candidate, candidate
@@ -1019,6 +1021,7 @@ def build_hard_split(
     ngram_threshold: float,
     registry_in: Path | None,
     preserve_internal: bool = False,
+    max_eval_units_per_side: int = SPLIT_DEFAULTS["max_eval_units_per_side"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     if "row_id" not in frame.columns or frame["row_id"].astype(str).duplicated().any():
         raise SystemExit("Input must contain unique stable row_id values")
@@ -1066,6 +1069,7 @@ def build_hard_split(
             min_target_tokens=min_target_tokens,
             min_combined_tokens=min_combined_tokens,
             min_punctuated_combined_tokens=min_punctuated_combined_tokens,
+            max_eval_units_per_side=max_eval_units_per_side,
         )
     )
     source_targets, targets = source_stratum_targets(
@@ -1414,6 +1418,7 @@ def build_hard_split(
                 min_target_tokens=min_target_tokens,
                 min_combined_tokens=min_combined_tokens,
                 min_punctuated_combined_tokens=min_punctuated_combined_tokens,
+                max_eval_units_per_side=max_eval_units_per_side,
             )
         ).sum()
     )
@@ -1432,6 +1437,7 @@ def build_hard_split(
             "min_target_tokens": min_target_tokens,
             "min_combined_tokens": min_combined_tokens,
             "min_punctuated_combined_tokens": min_punctuated_combined_tokens,
+            "max_eval_units_per_side": max_eval_units_per_side,
         },
         "input_rows": len(frame) + len(duplicate_rows),
         "deduplicated_input_rows": len(frame),
@@ -1630,6 +1636,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=SPLIT_DEFAULTS["min_punctuated_combined_tokens"],
     )
+    parser.add_argument(
+        "--max-eval-units-per-side",
+        type=int,
+        default=SPLIT_DEFAULTS["max_eval_units_per_side"],
+    )
     parser.add_argument("--min-test-rows", type=int, default=SPLIT_DEFAULTS["min_test_rows"])
     parser.add_argument(
         "--min-validate-rows",
@@ -1662,6 +1673,8 @@ def main() -> None:
         raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
     if min(args.min_formosan_tokens, args.min_target_tokens) < 1:
         raise SystemExit("Evaluation per-side token minimums must be positive")
+    if args.max_eval_units_per_side < 1:
+        raise SystemExit("Evaluation per-side unit maximum must be positive")
     if args.min_punctuated_combined_tokens > args.min_combined_tokens:
         raise SystemExit("Punctuated combined minimum cannot exceed the general combined minimum")
 
@@ -1683,6 +1696,7 @@ def main() -> None:
         min_target_tokens=args.min_target_tokens,
         min_combined_tokens=args.min_combined_tokens,
         min_punctuated_combined_tokens=args.min_punctuated_combined_tokens,
+        max_eval_units_per_side=args.max_eval_units_per_side,
         attempts=args.selection_attempts,
         min_test_rows=args.min_test_rows,
         min_validate_rows=args.min_validate_rows,

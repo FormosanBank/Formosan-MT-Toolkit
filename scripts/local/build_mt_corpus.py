@@ -1123,6 +1123,7 @@ def build_hard_splits(
             "min_target_tokens": args.min_target_tokens,
             "min_combined_tokens": args.min_combined_tokens,
             "min_punctuated_combined_tokens": args.min_punctuated_combined_tokens,
+            "max_eval_units_per_side": args.max_eval_units_per_side,
             "min_test_rows": args.min_test_rows,
             "min_validate_rows": args.min_validate_rows,
             "ngram_jaccard_threshold": args.ngram_jaccard_threshold,
@@ -1186,6 +1187,8 @@ def build_hard_splits(
                 str(args.min_combined_tokens),
                 "--min-punctuated-combined-tokens",
                 str(args.min_punctuated_combined_tokens),
+                "--max-eval-units-per-side",
+                str(args.max_eval_units_per_side),
                 "--min-test-rows",
                 str(args.min_test_rows),
                 "--min-validate-rows",
@@ -1232,6 +1235,8 @@ def build_hard_splits(
                     str(args.min_combined_tokens),
                     "--min-punctuated-combined-tokens",
                     str(args.min_punctuated_combined_tokens),
+                    "--max-eval-units-per-side",
+                    str(args.max_eval_units_per_side),
                     "--source-ratio-tolerance",
                     str(args.source_ratio_tolerance),
                     "--split-report",
@@ -1688,6 +1693,11 @@ def parse_args() -> argparse.Namespace:
         default=PIPELINE_CONFIG["splits"]["min_punctuated_combined_tokens"],
     )
     parser.add_argument(
+        "--max-eval-units-per-side",
+        type=int,
+        default=PIPELINE_CONFIG["splits"]["max_eval_units_per_side"],
+    )
+    parser.add_argument(
         "--min-test-rows",
         type=int,
         default=PIPELINE_CONFIG["splits"]["min_test_rows"],
@@ -1726,6 +1736,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--min-test-rows must be >= 0")
     if args.min_validate_rows < 0:
         raise SystemExit("--min-validate-rows must be >= 0")
+    if args.max_eval_units_per_side < 1:
+        raise SystemExit("--max-eval-units-per-side must be >= 1")
     if not 0.5 <= args.ngram_jaccard_threshold <= 1.0:
         raise SystemExit("--ngram-jaccard-threshold must be in [0.5, 1.0]")
     if not 0 <= args.source_ratio_tolerance <= 1.0:

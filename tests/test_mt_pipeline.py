@@ -768,6 +768,25 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertFalse(bool(candidates.iloc[0]))
 
+    def test_evaluation_candidate_respects_model_length_limit(self) -> None:
+        row = self.hard_split_fixture().iloc[[0]].copy()
+        row["formosan_sentence"] = " ".join(["word"] * 385)
+        row["english_sentence"] = "a complete translation"
+        normalized = add_normalized_columns(
+            row,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        candidates = evaluation_candidate_mask(
+            normalized,
+            min_formosan_tokens=2,
+            min_target_tokens=2,
+            min_combined_tokens=6,
+            min_punctuated_combined_tokens=5,
+            max_eval_units_per_side=384,
+        )
+        self.assertFalse(bool(candidates.iloc[0]))
+
     def test_compact_sentence_eligibility_uses_joint_content(self) -> None:
         frame = add_mt_contract(
             pd.DataFrame(

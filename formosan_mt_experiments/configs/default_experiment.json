@@ -22,6 +22,7 @@
     "min_target_tokens": 2,
     "min_combined_tokens": 6,
     "min_punctuated_combined_tokens": 5,
+    "max_eval_units_per_side": 384,
     "source_ratio_tolerance": 0.02,
     "ratio_basis": "all_deduplicated_pairs_by_language_and_source_corpus",
     "synthetic_eval_policy": "human_preferred_source_stratified_fallback",

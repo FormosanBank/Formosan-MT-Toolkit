@@ -27,6 +27,7 @@ SHARED_SPLIT_FIELDS = (
     "min_target_tokens",
     "min_combined_tokens",
     "min_punctuated_combined_tokens",
+    "max_eval_units_per_side",
     "source_ratio_tolerance",
     "ratio_basis",
     "synthetic_eval_policy",

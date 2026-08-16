@@ -46,6 +46,7 @@ from corpus_quality import (  # noqa: E402
     has_unbalanced_target_delimiters,
     lexical_quality_reason,
     target_gloss_reason,
+    target_metadata_reason,
 )
 
 EVAL_SPLITS = {"validate", "valid", "val", "test"}
@@ -364,6 +365,7 @@ def validate_splits(
     min_punctuated_combined_tokens: int = SPLIT_DEFAULTS[
         "min_punctuated_combined_tokens"
     ],
+    max_eval_units_per_side: int = SPLIT_DEFAULTS["max_eval_units_per_side"],
     source_ratio_tolerance: float = SPLIT_DEFAULTS["source_ratio_tolerance"],
     require_human_eval: bool = False,
     require_document_holdout: bool = False,
@@ -457,6 +459,14 @@ def validate_splits(
         )
         .sum()
     )
+    target_metadata_rows = sum(
+        bool(target_metadata_reason(target, source=source))
+        for source, target in zip(
+            keyed["formosan_sentence"].astype(str),
+            keyed[target_col].astype(str),
+            strict=True,
+        )
+    )
     malformed_escaping_rows = int(
         keyed["formosan_sentence"].astype(str).map(has_malformed_escaping).sum()
         + keyed[target_col].astype(str).map(has_malformed_escaping).sum()
@@ -514,6 +524,7 @@ def validate_splits(
         min_target_tokens=min_target_tokens,
         min_combined_tokens=min_combined_tokens,
         min_punctuated_combined_tokens=min_punctuated_combined_tokens,
+        max_eval_units_per_side=max_eval_units_per_side,
     )
     lexical_like_eval_rows = int(
         (split.isin(EVAL_SPLITS) & ~candidate).sum()
@@ -537,6 +548,7 @@ def validate_splits(
             "min_target_tokens": min_target_tokens,
             "min_combined_tokens": min_combined_tokens,
             "min_punctuated_combined_tokens": min_punctuated_combined_tokens,
+            "max_eval_units_per_side": max_eval_units_per_side,
         }
         if split_report.get("evaluation_length_policy") != expected_length_policy:
             split_report_errors.append(
@@ -741,6 +753,7 @@ def validate_splits(
         and lexical_like_eval_rows == 0
         and gloss_translation_rows == 0
         and annotation_gloss_rows == 0
+        and target_metadata_rows == 0
         and malformed_escaping_rows == 0
         and target_language_mismatch_rows == 0
         and uncertain_target_language_eval_rows == 0
@@ -770,6 +783,7 @@ def validate_splits(
         "lexical_like_eval_rows": lexical_like_eval_rows,
         "gloss_translation_rows": gloss_translation_rows,
         "annotation_gloss_rows": annotation_gloss_rows,
+        "target_metadata_rows": target_metadata_rows,
         "malformed_escaping_rows": malformed_escaping_rows,
         "target_language_mismatch_rows": target_language_mismatch_rows,
         "uncertain_target_language_eval_rows": uncertain_target_language_eval_rows,
@@ -911,6 +925,11 @@ def parse_args() -> argparse.Namespace:
         default=split_defaults["min_punctuated_combined_tokens"],
     )
     parser.add_argument(
+        "--max-eval-units-per-side",
+        type=int,
+        default=split_defaults["max_eval_units_per_side"],
+    )
+    parser.add_argument(
         "--source-ratio-tolerance",
         type=float,
         default=split_defaults["source_ratio_tolerance"],
@@ -962,6 +981,7 @@ def main() -> None:
         min_target_tokens=args.min_target_tokens,
         min_combined_tokens=args.min_combined_tokens,
         min_punctuated_combined_tokens=args.min_punctuated_combined_tokens,
+        max_eval_units_per_side=args.max_eval_units_per_side,
         source_ratio_tolerance=args.source_ratio_tolerance,
         require_human_eval=args.require_human_eval,
         require_document_holdout=args.require_document_holdout_report,

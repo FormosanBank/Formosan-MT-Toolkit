@@ -51,6 +51,7 @@
     "min_target_tokens": 2,
     "min_combined_tokens": 6,
     "min_punctuated_combined_tokens": 5,
+    "max_eval_units_per_side": 384,
     "lexical_eval": false,
     "synthetic_eval": true,
     "synthetic_eval_policy": "human_preferred_source_stratified_fallback",

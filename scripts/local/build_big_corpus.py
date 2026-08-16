@@ -16,6 +16,7 @@ from corpus_quality import (
     lexical_quality_reason,
     target_alignment_artifact_reason,
     target_gloss_reason,
+    target_metadata_reason,
 )
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
@@ -176,6 +177,7 @@ def require_clean_pairs(
             translation_kind=translation_kind,
             target_language=target_language,
         )
+        reason = reason or target_metadata_reason(target, source=source)
         reason = reason or lexical_quality_reason(
             target,
             row_type=row_type,
