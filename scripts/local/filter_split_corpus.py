@@ -312,6 +312,7 @@ def main() -> None:
         target_column=target_column,
         target_language=target_language,
         keep_redactions=args.keep_redactions,
+        max_units_per_side=config["cleaning"]["max_training_units_per_side"],
     )
     if args.no_dedup:
         deduplicated = accepted.iloc[0:0].copy()

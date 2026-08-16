@@ -30,7 +30,11 @@ from mt_common import (
     write_json,
 )
 
-SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
+PIPELINE_DEFAULTS = load_corpus_pipeline_config()
+SPLIT_DEFAULTS = PIPELINE_DEFAULTS["splits"]
+MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_DEFAULTS["cleaning"][
+    "max_training_units_per_side"
+]
 TIER = SPLIT_DEFAULTS["headline_tier"]
 
 
@@ -1036,6 +1040,16 @@ def build_hard_split(
             "chinese" if target_col == "chinese_sentence" else "english"
         ),
     )
+    overlength = (
+        frame["_formosan_tokens"].gt(MAX_TRAINING_UNITS_PER_SIDE)
+        | frame["_target_tokens"].gt(MAX_TRAINING_UNITS_PER_SIDE)
+    )
+    if overlength.any():
+        raise SystemExit(
+            "Hard-split input contains "
+            f"{int(overlength.sum()):,} rows above the "
+            f"{MAX_TRAINING_UNITS_PER_SIDE}-unit training limit"
+        )
     frame["_document_key"] = (
         frame["lang_code"].astype(str)
         + "\u241f"

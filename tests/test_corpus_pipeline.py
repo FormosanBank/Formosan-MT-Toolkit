@@ -1859,11 +1859,33 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             "embedded_missing_translation_marker",
         )
         self.assertEqual(
+            target_metadata_reason("Translation missing: the speaker continued."),
+            "embedded_missing_translation_marker",
+        )
+        self.assertEqual(
             target_metadata_reason("The fox ran. (Source: Aesop)"),
             "target_provenance_note",
         )
         self.assertEqual(
+            target_metadata_reason("The fox ran. Source: 1912 edition."),
+            "target_provenance_note",
+        )
+        self.assertEqual(
+            target_metadata_reason("Retold from Aesop's Fables."),
+            "target_provenance_note",
+        )
+        self.assertEqual(
+            target_metadata_reason(
+                "The first five books were translated from Hebrew into Greek."
+            ),
+            "",
+        )
+        self.assertEqual(
             target_metadata_reason("Literal translation: carry on the shoulder"),
+            "target_translation_commentary",
+        )
+        self.assertEqual(
+            target_metadata_reason("Literal meaning: carry on the shoulder"),
             "target_translation_commentary",
         )
         self.assertEqual(
@@ -1879,6 +1901,62 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 source="1. qani sa. 2. qasa sa.",
             ),
             "",
+        )
+
+    def test_model_length_overflow_is_quarantined_before_splitting(self) -> None:
+        long_formosan = " ".join(["qani"] * 385)
+        long_english = " ".join(["translation"] * 385)
+        rows = [
+            {
+                **mt_contract_fields(long_formosan),
+                "row_id": "long-source",
+                "ami": long_formosan,
+                "target": "This is a complete translation.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("qani sa kapah."),
+                "row_id": "long-target",
+                "ami": "qani sa kapah.",
+                "target": long_english,
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("qani sa kapah."),
+                "row_id": "normal",
+                "ami": "qani sa kapah.",
+                "target": "This is a complete translation.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(pd.DataFrame(rows), "ami", "target")
+        accepted, rejected, _ = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="target",
+            target_language="english",
+            keep_redactions=False,
+            max_units_per_side=384,
+        )
+
+        self.assertEqual(list(accepted["row_id"]), ["normal"])
+        reasons = dict(
+            zip(
+                rejected["row_id"],
+                rejected["disposition_reason"],
+                strict=True,
+            )
+        )
+        self.assertEqual(
+            reasons["long-source"],
+            "formosan_model_length_overflow",
+        )
+        self.assertEqual(
+            reasons["long-target"],
+            "target_model_length_overflow",
         )
 
     def test_sentence_shaped_lexical_material_is_train_only(self) -> None:

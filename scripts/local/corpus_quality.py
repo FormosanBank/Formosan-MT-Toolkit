@@ -28,9 +28,9 @@ MISSING_TRANSLATION_RE = re.compile(
     re.IGNORECASE,
 )
 EMBEDDED_MISSING_TRANSLATION_RE = re.compile(
-    r"[\[\u3010(\uff08]\s*(?:translation\s+(?:missing|unavailable|not\s+available)|"
-    r"missing\s+translation|no\s+translation|\u7121\u7ffb\u8b6f|\u7f3a\u7ffb\u8b6f)\s*"
-    r"[\]\u3011)\uff09]",
+    r"(?:[\[\u3010(\uff08]\s*)?(?:translation\s+(?:missing|unavailable|not\s+available)|"
+    r"missing\s+translation|no\s+translation|\u7121\u7ffb\u8b6f|\u7f3a\u7ffb\u8b6f)"
+    r"(?:\s*[\]\u3011)\uff09])?",
     re.IGNORECASE,
 )
 TARGET_META_RE = re.compile(
@@ -142,14 +142,17 @@ TARGET_PROMPT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 TARGET_PROVENANCE_NOTE_RE = re.compile(
-    r"(?:^|[\s(\uff08\[])(?:source|sources|citation|reference|references|note)\s*:\s*"
-    r"(?:https?://|www\.|[A-Z][A-Za-z0-9'\u2019.-]*)|"
+    r"(?:^|[\s(\uff08\[])(?:source|sources|citation|reference|references|note|"
+    r"author|book\s+title)\s*:\s*\S|"
+    r"(?:^|[\[(\uff08])\s*(?:(?:this|the)\s+(?:passage|article|text|story)\s+"
+    r"(?:is|was)\s+)?(?:excerpted\s+and\s+)?(?:adapted|retold)\s+from\s+\S|"
     r"(?:\u8cc7\u6599\u4f86\u6e90|\u4f86\u6e90|\u51fa\u8655)\s*[:\uff1a]\s*\S",
     re.IGNORECASE,
 )
 TARGET_TRANSLATION_COMMENTARY_RE = re.compile(
-    r"\b(?:literal|word[- ]for[- ]word|free)\s+translation\s*:\s*\S|"
-    r"(?:\u76f4\u8b6f|\u9010\u5b57\u7ffb\u8b6f|\u610f\u8b6f)\s*[:\uff1a]\s*\S",
+    r"\b(?:(?:literal|word[- ]for[- ]word|free)\s+translation|"
+    r"literal\s+meaning|translation\s+note)\s*:\s*\S|"
+    r"(?:\u76f4\u8b6f|\u9010\u5b57\u7ffb\u8b6f|\u610f\u8b6f|\u7ffb\u8b6f\u8aaa\u660e)\s*[:\uff1a]\s*\S",
     re.IGNORECASE,
 )
 NUMBERED_REFERENCE_RE = re.compile(r"(?:^|\s)\(?([1-9]\d?)\)?[.)\u3001:\uff1a]\s*")
@@ -567,6 +570,21 @@ def fertility_reason(
     return "extreme_fertility" if ratio < low or ratio > high else ""
 
 
+def model_length_reason(
+    source: str,
+    target: str,
+    *,
+    target_language: str,
+    max_units_per_side: int,
+) -> str:
+    """Reject pairs outside the conservative pretokenization length bound."""
+    if token_count(source) > max_units_per_side:
+        return "formosan_model_length_overflow"
+    if target_units(target, target_language) > max_units_per_side:
+        return "target_model_length_overflow"
+    return ""
+
+
 def is_english_heading(value: str) -> bool:
     """Return true for short title-case labels, not ordinary punctuated text."""
     text = value.strip()
@@ -671,6 +689,7 @@ def quality_decision(
     target_column: str,
     target_language: str,
     keep_redactions: bool,
+    max_units_per_side: int | None = None,
 ) -> QualityDecision:
     source = str(row[source_column])
     target = str(row[target_column])
@@ -724,6 +743,15 @@ def quality_decision(
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
         return QualityDecision("rejected", "empty_or_punctuation_only")
+    if max_units_per_side is not None:
+        length_reason = model_length_reason(
+            source,
+            target,
+            target_language=target_language,
+            max_units_per_side=max_units_per_side,
+        )
+        if length_reason:
+            return QualityDecision("quarantine", length_reason)
     if not keep_redactions and (REDACTION_RE.search(source) or REDACTION_RE.search(target)):
         return QualityDecision("rejected", "redaction_placeholder")
     if CJK_RE.search(source) or KANA_HANGUL_RE.search(source):
@@ -828,6 +856,7 @@ def apply_quality_rules(
     target_column: str,
     target_language: str,
     keep_redactions: bool,
+    max_units_per_side: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Counter[str]]:
     dispositions: list[str] = []
     reasons: list[str] = []
@@ -858,6 +887,7 @@ def apply_quality_rules(
             target_column=target_column,
             target_language=target_language,
             keep_redactions=keep_redactions,
+            max_units_per_side=max_units_per_side,
         )
         dispositions.append(decision.disposition)
         reasons.append(decision.reason)

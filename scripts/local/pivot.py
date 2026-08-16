@@ -59,7 +59,11 @@ DEEPL_MAX_TEXTS_PER_REQUEST = 50
 DEEPL_MAX_REQUEST_BYTES = 128 * 1024
 DEFAULT_SAFE_REQUEST_BYTES = 120 * 1024
 PROVIDER = "deepl"
-PIVOT_POLICY = load_pipeline_config()["pivot"]
+PIPELINE_CONFIG = load_pipeline_config()
+PIVOT_POLICY = PIPELINE_CONFIG["pivot"]
+MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_CONFIG["cleaning"][
+    "max_training_units_per_side"
+]
 
 BASE_COLUMNS = [
     "row_id",
@@ -1068,6 +1072,7 @@ def synthetic_row(
         target_column=direction.target_text_col,
         target_language=target_profile(direction)[0],
         keep_redactions=False,
+        max_units_per_side=MAX_TRAINING_UNITS_PER_SIDE,
     )
     if decision.disposition != "accepted":
         return None, f"pivot_quality:{decision.reason}"

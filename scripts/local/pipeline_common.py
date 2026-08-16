@@ -29,6 +29,12 @@ def load_pipeline_config() -> dict[str, Any]:
         or mt_standard.get("source_xml_immutable") is not True
     ):
         raise RuntimeError("Corpus pipeline has an invalid MT-standard contract")
+    cleaning = value.get("cleaning", {})
+    if (
+        not isinstance(cleaning.get("max_training_units_per_side"), int)
+        or cleaning["max_training_units_per_side"] < 1
+    ):
+        raise RuntimeError("Corpus pipeline has an invalid training-length policy")
     exposure = value.get("exposure_audit", {})
     if exposure.get("tool") != "tame-mt" or exposure.get("version") != "0.2.2":
         raise RuntimeError("Corpus pipeline must pin tame-mt==0.2.2")
@@ -71,6 +77,8 @@ def load_pipeline_config() -> dict[str, Any]:
         or splits["min_punctuated_combined_tokens"]
         > splits["min_combined_tokens"]
         or splits["max_eval_units_per_side"] < 1
+        or splits["max_eval_units_per_side"]
+        > cleaning["max_training_units_per_side"]
         or splits.get("headline_tier") != "in_domain_hard"
     ):
         raise RuntimeError("Corpus pipeline has an invalid hard-split policy")

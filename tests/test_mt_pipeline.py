@@ -787,6 +787,29 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertFalse(bool(candidates.iloc[0]))
 
+    def test_hard_split_rejects_training_length_overflow(self) -> None:
+        raw = self.hard_split_fixture()
+        long_source = " ".join(["word"] * 385)
+        raw.loc[raw.index[0], "formosan_sentence"] = long_source
+        raw.loc[raw.index[0], "formosan_mt_standard"] = long_source
+        with self.assertRaisesRegex(SystemExit, "training limit"):
+            build_hard_split(
+                raw,
+                target_col="english_sentence",
+                test_ratio=0.2,
+                val_ratio=0.1,
+                seed=42,
+                min_formosan_tokens=2,
+                min_target_tokens=2,
+                min_combined_tokens=6,
+                min_punctuated_combined_tokens=5,
+                attempts=10,
+                min_test_rows=0,
+                min_validate_rows=0,
+                ngram_threshold=0.82,
+                registry_in=None,
+            )
+
     def test_compact_sentence_eligibility_uses_joint_content(self) -> None:
         frame = add_mt_contract(
             pd.DataFrame(

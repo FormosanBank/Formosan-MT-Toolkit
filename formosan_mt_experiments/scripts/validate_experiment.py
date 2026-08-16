@@ -36,7 +36,11 @@ from mt_common import (
     write_json,
 )
 
-SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
+PIPELINE_DEFAULTS = load_corpus_pipeline_config()
+SPLIT_DEFAULTS = PIPELINE_DEFAULTS["splits"]
+MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_DEFAULTS["cleaning"][
+    "max_training_units_per_side"
+]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
@@ -529,6 +533,12 @@ def validate_splits(
     lexical_like_eval_rows = int(
         (split.isin(EVAL_SPLITS) & ~candidate).sum()
     )
+    model_length_overflow_rows = int(
+        (
+            keyed["_formosan_tokens"].gt(MAX_TRAINING_UNITS_PER_SIDE)
+            | keyed["_target_tokens"].gt(MAX_TRAINING_UNITS_PER_SIDE)
+        ).sum()
+    )
 
     ratios: dict[str, dict[str, object]] = {}
     ratio_failures: dict[str, dict[str, object]] = {}
@@ -751,6 +761,7 @@ def validate_splits(
         and lexical_eval_rows == 0
         and non_sentence_eval_rows == 0
         and lexical_like_eval_rows == 0
+        and model_length_overflow_rows == 0
         and gloss_translation_rows == 0
         and annotation_gloss_rows == 0
         and target_metadata_rows == 0
@@ -781,6 +792,7 @@ def validate_splits(
         "lexical_eval_rows": lexical_eval_rows,
         "non_sentence_eval_rows": non_sentence_eval_rows,
         "lexical_like_eval_rows": lexical_like_eval_rows,
+        "model_length_overflow_rows": model_length_overflow_rows,
         "gloss_translation_rows": gloss_translation_rows,
         "annotation_gloss_rows": annotation_gloss_rows,
         "target_metadata_rows": target_metadata_rows,
