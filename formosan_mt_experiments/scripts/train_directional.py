@@ -567,6 +567,8 @@ def build_run_contract(args, profile: dict) -> dict:
         or split_validation.get("ngram_jaccard_threshold") != expected_split_policy["character_ngram_jaccard_threshold"]
         or split_validation.get("source_ratio_tolerance") != expected_split_policy["source_ratio_tolerance"]
         or split_validation.get("ratio_basis") != expected_split_policy["ratio_basis"]
+        or split_validation.get("synthetic_eval_rows") != 0
+        or split_validation.get("synthetic_eval_allowed") is not False
     ):
         raise SystemExit("Corpus validation did not use the current experiment split policy")
     if validation.get("provenance_validation", {}).get("mt_standardization") != {

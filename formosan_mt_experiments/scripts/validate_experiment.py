@@ -371,7 +371,7 @@ def validate_splits(
     ],
     max_eval_units_per_side: int = SPLIT_DEFAULTS["max_eval_units_per_side"],
     source_ratio_tolerance: float = SPLIT_DEFAULTS["source_ratio_tolerance"],
-    require_human_eval: bool = False,
+    require_human_eval: bool = True,
     require_document_holdout: bool = False,
     split_report: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -553,6 +553,13 @@ def validate_splits(
             split_report_errors.append("split report is incomplete")
         if split_report.get("ratio_basis") != SPLIT_DEFAULTS["ratio_basis"]:
             split_report_errors.append("split report ratio basis does not match policy")
+        if (
+            split_report.get("synthetic_eval_policy")
+            != SPLIT_DEFAULTS["synthetic_eval_policy"]
+        ):
+            split_report_errors.append(
+                "split report synthetic evaluation policy does not match policy"
+            )
         expected_length_policy = {
             "min_formosan_tokens": min_formosan_tokens,
             "min_target_tokens": min_target_tokens,
@@ -617,8 +624,10 @@ def validate_splits(
     source_distribution_tvd: dict[str, dict[str, float]] = {}
     for language, language_frame in keyed.groupby("lang_code", sort=True):
         language_key = str(language)
+        language_synthetic = pivot_origin.loc[language_frame.index].eq("synthetic")
+        human_language = language_frame[~language_synthetic]
         eligible_language = language_frame[
-            candidate.loc[language_frame.index]
+            candidate.loc[language_frame.index] & ~language_synthetic
         ]
         report_sources = (
             split_report.get("source_strata", {}).get(language_key, {})
@@ -628,7 +637,9 @@ def validate_splits(
         if report_sources:
             all_distribution = Counter(
                 {
-                    str(bucket): int(values["input_rows"])
+                    str(bucket): int(
+                        values.get("human_input_rows", values["input_rows"])
+                    )
                     for bucket, values in report_sources.items()
                 }
             )
@@ -642,7 +653,7 @@ def validate_splits(
                 for bucket, values in report_sources.items()
             }
         else:
-            all_distribution = Counter(language_frame["_source_corpus"])
+            all_distribution = Counter(human_language["_source_corpus"])
             eligible_distribution = Counter(eligible_language["_source_corpus"])
             language_test = max(
                 math.ceil(len(language_frame) * min_test_ratio),
@@ -694,15 +705,19 @@ def validate_splits(
             bucket_key = str(bucket)
             source_split = source_frame["split"].astype(str).str.lower()
             total = int(all_distribution.get(bucket_key, len(source_frame)))
-            eligible_rows = int(candidate.loc[source_frame.index].sum())
+            source_human = ~pivot_origin.loc[source_frame.index].eq("synthetic")
+            eligible_rows = int(
+                (candidate.loc[source_frame.index] & source_human).sum()
+            )
             test_rows = int(source_split.eq("test").sum())
             validate_rows = int(source_split.eq("validate").sum())
             target_validate = validate_targets.get(bucket_key, 0)
             target_test = evaluation_targets.get(bucket_key, 0) - target_validate
-            row_tolerance = (
-                0
-                if report_sources
-                else max(1, math.ceil(total * source_ratio_tolerance))
+            row_tolerance = int(
+                report_sources.get(bucket_key, {}).get(
+                    "assignment_tolerance_rows",
+                    max(1, math.ceil(total * source_ratio_tolerance)),
+                )
             )
             required_test = max(0, target_test - row_tolerance)
             required_validate = max(0, target_validate - row_tolerance)
@@ -714,8 +729,8 @@ def validate_splits(
                 "train": int(source_split.eq("train").sum()),
                 "test": test_rows,
                 "validate": validate_rows,
-                "test_ratio": test_rows / total,
-                "validate_ratio": validate_rows / total,
+                "test_ratio": test_rows / max(total, 1),
+                "validate_ratio": validate_rows / max(total, 1),
                 "target_test": target_test,
                 "target_validate": target_validate,
                 "test_bounds": [required_test, allowed_test],
@@ -733,6 +748,7 @@ def validate_splits(
     train_eval = pairwise_leakage(
         train,
         evaluation,
+        target_by_language=True,
         formosan_ngram_index=formosan_ngram_index,
         target_ngram_index=target_ngram_index,
     )
@@ -951,6 +967,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--require-human-eval",
         action="store_true",
+        default=not split_defaults["synthetic_eval"],
         help="Reject synthetic pivot references in evaluation.",
     )
     parser.add_argument(

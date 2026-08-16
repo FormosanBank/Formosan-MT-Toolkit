@@ -158,28 +158,6 @@ def one_edit_candidate_conflicts(
     )
 
 
-def globally_unsafe_one_edit_candidates(
-    frame: pd.DataFrame,
-    candidate_mask: pd.Series,
-) -> set[int]:
-    candidates = frame[candidate_mask]
-    conflicts = one_edit_candidate_conflicts(
-        frame,
-        candidates,
-        "_target_skeleton",
-        by_language=False,
-        ignore_same_index=True,
-    )
-    conflicts |= one_edit_candidate_conflicts(
-        frame,
-        candidates,
-        "_formosan_skeleton",
-        by_language=True,
-        ignore_same_index=True,
-    )
-    return conflicts
-
-
 def jaccard_prefix(
     grams: frozenset[int],
     threshold: float,
@@ -249,6 +227,7 @@ class NgramSimilarityIndex:
         if reference.empty or candidates.empty:
             return set()
         reference_indexes = {int(index) for index in reference}
+        candidate_indexes = {int(index) for index in candidates}
         reference_by_language: dict[str, set[int]] = {}
         if same_language and not self.by_language:
             for index in reference_indexes:
@@ -257,8 +236,48 @@ class NgramSimilarityIndex:
                     set(),
                 ).add(index)
 
-        conflicts: set[int] = set()
         threshold = self.threshold
+        if len(reference_indexes) < len(candidate_indexes):
+            conflicts: set[int] = set()
+            seen_pairs: set[tuple[int, int]] = set()
+            for reference_index in reference_indexes:
+                reference_grams = self.features.get(reference_index)
+                if reference_grams is None:
+                    continue
+                language = self.languages.at[reference_index]
+                group = language if self.by_language else "_global"
+                postings = self.postings.get(group, {})
+                for gram in self.prefixes[reference_index]:
+                    for candidate_index in postings.get(gram, ()):
+                        pair = (reference_index, candidate_index)
+                        if (
+                            pair in seen_pairs
+                            or candidate_index not in candidate_indexes
+                            or (
+                                same_language
+                                and self.languages.at[candidate_index] != language
+                            )
+                        ):
+                            continue
+                        seen_pairs.add(pair)
+                        candidate_grams = self.features[candidate_index]
+                        if not (
+                            threshold * len(reference_grams)
+                            <= len(candidate_grams)
+                            <= len(reference_grams) / threshold
+                        ):
+                            continue
+                        intersection = len(reference_grams & candidate_grams)
+                        union = (
+                            len(reference_grams)
+                            + len(candidate_grams)
+                            - intersection
+                        )
+                        if union and intersection / union >= threshold:
+                            conflicts.add(candidate_index)
+            return conflicts
+
+        conflicts: set[int] = set()
         for raw_index in candidates:
             index = int(raw_index)
             grams = self.features.get(index)
@@ -385,14 +404,128 @@ def near_candidate_conflicts(
 
 
 def leakage_group_ids(frame: pd.DataFrame) -> pd.Series:
-    """Use stable rows as assignment units; similarity gates enforce hardness.
+    """Group same-language exact and one-edit variants for split assignment."""
+    indexes = list(frame.index)
+    positions = {int(index): position for position, index in enumerate(indexes)}
+    parent = list(range(len(indexes)))
+    sizes = [1] * len(indexes)
 
-    Large source corpora are often serialized as one XML file. Treating the
-    whole file as an indivisible document can place thousands of rows in test
-    and makes source-proportional splitting impossible.
-    """
-    groups, _ = pd.factorize(frame["row_id"].astype(str), sort=False)
+    def find(position: int) -> int:
+        while parent[position] != position:
+            parent[position] = parent[parent[position]]
+            position = parent[position]
+        return position
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if sizes[left_root] < sizes[right_root]:
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        sizes[left_root] += sizes[right_root]
+
+    for _, language_frame in frame.groupby("lang_code", sort=False):
+        for column in ("_formosan_skeleton", "_target_skeleton"):
+            exact_owner: dict[str, int] = {}
+            for index, raw_value in language_frame[column].items():
+                value = str(raw_value)
+                if not value:
+                    continue
+                position = positions[int(index)]
+                previous = exact_owner.get(value)
+                if previous is None:
+                    exact_owner[value] = position
+                else:
+                    union(position, previous)
+
+            deletion_owner: dict[str, int] = {}
+            for value, position in exact_owner.items():
+                for deletion in {
+                    value[:offset] + value[offset + 1 :]
+                    for offset in range(len(value))
+                }:
+                    exact_match = exact_owner.get(deletion)
+                    if exact_match is not None:
+                        union(position, exact_match)
+                    deletion_match = deletion_owner.get(deletion)
+                    if deletion_match is None:
+                        deletion_owner[deletion] = position
+                    else:
+                        union(position, deletion_match)
+
+    roots = [find(position) for position in range(len(indexes))]
+    groups, _ = pd.factorize(pd.Series(roots), sort=False)
     return pd.Series(groups, index=frame.index, dtype="int64")
+
+
+def group_safe_evaluation_mask(
+    frame: pd.DataFrame,
+    human_candidate: pd.Series,
+    group_ids: pd.Series,
+) -> pd.Series:
+    """Keep only human groups that can move intact into evaluation."""
+    fully_eligible = human_candidate.groupby(group_ids).transform("all")
+    one_source = (
+        frame["_source_corpus"]
+        .groupby(group_ids)
+        .transform("nunique")
+        .eq(1)
+    )
+    return human_candidate & fully_eligible & one_source
+
+
+def block_candidate_groups(
+    candidate_mask: pd.Series,
+    group_ids: pd.Series,
+    indexes: set[int],
+) -> set[int]:
+    if not indexes:
+        return set()
+    blocked_groups = set(group_ids.loc[list(indexes)].astype(int))
+    blocked = set(
+        candidate_mask.index[
+            candidate_mask & group_ids.isin(blocked_groups)
+        ].astype(int)
+    )
+    candidate_mask.loc[list(blocked)] = False
+    return blocked
+
+
+def block_candidate_neighborhood(
+    frame: pd.DataFrame,
+    candidate_mask: pd.Series,
+    group_ids: pd.Series,
+    seeds: set[int],
+    *,
+    ngram_threshold: float,
+    ngram_indexes: SplitNgramIndexes,
+    protected_indexes: pd.Index | None = None,
+) -> set[int]:
+    """Block the complete connected n-gram neighborhood of seed rows."""
+    blocked = block_candidate_groups(candidate_mask, group_ids, seeds)
+    frontier = blocked
+    protected = set() if protected_indexes is None else set(protected_indexes)
+    while frontier:
+        remaining = frame[
+            candidate_mask & ~frame.index.isin(protected)
+        ]
+        neighbors = near_candidate_conflicts(
+            frame.loc[list(frontier)],
+            remaining,
+            ngram_threshold=ngram_threshold,
+            target_by_language=True,
+            include_one_edit=False,
+            ngram_indexes=ngram_indexes,
+        )
+        frontier = block_candidate_groups(
+            candidate_mask,
+            group_ids,
+            neighbors,
+        )
+        blocked.update(frontier)
+    return blocked
 
 
 def split_targets(
@@ -485,38 +618,41 @@ def candidate_groups(
     group_ids: pd.Series,
     assignments: dict[int, str],
 ) -> list[GroupCandidate]:
-    language_frame = frame.loc[indexes]
-    language_group_ids = group_ids.loc[language_frame.index]
-    candidates: list[GroupCandidate] = []
-    for group_id, group in language_frame.groupby(language_group_ids, sort=False):
-        group_key = int(group_id)
-        if group_key in assignments:
-            continue
-        eligible = group[candidate_mask.loc[group.index]]
-        if eligible.empty:
-            continue
-        candidates.append(
-            GroupCandidate(
-                group_id=group_key,
-                eligible_rows=len(eligible),
-                total_rows=len(group),
-                non_eval_rows=len(group) - len(eligible),
-                average_tokens=float(
-                    (eligible["_formosan_tokens"] + eligible["_target_tokens"]).mean()
-                    / 2
-                ),
-                synthetic_fraction=float(
-                    eligible.get(
-                        "pivot_origin",
-                        pd.Series("original", index=eligible.index),
-                    )
-                    .astype(str)
-                    .eq("synthetic")
-                    .mean()
-                ),
+    indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
+    if indexes.empty:
+        return []
+    group_values = group_ids.loc[indexes].astype("int64")
+    if assignments:
+        keep = ~group_values.isin(assignments)
+        indexes = indexes[keep.to_numpy()]
+        group_values = group_values.loc[indexes]
+    if indexes.empty:
+        return []
+
+    scores = pd.DataFrame(
+        {
+            "group_id": group_values,
+            "average_tokens": (
+                frame.loc[indexes, "_formosan_tokens"].to_numpy()
+                + frame.loc[indexes, "_target_tokens"].to_numpy()
             )
+            / 2,
+        },
+        index=indexes,
+    )
+    grouped = scores.groupby("group_id", sort=False)["average_tokens"].agg(
+        ["size", "mean"]
+    )
+    return [
+        GroupCandidate(
+            group_id=int(row.Index),
+            eligible_rows=int(row.size),
+            total_rows=int(row.size),
+            non_eval_rows=0,
+            average_tokens=float(row.mean),
         )
-    return candidates
+        for row in grouped.itertuples()
+    ]
 
 
 def choose_groups(
@@ -526,6 +662,7 @@ def choose_groups(
     reserve_rows: int,
     seed: int,
     attempts: int,
+    allow_overshoot: bool = True,
 ) -> set[int]:
     if target_rows <= 0 or not candidates:
         return set()
@@ -550,70 +687,47 @@ def choose_groups(
     }
     total_rows = sum(candidate.eligible_rows for candidate in candidates)
     max_selected_rows = max(0, total_rows - reserve_rows)
-
-    if all(candidate.eligible_rows == 1 for candidate in ordered):
-        selected_rows = min(target_rows, max_selected_rows, len(ordered))
-        return {
-            candidate.group_id
-            for candidate in ordered[:selected_rows]
-        }
-
-    # Keep the best-quality subset for each reachable row count when a future
-    # registry or leakage component groups more than one row together.
-    states: dict[
-        int,
-        tuple[tuple[float, float, float, int, int], tuple[int, ...]],
-    ] = {
-        0: ((0.0, 0.0, 0.0, 0, 0), ()),
-    }
-    for candidate in ordered:
-        weight = candidate.eligible_rows
-        additions: dict[
-            int,
-            tuple[tuple[float, float, float, int, int], tuple[int, ...]],
-        ] = {}
-        for rows, (cost, selected) in list(states.items()):
-            next_rows = rows + weight
-            if next_rows > max_selected_rows:
-                continue
-            next_cost = (
-                cost[0] + candidate.synthetic_fraction * weight,
-                cost[1] + candidate.non_eval_rows,
-                cost[2] - candidate.average_tokens * weight,
-                cost[3] + 1,
-                cost[4] + quality_rank[candidate.group_id],
-            )
-            next_selected = (*selected, candidate.group_id)
-            previous = states.get(next_rows) or additions.get(next_rows)
-            if previous is None or (next_cost, next_selected) < previous:
-                additions[next_rows] = (next_cost, next_selected)
-        for rows, state in additions.items():
-            previous = states.get(rows)
-            if previous is None or state < previous:
-                states[rows] = state
-
-    feasible = [
-        (rows, cost, selected)
-        for rows, (cost, selected) in states.items()
-        if rows >= target_rows
-    ]
-    if not feasible:
-        feasible = [
-            (rows, cost, selected)
-            for rows, (cost, selected) in states.items()
-            if rows > 0
-        ]
-    if not feasible:
+    desired_rows = min(target_rows, max_selected_rows)
+    if desired_rows <= 0:
         return set()
-    _, _, selected = min(
-        feasible,
-        key=lambda item: (
-            abs(item[0] - target_rows),
-            item[1],
-            item[2],
-        )
-    )
-    return set(selected)
+
+    singletons = [group for group in ordered if group.eligible_rows == 1]
+    if len(singletons) >= desired_rows:
+        return {group.group_id for group in singletons[:desired_rows]}
+
+    selected: set[int] = set()
+    selected_rows = 0
+    required_multi_rows = desired_rows - len(singletons)
+    for candidate in ordered:
+        if candidate.eligible_rows == 1 or selected_rows >= required_multi_rows:
+            continue
+        if selected_rows + candidate.eligible_rows > desired_rows:
+            continue
+        selected.add(candidate.group_id)
+        selected_rows += candidate.eligible_rows
+
+    if allow_overshoot and selected_rows < required_multi_rows:
+        remaining = [
+            candidate
+            for candidate in ordered
+            if candidate.eligible_rows > 1
+            and candidate.group_id not in selected
+            and selected_rows + candidate.eligible_rows <= max_selected_rows
+        ]
+        if remaining:
+            candidate = min(
+                remaining,
+                key=lambda group: (
+                    abs(selected_rows + group.eligible_rows - desired_rows),
+                    quality_rank[group.group_id],
+                ),
+            )
+            selected.add(candidate.group_id)
+            selected_rows += candidate.eligible_rows
+
+    singleton_rows = min(len(singletons), desired_rows - selected_rows)
+    selected.update(group.group_id for group in singletons[:singleton_rows])
+    return selected
 
 
 def choose_singleton_groups(
@@ -739,9 +853,18 @@ def source_stratum_targets(
     for language, language_frame in frame.groupby("lang_code", sort=True):
         language_key = str(language)
         eligible = language_frame[candidate_mask.loc[language_frame.index]]
+        synthetic = (
+            language_frame.get(
+                "pivot_origin",
+                pd.Series("original", index=language_frame.index),
+            )
+            .astype(str)
+            .eq("synthetic")
+        )
+        human_frame = language_frame[~synthetic]
         source_rows = {
             str(bucket): len(group)
-            for bucket, group in language_frame.groupby("_source_corpus", sort=True)
+            for bucket, group in human_frame.groupby("_source_corpus", sort=True)
         }
         eligible_capacities = {
             str(bucket): len(group)
@@ -845,10 +968,59 @@ def fill_assignments(
                     reserve_rows=reserve_rows,
                     seed=choice_seed,
                     attempts=attempts,
+                    allow_overshoot=False,
                 )
             for group in groups:
                 assignments[group] = split_name
             current = stratum_group_ids.map(assignments)
+
+
+def fill_language_shortfalls(
+    frame: pd.DataFrame,
+    group_ids: pd.Series,
+    candidate_mask: pd.Series,
+    targets: dict[str, tuple[int, int]],
+    assignments: dict[int, str],
+    *,
+    seed: int,
+    attempts: int,
+) -> None:
+    eligible = frame[candidate_mask]
+    for offset, (language, language_frame) in enumerate(
+        eligible.groupby("lang_code", sort=True)
+    ):
+        language_key = str(language)
+        indexes = language_frame.index
+        language_group_ids = group_ids.loc[indexes]
+        current = language_group_ids.map(assignments)
+        target_test, target_validate = targets[language_key]
+        for split_name, target, reserve_target, seed_offset in (
+            ("validate", target_validate, target_test, 43),
+            ("test", target_test, target_validate, 29),
+        ):
+            missing = max(0, target - int(current.eq(split_name).sum()))
+            other_split = "test" if split_name == "validate" else "validate"
+            reserve_rows = max(
+                0,
+                reserve_target - int(current.eq(other_split).sum()),
+            )
+            groups = choose_groups(
+                candidate_groups(
+                    frame,
+                    indexes,
+                    candidate_mask,
+                    group_ids,
+                    assignments,
+                ),
+                missing,
+                reserve_rows=reserve_rows,
+                seed=seed + offset * 1543 + seed_offset,
+                attempts=attempts,
+                allow_overshoot=False,
+            )
+            for group_id in groups:
+                assignments[group_id] = split_name
+            current = language_group_ids.map(assignments)
 
 
 def exclude_test_conflicts_with_validation(
@@ -877,28 +1049,19 @@ def exclude_test_conflicts_with_validation(
         int(group_id)
         for group_id in group_ids.loc[list(conflicts)]
     }
-    blocked = set(conflicts)
-    if conflicts:
-        remaining = frame[
-            candidate_mask
-            & ~frame.index.isin(validate.index)
-        ]
-        blocked |= near_candidate_conflicts(
-            validate,
-            remaining,
-            ngram_threshold=ngram_threshold,
-            target_by_language=True,
-            include_one_edit=include_one_edit,
-            ngram_indexes=ngram_indexes,
-        )
-    blocked_groups = {
-        int(group_id)
-        for group_id in group_ids.loc[list(blocked)]
-    }
+    blocked = block_candidate_neighborhood(
+        frame,
+        candidate_mask,
+        group_ids,
+        set(conflicts),
+        ngram_threshold=ngram_threshold,
+        ngram_indexes=ngram_indexes,
+        protected_indexes=validate.index,
+    )
+    blocked_groups = set(group_ids.loc[list(blocked)].astype(int))
     for group_id in blocked_groups:
         if assignments.get(group_id) == "test":
             assignments.pop(group_id)
-    candidate_mask.loc[list(blocked)] = False
     blocked_indexes.update(blocked)
     return {
         "conflicting_eval_rows": len(conflicts),
@@ -926,6 +1089,7 @@ def block_evaluation_conflicts_with_training(
         training,
         evaluation,
         ngram_threshold=ngram_threshold,
+        target_by_language=True,
         include_one_edit=include_one_edit,
         ngram_indexes=ngram_indexes,
     )
@@ -933,27 +1097,17 @@ def block_evaluation_conflicts_with_training(
         int(group_id)
         for group_id in group_ids.loc[list(conflicts)]
     }
-    blocked = set(conflicts)
-    if conflicts:
-        conflict_rows = frame.loc[list(conflicts)]
-        remaining = frame[
-            candidate_mask
-            & ~frame.index.isin(conflicts)
-        ]
-        blocked |= near_candidate_conflicts(
-            conflict_rows,
-            remaining,
-            ngram_threshold=ngram_threshold,
-            include_one_edit=include_one_edit,
-            ngram_indexes=ngram_indexes,
-        )
-    blocked_groups = {
-        int(group_id)
-        for group_id in group_ids.loc[list(blocked)]
-    }
+    blocked = block_candidate_neighborhood(
+        frame,
+        candidate_mask,
+        group_ids,
+        set(conflicts),
+        ngram_threshold=ngram_threshold,
+        ngram_indexes=ngram_indexes,
+    )
+    blocked_groups = set(group_ids.loc[list(blocked)].astype(int))
     for group_id in blocked_groups:
         assignments.pop(group_id, None)
-    candidate_mask.loc[list(blocked)] = False
     blocked_indexes.update(blocked)
     return {
         "conflicting_eval_rows": len(conflicts),
@@ -969,7 +1123,7 @@ def overlap_summary(train: pd.DataFrame, evaluation: pd.DataFrame) -> dict:
             "exact",
             (
                 ("formosan", "_formosan_key", True),
-                ("target", "_target_key", False),
+                ("target", "_target_key", True),
                 ("pair", "_pair_key", True),
             ),
         ),
@@ -977,7 +1131,7 @@ def overlap_summary(train: pd.DataFrame, evaluation: pd.DataFrame) -> dict:
             "skeleton",
             (
                 ("formosan", "_formosan_skeleton", True),
-                ("target", "_target_skeleton", False),
+                ("target", "_target_skeleton", True),
                 ("pair", "_pair_skeleton", True),
             ),
         ),
@@ -1076,7 +1230,7 @@ def build_hard_split(
             threshold=ngram_threshold,
         ),
     )
-    synthetic, human_candidate, candidate_mask = (
+    synthetic, human_candidate, _ = (
         evaluation_masks(
             frame,
             min_formosan_tokens=min_formosan_tokens,
@@ -1085,6 +1239,11 @@ def build_hard_split(
             min_punctuated_combined_tokens=min_punctuated_combined_tokens,
             max_eval_units_per_side=max_eval_units_per_side,
         )
+    )
+    candidate_mask = group_safe_evaluation_mask(
+        frame,
+        human_candidate,
+        group_ids,
     )
     source_targets, targets = source_stratum_targets(
         frame,
@@ -1101,18 +1260,19 @@ def build_hard_split(
         test_target, validate_target = targets[str(language)]
         language_reports[str(language)] = {
             "rows_total": len(language_frame),
-            "eligible_sentence_rows": eligible_total,
+            "eligible_sentence_rows": int(human_candidate.loc[index].sum()),
+            "group_safe_human_sentence_rows": eligible_total,
             "eligible_human_sentence_rows": int(
                 human_candidate.loc[index].sum()
             ),
-            "eligible_synthetic_sentence_rows": int(
-                (candidate_mask.loc[index] & synthetic.loc[index]).sum()
-            ),
+            "eligible_synthetic_sentence_rows": 0,
             "synthetic_rows": int(synthetic.loc[index].sum()),
             "lexical_rows": int(
                 language_frame["row_type"].isin({"lexeme", "morpheme"}).sum()
             ),
-            "evaluation_ineligible_rows": len(language_frame) - eligible_total,
+            "evaluation_ineligible_rows": int(
+                len(language_frame) - human_candidate.loc[index].sum()
+            ),
             "target_test_rows": test_target,
             "target_validate_rows": validate_target,
         }
@@ -1124,12 +1284,22 @@ def build_hard_split(
         registry_in,
     )
     registry_groups = set(assignments)
-    one_edit_blocked_indexes = globally_unsafe_one_edit_candidates(
-        frame,
-        candidate_mask,
+    ngram_train_blocked_indexes = near_candidate_conflicts(
+        frame[~candidate_mask],
+        frame[candidate_mask],
+        ngram_threshold=ngram_threshold,
+        target_by_language=True,
+        ngram_indexes=ngram_indexes,
     )
     effective_candidate_mask = candidate_mask.copy()
-    effective_candidate_mask.loc[list(one_edit_blocked_indexes)] = False
+    ngram_train_blocked_indexes = block_candidate_neighborhood(
+        frame,
+        effective_candidate_mask,
+        group_ids,
+        ngram_train_blocked_indexes,
+        ngram_threshold=ngram_threshold,
+        ngram_indexes=ngram_indexes,
+    )
     validate_test_blocked_indexes: set[int] = set()
     train_eval_blocked_indexes: set[int] = set()
     near_iterations: list[dict[str, int]] = []
@@ -1159,12 +1329,23 @@ def build_hard_split(
             seed=seed,
             attempts=attempts,
         )
+        fill_language_shortfalls(
+            frame,
+            group_ids,
+            effective_candidate_mask,
+            targets,
+            assignments,
+            seed=seed,
+            attempts=attempts,
+        )
         split = materialize_splits(
             frame,
             group_ids,
             effective_candidate_mask,
             assignments,
         )
+        # Exact and one-edit variants share a group and cannot cross splits.
+        # Iterative stabilization only needs to resolve the wider n-gram gate.
         iteration = exclude_test_conflicts_with_validation(
             frame,
             split,
@@ -1243,6 +1424,7 @@ def build_hard_split(
         train,
         evaluation,
         ngram_threshold=ngram_threshold,
+        target_by_language=True,
         ngram_indexes=ngram_indexes,
     )
     validate_test_near = near_candidate_conflicts(
@@ -1331,10 +1513,19 @@ def build_hard_split(
         language_key = str(language)
         source_reports[language_key] = {}
         source_shortfalls[language_key] = {}
+        language_synthetic = (
+            language_frame.get(
+                "pivot_origin",
+                pd.Series("original", index=language_frame.index),
+            )
+            .astype(str)
+            .eq("synthetic")
+        )
+        human_language = language_frame[~language_synthetic]
         eligible_language = language_frame[
             candidate_mask.loc[language_frame.index]
         ]
-        all_distribution = Counter(language_frame["_source_corpus"])
+        all_distribution = Counter(human_language["_source_corpus"])
         split_distributions = {
             split_name: Counter(
                 eligible_language[
@@ -1373,16 +1564,28 @@ def build_hard_split(
             )
             counts = Counter(source_frame["split"])
             eligible_counts = Counter(eligible_source["split"])
-            synthetic_source = eligible_source.get(
+            synthetic_source = source_frame.get(
                 "pivot_origin",
-                pd.Series("original", index=eligible_source.index),
+                pd.Series("original", index=source_frame.index),
             ).astype(str).eq("synthetic")
+            human_source_rows = int((~synthetic_source).sum())
+            group_sizes = group_ids.loc[similarity_safe_source.index].value_counts()
+            largest_group = int(group_sizes.max()) if not group_sizes.empty else 1
+            assignment_tolerance = max(
+                2,
+                math.ceil(
+                    human_source_rows * SPLIT_DEFAULTS["source_ratio_tolerance"]
+                ),
+                largest_group - 1,
+            )
             source_reports[language_key][bucket_key] = {
                 "input_rows": len(source_frame),
+                "human_input_rows": human_source_rows,
+                "synthetic_input_rows": int(synthetic_source.sum()),
                 "eligible_sentence_rows": len(eligible_source),
                 "similarity_safe_sentence_rows": len(similarity_safe_source),
-                "eligible_human_rows": int((~synthetic_source).sum()),
-                "eligible_synthetic_rows": int(synthetic_source.sum()),
+                "eligible_human_rows": len(eligible_source),
+                "eligible_synthetic_rows": 0,
                 "train_rows": counts["train"],
                 "test_rows": counts["test"],
                 "validate_rows": counts["validate"],
@@ -1390,9 +1593,10 @@ def build_hard_split(
                 "eligible_train_rows": eligible_counts["train"],
                 "target_test_rows": target_test,
                 "target_validate_rows": target_validate,
-                "test_fraction": counts["test"] / max(len(source_frame), 1),
+                "assignment_tolerance_rows": assignment_tolerance,
+                "test_fraction": counts["test"] / max(human_source_rows, 1),
                 "validate_fraction": (
-                    counts["validate"] / max(len(source_frame), 1)
+                    counts["validate"] / max(human_source_rows, 1)
                 ),
                 "test_fraction_of_eligible_sentences": (
                     counts["test"] / max(len(eligible_source), 1)
@@ -1401,24 +1605,29 @@ def build_hard_split(
                     counts["validate"] / max(len(eligible_source), 1)
                 ),
                 "synthetic_test_rows": int(
-                    (synthetic_source & eligible_source["split"].eq("test")).sum()
+                    (
+                        synthetic_source
+                        & source_frame["split"].eq("test")
+                    ).sum()
                 ),
                 "synthetic_validate_rows": int(
                     (
                         synthetic_source
-                        & eligible_source["split"].eq("validate")
+                        & source_frame["split"].eq("validate")
                     ).sum()
                 ),
             }
             if (
-                counts["test"] != target_test
-                or counts["validate"] != target_validate
+                abs(counts["test"] - target_test) > assignment_tolerance
+                or abs(counts["validate"] - target_validate)
+                > assignment_tolerance
             ):
                 source_shortfalls[language_key][bucket_key] = {
                     "test": counts["test"],
                     "target_test": target_test,
                     "validate": counts["validate"],
                     "target_validate": target_validate,
+                    "tolerance": assignment_tolerance,
                 }
         if not source_shortfalls[language_key]:
             source_shortfalls.pop(language_key)
@@ -1464,8 +1673,8 @@ def build_hard_split(
         "blocked_validate_test_candidate_rows": len(
             validate_test_blocked_indexes
         ),
-        "blocked_global_one_edit_candidate_rows": len(
-            one_edit_blocked_indexes
+        "blocked_permanent_train_candidate_rows": len(
+            ngram_train_blocked_indexes
         ),
         "blocked_train_evaluation_candidate_rows": len(
             train_eval_blocked_indexes
@@ -1489,6 +1698,16 @@ def build_hard_split(
             )
             for split_name in ("test", "validate")
         },
+        "synthetic_eval_policy": SPLIT_DEFAULTS["synthetic_eval_policy"],
+        "synthetic_train_rows": int(
+            (
+                output.get(
+                    "pivot_origin",
+                    pd.Series("original", index=output.index),
+                ).eq("synthetic")
+                & output["split"].eq("train")
+            ).sum()
+        ),
         "mt_ineligible_eval_rows": int(
             (
                 ~bool_series(
@@ -1569,6 +1788,7 @@ def validate_report(report: dict) -> None:
     if report.get("complete") is not True:
         failures["complete"] = report.get("complete")
     for key in (
+        "synthetic_eval_rows",
         "lexeme_eval_rows",
         "lexical_like_eval_rows",
         "mt_ineligible_eval_rows",

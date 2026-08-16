@@ -26,8 +26,7 @@ bundle. Before model setup, `scripts/validate_experiment.py` verifies:
 - the corpus, profile, standardization namespace, and artifact hashes;
 - 5/10 validation/test proportions from all deduplicated pairs in
   every language, with capacity-aware source-corpus representation;
-- sentence references only in evaluation, preferring human rows before valid
-  synthetic pivot fallbacks;
+- human sentence references only in evaluation; synthetic pivots are train-only;
 - no lexical, morpheme, short, or ambiguous-normalization
   evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts

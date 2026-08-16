@@ -127,9 +127,9 @@ and hashes belong in these generated manifests, not in source documentation.
 The build fails when acquisition is incomplete, row accounting does not
 conserve inputs, unresolved pivots remain, evaluation contains lexical-like
 rows, language/source split ratios are missed, leakage gates fail, or release
-hashes cannot be written. Human sentence references are preferred, but a
-validated synthetic sentence may be used when a source stratum lacks enough
-human parallel rows.
+hashes cannot be written. Evaluation requires human sentence references;
+synthetic sentences are always train-only. Human sources absorb the full
+evaluation quota.
 
 ## Authorized Nonpublic Sources
 

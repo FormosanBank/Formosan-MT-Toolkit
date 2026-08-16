@@ -1228,10 +1228,15 @@ class LeakageTests(unittest.TestCase):
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertTrue(evaluation["row_type"].eq("sentence").all())
 
-    def test_hard_split_uses_synthetic_sentences_only_as_fallback(self) -> None:
+    def test_synthetic_only_source_is_train_only(self) -> None:
         raw = self.hard_split_fixture()
-        sentence_indexes = raw.index[raw["row_type"].eq("sentence")]
-        raw.loc[sentence_indexes[2:], "pivot_origin"] = "synthetic"
+        synthetic = raw["pivot_origin"].eq("synthetic")
+        raw.loc[synthetic, "source"] = (
+            "FormosanBank/Corpora/PivotOnly/XML/synthetic.xml"
+        )
+        raw.loc[~synthetic, "source"] = (
+            "FormosanBank/Corpora/Human/XML/human.xml"
+        )
         keyed = add_normalized_columns(
             raw,
             target_col="english_sentence",
@@ -1248,15 +1253,66 @@ class LeakageTests(unittest.TestCase):
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
             attempts=20,
-            min_test_rows=5,
-            min_validate_rows=2,
-            ngram_threshold=0.82,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.95,
             registry_in=None,
         )
-        evaluation = output[output["split"].isin({"test", "validate"})]
-        self.assertGreater(report["synthetic_eval_rows"], 0)
-        self.assertTrue(evaluation["row_type"].eq("sentence").all())
-        self.assertEqual(report["lexical_like_eval_rows"], 0)
+
+        pivot_source = report["source_strata"]["ami"]["PivotOnly"]
+        self.assertEqual(pivot_source["target_test_rows"], 0)
+        self.assertEqual(pivot_source["target_validate_rows"], 0)
+        self.assertEqual(pivot_source["synthetic_input_rows"], 60)
+        self.assertTrue(
+            output.loc[output["pivot_origin"].eq("synthetic"), "split"]
+            .eq("train")
+            .all()
+        )
+        self.assertEqual(report["split_counts"]["test"], 30)
+        self.assertEqual(report["split_counts"]["validate"], 15)
+        self.assertEqual(report["synthetic_eval_rows"], 0)
+        validation = validate_splits(
+            output,
+            target_col="english_sentence",
+            min_test_ratio=0.10,
+            min_validate_ratio=0.05,
+            min_test_rows=0,
+            min_validate_rows=0,
+            ngram_threshold=0.95,
+            min_formosan_tokens=1,
+            min_target_tokens=1,
+            min_combined_tokens=2,
+            min_punctuated_combined_tokens=2,
+            split_report=report,
+        )
+        self.assertTrue(validation["ok"], validation)
+
+    def test_hard_split_fails_when_human_evaluation_capacity_is_too_small(self) -> None:
+        raw = self.hard_split_fixture()
+        sentence_indexes = raw.index[raw["row_type"].eq("sentence")]
+        raw.loc[sentence_indexes[2:], "pivot_origin"] = "synthetic"
+        keyed = add_normalized_columns(
+            raw,
+            target_col="english_sentence",
+            target_lang="english",
+        )
+        with self.assertRaisesRegex(SystemExit, "eligible sentences"):
+            build_hard_split(
+                keyed,
+                target_col="english_sentence",
+                test_ratio=0.10,
+                val_ratio=0.05,
+                seed=42,
+                min_formosan_tokens=1,
+                min_target_tokens=1,
+                min_combined_tokens=2,
+                min_punctuated_combined_tokens=2,
+                attempts=20,
+                min_test_rows=5,
+                min_validate_rows=2,
+                ngram_threshold=0.82,
+                registry_in=None,
+            )
 
     def test_unsafe_evaluation_candidates_are_replaced_not_excluded(self) -> None:
         raw = self.hard_split_fixture()
@@ -1307,12 +1363,20 @@ class LeakageTests(unittest.TestCase):
         )
 
         self.assertTrue(report["complete"])
-        self.assertGreater(report["blocked_global_one_edit_candidate_rows"], 0)
+        language = report["languages"]["ami"]
+        self.assertLess(
+            language["group_safe_human_sentence_rows"],
+            language["eligible_human_sentence_rows"],
+        )
         self.assertTrue(excluded.empty)
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
+        self.assertTrue(
+            output[output["pivot_origin"].eq("synthetic")]["split"]
+            .eq("train")
+            .all()
+        )
         self.assertEqual(len(output), report["deduplicated_input_rows"])
-        language = report["languages"]["ami"]
         self.assertGreaterEqual(
             language["test_fraction_of_all_input_rows"],
             0.10,
@@ -1382,13 +1446,14 @@ class LeakageTests(unittest.TestCase):
             min_validate_rows=0,
             ngram_threshold=0.82,
         )
-        self.assertTrue(validation["ok"], validation)
+        self.assertFalse(validation["ok"], validation)
         self.assertEqual(validation["synthetic_eval_rows"], 1)
+        self.assertFalse(validation["synthetic_eval_allowed"])
         self.assertGreater(
             validation["train_evaluation"]["document_overlap"],
             0,
         )
-        strict = validate_splits(
+        diagnostic = validate_splits(
             frame,
             target_col="english_sentence",
             min_test_ratio=0,
@@ -1400,10 +1465,9 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            require_human_eval=True,
-            require_document_holdout=True,
+            require_human_eval=False,
         )
-        self.assertFalse(strict["ok"])
+        self.assertTrue(diagnostic["ok"], diagnostic)
 
     def test_validate_test_target_overlap_is_task_conditioned(self) -> None:
         frame = pd.DataFrame(

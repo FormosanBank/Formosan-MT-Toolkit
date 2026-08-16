@@ -60,8 +60,11 @@ def load_pipeline_config() -> dict[str, Any]:
         not all(isinstance(ratio, (int, float)) and 0 <= ratio <= 1 for ratio in ratios)
         or abs(sum(ratios) - 1.0) > 1e-9
         or splits.get("lexical_eval") is not False
+        or splits.get("synthetic_eval") is not False
         or splits.get("synthetic_eval_policy")
-        != "human_preferred_source_stratified_fallback"
+        != "human_only_source_stratified"
+        or splits.get("ratio_basis")
+        != "all_pairs_by_language_human_rows_by_source"
         or not isinstance(splits.get("source_ratio_tolerance"), (int, float))
         or not 0 <= splits["source_ratio_tolerance"] <= 1
         or any(

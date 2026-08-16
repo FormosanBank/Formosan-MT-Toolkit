@@ -32,7 +32,7 @@
   },
   "pivot": {
     "require_complete": true,
-    "synthetic_eval": true,
+    "synthetic_eval": false,
     "eligible_row_types": ["sentence"],
     "require_mt_eval_eligible": true,
     "exclude_lexical_sources": true,
@@ -46,7 +46,7 @@
     "test_ratio": 0.10,
     "min_test_rows": 0,
     "min_validate_rows": 0,
-    "character_ngram_jaccard_threshold": 0.82,
+    "character_ngram_jaccard_threshold": 0.95,
     "source_ratio_tolerance": 0.02,
     "min_formosan_tokens": 2,
     "min_target_tokens": 2,
@@ -54,9 +54,9 @@
     "min_punctuated_combined_tokens": 5,
     "max_eval_units_per_side": 384,
     "lexical_eval": false,
-    "synthetic_eval": true,
-    "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
-    "ratio_basis": "all_deduplicated_pairs_by_language_and_source_corpus",
+    "synthetic_eval": false,
+    "synthetic_eval_policy": "human_only_source_stratified",
+    "ratio_basis": "all_pairs_by_language_human_rows_by_source",
     "headline_tier": "in_domain_hard"
   },
   "exposure_audit": {

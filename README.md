@@ -110,10 +110,9 @@ Production builds fail unless all of these conditions hold:
   as train-only lexemes; ambiguous lexical structures and translations are
   quarantined; source provenance never determines row eligibility;
 - each language reserves 10% of all deduplicated pairs for test and 5% for
-  validation, using only eligible sentence rows; source-corpus targets
-  follow the same proportions where eligible capacity permits;
-- evaluation references are sentence-level, with human rows preferred before
-  validated synthetic pivot rows;
+  validation, using only eligible human sentence rows; human source-corpus
+  representation is balanced where group capacity permits;
+- synthetic pivot rows are always train-only;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;
 - exact TAME-MT source, target, and pair exposure at 0.95 is zero;

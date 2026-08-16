@@ -28,9 +28,9 @@
     "min_punctuated_combined_tokens": 5,
     "max_eval_units_per_side": 384,
     "source_ratio_tolerance": 0.02,
-    "ratio_basis": "all_deduplicated_pairs_by_language_and_source_corpus",
-    "synthetic_eval_policy": "human_preferred_source_stratified_fallback",
-    "character_ngram_jaccard_threshold": 0.82,
+    "ratio_basis": "all_pairs_by_language_human_rows_by_source",
+    "synthetic_eval_policy": "human_only_source_stratified",
+    "character_ngram_jaccard_threshold": 0.95,
     "tiers": ["in_domain_hard"],
     "headline_tier": "in_domain_hard"
   },

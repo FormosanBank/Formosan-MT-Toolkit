@@ -170,18 +170,16 @@ pairwise split labels and builds the model-facing split. It:
 2. locks lexical, morpheme, ambiguous-normalization, MT-ineligible, and
    lexical-like rows out of evaluation;
 3. reserves 5/10 validation/test rows from all deduplicated pairs in every
-   language, then apportions eligible sentences by source with deterministic,
-   capacity-aware Hamilton allocation;
-4. prefers human sentence references within each source stratum and uses
-   validated synthetic pivot sentences only when human coverage is insufficient;
-5. computes normalized and punctuation/spacing-skeleton keys;
-6. removes held-out candidates with one-edit or character 4-gram Jaccard
+   language, but fills those quotas only with eligible human sentences;
+4. keeps every synthetic pivot row in training and balances evaluation across
+   human source corpora where indivisible leakage groups permit;
+5. keeps exact and one-edit variants together, then removes held-out candidates
+   at or above 0.95 character 4-gram Jaccard
    conflicts, blocks their full current similarity neighborhood, then refills
-   evaluation from clean candidates; test/validation
-   separation is target-language-task conditioned, with stricter cross-language
-   reuse retained as a diagnostic; no training rows are discarded to create
-   the benchmark;
-7. fails if language or source-corpus ratios miss their deterministic targets.
+   evaluation from clean candidates; target overlap is conditioned by Formosan
+   language, and no training rows are discarded to create the benchmark;
+6. fails if a language misses its exact quota or a source misses its declared
+   capacity-aware tolerance.
 
 `config/corpus_pipeline.json` is the canonical split policy. Corpus builds,
 independent validation, and model profiles load the same values; profile drift
@@ -190,8 +188,8 @@ fails before training.
 The ratio denominator is every deduplicated pair in each language. Test reserves
 10% and validation reserves 5% of that total, but both splits are populated
 only with evaluation-eligible sentences. Source-corpus targets use the same
-all-pair denominator and are constrained by each source's eligible capacity;
-unfillable lexical-source shares are redistributed within the language.
+human-source distribution and are constrained by each source's eligible
+capacity; unfillable shares are redistributed within the language.
 Document overlap is reported as a diagnostic because some source corpora
 serialize thousands of unrelated rows in one XML file; treating that file as an
 indivisible split unit would recreate the source imbalance this stage prevents.
