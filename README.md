@@ -122,6 +122,17 @@ See [Pipeline Architecture](docs/ARCHITECTURE.md) for stage ownership and
 [Public Corpus Rebuild](docs/NO_BIBLE_CORPUS_REBUILD.md) for rebuild and cache
 details.
 
+Package the completed public build in the stable Hugging Face dataset format:
+
+```bash
+python scripts/local/publish_huggingface_dataset.py \
+  --build-root corpus_builds/public_no_bible \
+  --output-dir /tmp/formosan-mt-hf
+```
+
+Add `--upload` to replace the files in `FormosanBank/formosan-mt` after
+reviewing the generated card, metadata, and checksums.
+
 ## Training
 
 The `formosan_mt_experiments/` package trains four unidirectional models:
