@@ -87,6 +87,67 @@ CHINESE_STRONG_GLOSS_BOUNDARY_RE = re.compile(
 CHINESE_SHORT_GLOSS_BOUNDARY_RE = re.compile(
     r"[\u3400-\u9FFF]-[\u3400-\u9FFF]"
 )
+ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+ENGLISH_ANCHOR_WORDS = frozenset(
+    """
+    a an and are as at be because been being but by can could did do does for
+    from had has have he her here hers him his how i if in into is it its may
+    me might must my no nor not of on or our ours she should so than that the
+    their theirs them then there these they this those through to under up us
+    was we were what when where which who whom whose why will with would yes
+    you your yours
+    """.split()
+)
+FORMOSAN_SPECIFIC_TARGET_RE = re.compile(
+    r"[ɐɑɒɓɔɕɖɗəɛɜɣɨɪɬɮɯɲŋɳɴɾʀʂʃʈʔʉʋʐʑʒθχʰ]",
+    re.IGNORECASE,
+)
+MALFORMED_ESCAPE_RE = re.compile(r"\\+(?=[A-Za-z\"“”])")
+REPEATED_CLOSING_QUOTE_RE = re.compile(r"[\"”]{2,}\s*$")
+ENGLISH_GRAMMAR_PHRASE_RE = re.compile(
+    r"\b(?:case\s+marker|"
+    r"(?:nominative|oblique|genitive|accusative|ergative)\s+(?:case|marker)|"
+    r"(?:actor|agent|patient|object|subject|locative)\s+focus)\b",
+    re.IGNORECASE,
+)
+ENGLISH_ROOT_ANALYSIS_RE = re.compile(r"\bthe\s+root\s+is\b", re.IGNORECASE)
+ENGLISH_GLOSS_CODE_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(map(re.escape, GLOSS_TAGS), key=len, reverse=True)) + r")\b"
+)
+MORPHEME_ANALYSIS_RE = re.compile(
+    r"(?<!\w)[A-Za-z'’()]+(?:-[A-Za-z'’()]+)+\s*:"
+)
+CHINESE_GRAMMAR_NOTE_RE = re.compile(
+    r"[（(][^）)\n]{0,300}(?:"
+    r"主事焦點|受事焦點|處所焦點|參考焦點|工具焦點|焦點句|"
+    r"主格標記|斜格標記|屬格標記|關係子句|"
+    r"主事者|受事者|受動者|使動者|受役者|"
+    r"動詞\s*[-－—]|語法分析|詞根(?:是|為)"
+    r")"
+)
+DELIMITER_PAIRS = (
+    ("(", ")"),
+    ("[", "]"),
+    ("{", "}"),
+    ("（", "）"),
+    ("【", "】"),
+)
+FORMOSAN_INITIAL_CLUSTERS = (
+    "cm",
+    "cn",
+    "kn",
+    "mn",
+    "mq",
+    "nq",
+    "pd",
+    "pq",
+    "spg",
+    "tk",
+    "tq",
+)
+COMMON_ENGLISH_INITIAL_CLUSTERS = frozenset(
+    {"chr", "phr", "sch", "scr", "shr", "spl", "spr", "squ", "str", "thr"}
+)
 
 
 @dataclass(frozen=True)
@@ -233,6 +294,8 @@ def target_gloss_reason(
     text = str(value)
     if has_annotation_gloss_structure(text):
         return "target_annotation_gloss"
+    if has_appended_linguistic_analysis(text, target_language=target_language):
+        return "target_linguistic_analysis"
     if target_language == "chinese":
         if (
             CHINESE_LATIN_GLOSS_BOUNDARY_RE.search(text)
@@ -245,6 +308,70 @@ def target_gloss_reason(
         ):
             return "target_annotation_gloss"
     return ""
+
+
+def has_appended_linguistic_analysis(value: str, *, target_language: str) -> bool:
+    """Detect grammatical analysis appended to an otherwise free translation."""
+    if target_language == "chinese":
+        return CHINESE_GRAMMAR_NOTE_RE.search(value) is not None
+    if target_language != "english":
+        return False
+
+    gloss_codes = ENGLISH_GLOSS_CODE_RE.findall(value)
+    return bool(
+        ENGLISH_GRAMMAR_PHRASE_RE.search(value)
+        or len(gloss_codes) >= 2
+        or (gloss_codes and MORPHEME_ANALYSIS_RE.search(value))
+        or (
+            ENGLISH_ROOT_ANALYSIS_RE.search(value)
+            and (gloss_codes or MORPHEME_ANALYSIS_RE.search(value))
+        )
+        or len(MORPHEME_ANALYSIS_RE.findall(value)) >= 2
+    )
+
+
+def has_malformed_escaping(value: str) -> bool:
+    """Detect literal escape debris and duplicated closing quotation marks."""
+    return bool(
+        MALFORMED_ESCAPE_RE.search(value)
+        or REPEATED_CLOSING_QUOTE_RE.search(value)
+    )
+
+
+def has_unbalanced_target_delimiters(value: str) -> bool:
+    """Detect delimiter imbalance without treating it as automatic data loss."""
+    if any(value.count(opening) != value.count(closing) for opening, closing in DELIMITER_PAIRS):
+        return True
+    return value.count('"') % 2 == 1 or value.count("“") != value.count("”")
+
+
+def english_language_quality(value: str) -> tuple[str, tuple[str, ...]]:
+    """Return a quarantine reason or train-only flag for doubtful English."""
+    words = [match.group(0).casefold() for match in ENGLISH_WORD_RE.finditer(value)]
+    anchor_candidates = {re.split(r"['’]", word, maxsplit=1)[0] for word in words}
+    if len(words) < 4 or ENGLISH_ANCHOR_WORDS.intersection(anchor_candidates):
+        return "", ()
+    orthography_score = 0
+    for word in dict.fromkeys(words):
+        if re.search(r"q(?!u)|q$", word):
+            orthography_score += 1
+        if word.startswith(FORMOSAN_INITIAL_CLUSTERS):
+            orthography_score += 1
+        initial_cluster = re.match(r"^[bcdfghjklmnpqrstvwxz]{3,}", word)
+        if (
+            initial_cluster
+            and initial_cluster.group(0)[:3] not in COMMON_ENGLISH_INITIAL_CLUSTERS
+        ):
+            orthography_score += 1
+        if "'" in word or "’" in word:
+            if not re.search(r"(?:'s|'t|'re|'ve|'ll|'d|'m|’s|’t|’re|’ve|’ll|’d|’m)$", word):
+                orthography_score += 1
+    if orthography_score >= 2 or (
+        FORMOSAN_SPECIFIC_TARGET_RE.search(value)
+        and has_unbalanced_target_delimiters(value)
+    ):
+        return "english_target_language_mismatch", ()
+    return "", ("english_language_uncertain",)
 
 
 def is_explicit_gloss_code(value: str) -> bool:
@@ -484,6 +611,10 @@ def quality_decision(
     )
     if gloss_reason:
         return QualityDecision("quarantine", gloss_reason)
+    if has_malformed_escaping(source):
+        return QualityDecision("quarantine", "malformed_source_escaping")
+    if has_malformed_escaping(target):
+        return QualityDecision("quarantine", "malformed_target_escaping")
     if MISSING_TRANSLATION_RE.match(source) or MISSING_TRANSLATION_RE.match(target):
         return QualityDecision("rejected", "missing_translation_marker")
     if is_only_punctuation_or_symbols(source) or is_only_punctuation_or_symbols(target):
@@ -510,6 +641,10 @@ def quality_decision(
             return QualityDecision("quarantine", "english_target_script_mismatch")
         if target_scripts["cjk"] >= 2 and target_scripts["cjk"] > max(2, target_scripts["latin"] // 2):
             return QualityDecision("quarantine", "english_target_script_mismatch")
+        language_reason, language_flags = english_language_quality(target)
+        if language_reason:
+            return QualityDecision("quarantine", language_reason)
+        flags.extend(language_flags)
     elif target_language == "chinese":
         if target_scripts["kana_hangul"]:
             return QualityDecision("quarantine", "chinese_target_script_mismatch")
@@ -531,6 +666,8 @@ def quality_decision(
     if alignment_reason:
         return QualityDecision("quarantine", alignment_reason)
     flags.extend(alignment_flags)
+    if has_unbalanced_target_delimiters(target):
+        flags.append("unbalanced_target_delimiters")
     fertility = fertility_reason(source, target, target_language, row_type)
     if fertility:
         return QualityDecision("quarantine", fertility)

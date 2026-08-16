@@ -7,7 +7,7 @@
     "qc_revision": "acc3ec9f3137a59b9661e446a750ee1606720394"
   },
   "cleaning": {
-    "profile": "formosan-mt-v3.3",
+    "profile": "formosan-mt-v3.4",
     "unicode_normalization": "NFC",
     "require_standard_form": true,
     "preserve_structural_row_type": true,
@@ -40,9 +40,9 @@
   },
   "splits": {
     "seed": 42,
-    "train_ratio": 0.9,
-    "validate_ratio": 0.025,
-    "test_ratio": 0.075,
+    "train_ratio": 0.85,
+    "validate_ratio": 0.05,
+    "test_ratio": 0.10,
     "min_test_rows": 0,
     "min_validate_rows": 0,
     "character_ngram_jaccard_threshold": 0.82,

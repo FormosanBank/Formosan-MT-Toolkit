@@ -23,7 +23,7 @@ import fetch_xml  # noqa: E402
 from build_big_corpus import (  # noqa: E402
     discover_inputs,
     estimated_output_bytes,
-    require_gloss_free,
+    require_clean_pairs,
     write_csv_atomic,
 )
 from build_mt_corpus import (  # noqa: E402
@@ -1569,6 +1569,130 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertFalse(has_annotation_gloss_structure("The ISO-639 language code."))
         self.assertFalse(has_annotation_gloss_structure("a state-of-the-art method"))
 
+    def test_linguistic_analyses_are_quarantined(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("na pa cun ku vuvu nami."),
+                "row_id": "english-analysis",
+                "ami": "na pa cun ku vuvu nami.",
+                "english": (
+                    "I saw our elders. na-pa-cun: perfective (PRF), nominative "
+                    "(NOM), oblique (OBL); the root is cun"
+                ),
+                "row_type": "sentence",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("maolah ku lamit anini."),
+                "row_id": "normal-root",
+                "ami": "maolah ku lamit anini.",
+                "english": "The root is visible beside the road.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(pd.DataFrame(rows), "ami", "english")
+        accepted, rejected, counts = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(set(accepted["row_id"]), {"normal-root"})
+        self.assertEqual(
+            rejected.iloc[0]["disposition_reason"],
+            "target_linguistic_analysis",
+        )
+        self.assertEqual(counts["quarantine:target_linguistic_analysis"], 1)
+
+    def test_english_language_and_escaping_rules_preserve_uncertain_training_rows(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("phpure ppuqun bubu rudan de."),
+                "row_id": "formosan-target",
+                "ami": "phpure ppuqun bubu rudan de.",
+                "english": "ini pdai cmuwaq iyu",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+            {
+                **mt_contract_fields("malo ku lalan anini."),
+                "row_id": "uncertain-english",
+                "ami": "malo ku lalan anini.",
+                "english": "Heavy rainfall flooded downtown streets yesterday.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("mahapinang ci aki anini."),
+                "row_id": "unbalanced-quote",
+                "ami": "mahapinang ci aki anini.",
+                "english": 'He said "hello.',
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("masadak ci Caʉpʉ anini."),
+                "row_id": "english-with-formosan-name",
+                "ami": "masadak ci Caʉpʉ anini.",
+                "english": "It's Caʉpʉ's.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("kmal ku taw anini."),
+                "row_id": "repeated-english-word",
+                "ami": "kmal ku taw anini.",
+                "english": "Knock, knock, knock, knock.",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("masadak ci ama anini."),
+                "row_id": "bad-target-escape",
+                "ami": "masadak ci ama anini.",
+                "english": r"Dad said, \Don't say anything first.",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+            {
+                **mt_contract_fields('malu ku lalan.""'),
+                "row_id": "bad-source-quote",
+                "ami": 'malu ku lalan.""',
+                "english": "The road is good today.",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(pd.DataFrame(rows), "ami", "english")
+        accepted, rejected, counts = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="english",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(
+            set(accepted["row_id"]),
+            {
+                "uncertain-english",
+                "unbalanced-quote",
+                "english-with-formosan-name",
+                "repeated-english-word",
+            },
+        )
+        flags = dict(zip(accepted["row_id"], accepted["quality_flags"], strict=True))
+        self.assertIn("english_language_uncertain", flags["uncertain-english"])
+        self.assertIn("unbalanced_target_delimiters", flags["unbalanced-quote"])
+        reasons = dict(zip(rejected["row_id"], rejected["disposition_reason"], strict=True))
+        self.assertEqual(reasons["formosan-target"], "english_target_language_mismatch")
+        self.assertEqual(reasons["bad-target-escape"], "malformed_target_escaping")
+        self.assertEqual(reasons["bad-source-quote"], "malformed_source_escaping")
+        self.assertEqual(counts["quarantine:english_target_language_mismatch"], 1)
+
     def test_chinese_gloss_and_obvious_alignment_failures_are_quarantined(self) -> None:
         rows = [
             {
@@ -1598,6 +1722,24 @@ class ExtractionAndCleaningTests(unittest.TestCase):
                 "translation_kind": "free",
                 "source": "Stories/example.xml",
             },
+            {
+                **mt_contract_fields("maolah ku tamdaw anini."),
+                "row_id": "chinese-analysis",
+                "ami": "maolah ku tamdaw anini.",
+                "chinese": "那些梅子很好吃。（受事焦點：動詞-主事者-受事者）",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("mafu ku lima nira."),
+                "row_id": "truncated-analysis",
+                "ami": "mafu ku lima nira.",
+                "chinese": "他扶著我的手。（主事焦點句主語：主格標記+[關係子句",
+                "row_type": "sentence",
+                "translation_kind": "free",
+                "source": "Grammar/example.xml",
+            },
         ]
         normalized, _ = normalize_dataframe(
             pd.DataFrame(rows),
@@ -1622,6 +1764,8 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         )
         self.assertEqual(reasons["chinese-gloss"], "target_annotation_gloss")
         self.assertEqual(reasons["truncated"], "obvious_alignment_mismatch")
+        self.assertEqual(reasons["chinese-analysis"], "target_linguistic_analysis")
+        self.assertEqual(reasons["truncated-analysis"], "target_linguistic_analysis")
         self.assertEqual(target_units("他是誰？", "chinese"), 3)
 
     def test_alignment_flags_keep_explanations_train_only(self) -> None:
@@ -1785,7 +1929,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             }
         )
         with self.assertRaises(SystemExit):
-            require_gloss_free(
+            require_clean_pairs(
                 frame,
                 target_column="english_sentence",
                 target_language="english",
@@ -1802,11 +1946,43 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             }
         )
         with self.assertRaises(SystemExit):
-            require_gloss_free(
+            require_clean_pairs(
                 lexical,
                 target_column="english_sentence",
                 target_language="english",
                 path=Path("lexical.csv"),
+            )
+
+        malformed = pd.DataFrame(
+            {
+                "source_record_id": ["bad-escape"],
+                "formosan_sentence": ["maita ku su anini."],
+                "english_sentence": [r"Dad said, \Don't say anything first."],
+                "translation_kind": [""],
+            }
+        )
+        with self.assertRaises(SystemExit):
+            require_clean_pairs(
+                malformed,
+                target_column="english_sentence",
+                target_language="english",
+                path=Path("malformed.csv"),
+            )
+
+        wrong_language = pd.DataFrame(
+            {
+                "source_record_id": ["wrong-language"],
+                "formosan_sentence": ["phpure ppuqun bubu rudan de."],
+                "english_sentence": ["ini pdai cmuwaq iyu"],
+                "translation_kind": [""],
+            }
+        )
+        with self.assertRaises(SystemExit):
+            require_clean_pairs(
+                wrong_language,
+                target_column="english_sentence",
+                target_language="english",
+                path=Path("wrong-language.csv"),
             )
 
     def test_quality_and_dedupe_conserve_every_input_row(self) -> None:

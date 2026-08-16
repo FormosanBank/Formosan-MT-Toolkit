@@ -320,7 +320,8 @@ def evaluation_candidate_mask(
         & ~flags.str.contains(
             r"(?:contains_unclear|unknown_row_type|definition_like_sentence|"
             r"heading_like_target|length_asymmetry|lexical_content_sentence|"
-            r"target_fragment)",
+            r"target_fragment|english_language_uncertain|"
+            r"unbalanced_target_delimiters)",
             regex=True,
         )
         & bool_series(

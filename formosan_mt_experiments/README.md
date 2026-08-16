@@ -24,7 +24,7 @@ Use only `big_corpus_<en|zh>_in_domain_hard.csv` from a completed v3 provenance
 bundle. Before model setup, `scripts/validate_experiment.py` verifies:
 
 - the corpus, profile, standardization namespace, and artifact hashes;
-- at least 2.5/7.5 validation/test proportions from all deduplicated pairs in
+- 5/10 validation/test proportions from all deduplicated pairs in
   every language, with capacity-aware source-corpus representation;
 - sentence references only in evaluation, preferring human rows before valid
   synthetic pivot fallbacks;

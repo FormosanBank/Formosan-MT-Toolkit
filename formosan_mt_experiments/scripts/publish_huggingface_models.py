@@ -323,7 +323,7 @@ Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
 |---|---:|---:|---:|---:|
 {by_language}
 
-The corpus gate enforces standard-tier Formosan text, 2.5/7.5
+The corpus gate enforces standard-tier Formosan text, 5/10
 validation/test proportions from all deduplicated pairs, capacity-aware source
 balance, sentence-only evaluation, and
 zero exact, skeleton, one-edit, or configured high character n-gram

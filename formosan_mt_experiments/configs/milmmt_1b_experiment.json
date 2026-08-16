@@ -17,9 +17,9 @@
     "revision": "9bffa89ca7f6fa44072144171992dd82d52a8e9c"
   },
   "splits": {
-    "train_ratio": 0.9,
-    "validate_ratio": 0.025,
-    "test_ratio": 0.075,
+    "train_ratio": 0.85,
+    "validate_ratio": 0.05,
+    "test_ratio": 0.10,
     "min_test_rows": 0,
     "min_validate_rows": 0,
     "min_formosan_tokens": 2,

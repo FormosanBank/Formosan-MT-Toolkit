@@ -10,7 +10,12 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
-from corpus_quality import lexical_quality_reason, target_gloss_reason
+from corpus_quality import (
+    english_language_quality,
+    has_malformed_escaping,
+    lexical_quality_reason,
+    target_gloss_reason,
+)
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
 PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
@@ -133,7 +138,7 @@ def ensure_metadata(frame: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
-def require_gloss_free(
+def require_clean_pairs(
     frame: pd.DataFrame,
     *,
     target_column: str,
@@ -171,6 +176,10 @@ def require_gloss_free(
             xml_unit_context=unit_context,
             target_language=target_language,
         )
+        if not reason and has_malformed_escaping(str(target)):
+            reason = "malformed_target_escaping"
+        if not reason and target_language == "english":
+            reason, _ = english_language_quality(str(target))
         if reason:
             contaminated_count += 1
             if len(sample_positions) < 5:
@@ -183,8 +192,22 @@ def require_gloss_free(
             else [str(index) for index in sample_frame.index]
         )
         raise SystemExit(
-            f"{path} contains {contaminated_count:,} accepted gloss targets; "
+            f"{path} contains {contaminated_count:,} accepted target-quality failures; "
             f"first source_record_id values: {sample}"
+        )
+    malformed_sources = frame["formosan_sentence"].astype(str).map(
+        has_malformed_escaping
+    )
+    if malformed_sources.any():
+        sample_frame = frame.loc[malformed_sources].head(5)
+        sample = (
+            sample_frame["source_record_id"].astype(str).tolist()
+            if "source_record_id" in sample_frame
+            else [str(index) for index in sample_frame.index]
+        )
+        raise SystemExit(
+            f"{path} contains {int(malformed_sources.sum()):,} accepted malformed "
+            f"Formosan rows; first source_record_id values: {sample}"
         )
 
 
@@ -225,7 +248,7 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
             f"{path} language mismatch: filename={language}, rows={sorted(languages)}"
         )
     frame = frame.rename(columns={raw_target: target_column})
-    require_gloss_free(
+    require_clean_pairs(
         frame,
         target_column=target_column,
         target_language="english" if target == "en" else "chinese",
@@ -263,7 +286,7 @@ def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
     ).all():
         raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
     target_column = "english_sentence" if has_english else "chinese_sentence"
-    require_gloss_free(
+    require_clean_pairs(
         frame,
         target_column=target_column,
         target_language="english" if has_english else "chinese",

@@ -688,41 +688,41 @@ class LeakageTests(unittest.TestCase):
             split_targets(
                 total_rows=1_000,
                 eligible_total=1_000,
-                test_ratio=0.075,
-                val_ratio=0.025,
+                test_ratio=0.10,
+                val_ratio=0.05,
                 min_test_rows=0,
                 min_validate_rows=0,
             ),
-            (75, 25),
+            (100, 50),
         )
         self.assertEqual(
             split_targets(
                 total_rows=20_000,
                 eligible_total=20_000,
-                test_ratio=0.075,
-                val_ratio=0.025,
+                test_ratio=0.10,
+                val_ratio=0.05,
                 min_test_rows=0,
                 min_validate_rows=0,
             ),
-            (1_500, 500),
+            (2_000, 1_000),
         )
         self.assertEqual(
             split_targets(
                 total_rows=20_000,
                 eligible_total=5_000,
-                test_ratio=0.075,
-                val_ratio=0.025,
+                test_ratio=0.10,
+                val_ratio=0.05,
                 min_test_rows=0,
                 min_validate_rows=0,
             ),
-            (1_500, 500),
+            (2_000, 1_000),
         )
-        with self.assertRaisesRegex(ValueError, "requires 2,000"):
+        with self.assertRaisesRegex(ValueError, "requires 3,000"):
             split_targets(
                 total_rows=20_000,
-                eligible_total=1_999,
-                test_ratio=0.075,
-                val_ratio=0.025,
+                eligible_total=2_999,
+                test_ratio=0.10,
+                val_ratio=0.05,
                 min_test_rows=0,
                 min_validate_rows=0,
             )
@@ -815,6 +815,24 @@ class LeakageTests(unittest.TestCase):
                         "row_type": "sentence",
                         "quality_flags": "definition_like_sentence",
                     },
+                    {
+                        "row_id": "uncertain-language",
+                        "lang_code": "ami",
+                        "formosan_sentence": "maita ku su anini",
+                        "english_sentence": "Heavy rainfall flooded downtown streets",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "english_language_uncertain",
+                    },
+                    {
+                        "row_id": "unbalanced-target",
+                        "lang_code": "ami",
+                        "formosan_sentence": "maita ku su anini",
+                        "english_sentence": 'He said "please come here',
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "unbalanced_target_delimiters",
+                    },
                 ]
             )
         )
@@ -850,7 +868,10 @@ class LeakageTests(unittest.TestCase):
                         "formosan_sentence": (
                             f"{digest[:8]} {digest[8:16]} {digest[16:24]} {digest[24:32]} {digest[32:40]}"
                         ),
-                        "english_sentence": (f"{digest[40:48]} {digest[48:56]} sentence {document} number {sentence}"),
+                        "english_sentence": (
+                            f"{digest[40:48]} {digest[48:56]} the sentence "
+                            f"{document} number {sentence}"
+                        ),
                         "source": f"FormosanBank/Corpora/Test/XML/doc-{document}.xml",
                         "repository": "FormosanBank",
                         "repository_commit": "a" * 40,
@@ -903,8 +924,8 @@ class LeakageTests(unittest.TestCase):
         output, excluded, duplicates, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -926,20 +947,20 @@ class LeakageTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         language = report["languages"]["ami"]
         self.assertEqual(language["rows_total"], 300)
-        self.assertEqual(language["test_rows"], 23)
-        self.assertEqual(language["validate_rows"], 8)
-        self.assertGreaterEqual(language["test_fraction_of_all_input_rows"], 0.075)
+        self.assertEqual(language["test_rows"], 30)
+        self.assertEqual(language["validate_rows"], 15)
+        self.assertGreaterEqual(language["test_fraction_of_all_input_rows"], 0.10)
         self.assertGreaterEqual(
             language["validate_fraction_of_all_input_rows"],
-            0.025,
+            0.05,
         )
 
         provenance = validate_provenance(output)
         validation = validate_splits(
             output,
             target_col="english_sentence",
-            min_test_ratio=0.075,
-            min_validate_ratio=0.025,
+            min_test_ratio=0.10,
+            min_validate_ratio=0.05,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -959,8 +980,8 @@ class LeakageTests(unittest.TestCase):
         contaminated_validation = validate_splits(
             contaminated,
             target_col="english_sentence",
-            min_test_ratio=0.075,
-            min_validate_ratio=0.025,
+            min_test_ratio=0.10,
+            min_validate_ratio=0.05,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -976,8 +997,8 @@ class LeakageTests(unittest.TestCase):
         lexical_validation = validate_splits(
             lexical_contamination,
             target_col="english_sentence",
-            min_test_ratio=0.075,
-            min_validate_ratio=0.025,
+            min_test_ratio=0.10,
+            min_validate_ratio=0.05,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -993,8 +1014,8 @@ class LeakageTests(unittest.TestCase):
         )
         kwargs = {
             "target_col": "english_sentence",
-            "test_ratio": 0.075,
-            "val_ratio": 0.025,
+            "test_ratio": 0.10,
+            "val_ratio": 0.05,
             "seed": 42,
             "min_formosan_tokens": 1,
             "min_target_tokens": 1,
@@ -1030,8 +1051,8 @@ class LeakageTests(unittest.TestCase):
         _, _, _, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -1072,8 +1093,8 @@ class LeakageTests(unittest.TestCase):
         output, _, _, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -1093,7 +1114,7 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(
             source_b_report["target_test_rows"]
             + source_b_report["target_validate_rows"],
-            31,
+            45,
         )
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertTrue(evaluation["row_type"].eq("sentence").all())
@@ -1110,8 +1131,8 @@ class LeakageTests(unittest.TestCase):
         output, _, _, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -1162,8 +1183,8 @@ class LeakageTests(unittest.TestCase):
         output, excluded, _, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -1185,11 +1206,11 @@ class LeakageTests(unittest.TestCase):
         language = report["languages"]["ami"]
         self.assertGreaterEqual(
             language["test_fraction_of_all_input_rows"],
-            0.075,
+            0.10,
         )
         self.assertGreaterEqual(
             language["validate_fraction_of_all_input_rows"],
-            0.025,
+            0.05,
         )
 
     def test_validate_test_conflicts_are_reallocated_across_sources(self) -> None:
@@ -1205,8 +1226,8 @@ class LeakageTests(unittest.TestCase):
         output, _, _, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.075,
-            val_ratio=0.025,
+            test_ratio=0.10,
+            val_ratio=0.05,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,

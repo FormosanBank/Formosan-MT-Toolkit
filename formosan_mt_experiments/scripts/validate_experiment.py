@@ -41,6 +41,9 @@ SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "local"))
 from corpus_quality import (  # noqa: E402
+    english_language_quality,
+    has_malformed_escaping,
+    has_unbalanced_target_delimiters,
     lexical_quality_reason,
     target_gloss_reason,
 )
@@ -454,6 +457,33 @@ def validate_splits(
         )
         .sum()
     )
+    malformed_escaping_rows = int(
+        keyed["formosan_sentence"].astype(str).map(has_malformed_escaping).sum()
+        + keyed[target_col].astype(str).map(has_malformed_escaping).sum()
+    )
+    target_language_mismatch_rows = 0
+    uncertain_target_language_eval_rows = 0
+    if target_language == "english":
+        english_quality = keyed[target_col].astype(str).map(
+            english_language_quality
+        )
+        target_language_mismatch_rows = int(
+            english_quality.map(lambda result: bool(result[0])).sum()
+        )
+        uncertain_target_language_eval_rows = int(
+            (
+                split.isin(EVAL_SPLITS)
+                & english_quality.map(
+                    lambda result: "english_language_uncertain" in result[1]
+                )
+            ).sum()
+        )
+    unbalanced_target_eval_rows = int(
+        (
+            split.isin(EVAL_SPLITS)
+            & keyed[target_col].astype(str).map(has_unbalanced_target_delimiters)
+        ).sum()
+    )
     unit_context = keyed.get(
         "xml_unit_context",
         pd.Series("", index=keyed.index),
@@ -711,6 +741,10 @@ def validate_splits(
         and lexical_like_eval_rows == 0
         and gloss_translation_rows == 0
         and annotation_gloss_rows == 0
+        and malformed_escaping_rows == 0
+        and target_language_mismatch_rows == 0
+        and uncertain_target_language_eval_rows == 0
+        and unbalanced_target_eval_rows == 0
         and lexical_quality_rows == 0
         and duplicate_pairs == 0
         and bool(train_eval["ok"])
@@ -736,6 +770,10 @@ def validate_splits(
         "lexical_like_eval_rows": lexical_like_eval_rows,
         "gloss_translation_rows": gloss_translation_rows,
         "annotation_gloss_rows": annotation_gloss_rows,
+        "malformed_escaping_rows": malformed_escaping_rows,
+        "target_language_mismatch_rows": target_language_mismatch_rows,
+        "uncertain_target_language_eval_rows": uncertain_target_language_eval_rows,
+        "unbalanced_target_eval_rows": unbalanced_target_eval_rows,
         "lexical_quality_rows": lexical_quality_rows,
         "train_evaluation": train_eval,
         "validate_test": validate_test,
@@ -974,6 +1012,10 @@ def main() -> None:
         f"synthetic={split_validation['synthetic_eval_rows']:,}, "
         f"lexical-like={split_validation['lexical_like_eval_rows']:,}, "
         f"gloss={split_validation['gloss_translation_rows'] + split_validation['annotation_gloss_rows']:,}, "
+        f"malformed={split_validation['malformed_escaping_rows']:,}, "
+        f"language-mismatch={split_validation['target_language_mismatch_rows']:,}, "
+        f"language-uncertain-eval={split_validation['uncertain_target_language_eval_rows']:,}, "
+        f"unbalanced-eval={split_validation['unbalanced_target_eval_rows']:,}, "
         f"lexical-quality={split_validation['lexical_quality_rows']:,}"
     )
     print(

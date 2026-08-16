@@ -166,7 +166,7 @@ pairwise split labels and builds the model-facing split. It:
 1. deduplicates canonical source-target pairs;
 2. locks lexical, morpheme, ambiguous-normalization, MT-ineligible, and
    lexical-like rows out of evaluation;
-3. reserves 2.5/7.5 validation/test rows from all deduplicated pairs in every
+3. reserves 5/10 validation/test rows from all deduplicated pairs in every
    language, then apportions eligible sentences by source with deterministic,
    capacity-aware Hamilton allocation;
 4. prefers human sentence references within each source stratum and uses
@@ -184,7 +184,7 @@ independent validation, and model profiles load the same values; profile drift
 fails before training.
 
 The ratio denominator is every deduplicated pair in each language. Test reserves
-7.5% and validation reserves 2.5% of that total, but both splits are populated
+10% and validation reserves 5% of that total, but both splits are populated
 only with evaluation-eligible sentences. Source-corpus targets use the same
 all-pair denominator and are constrained by each source's eligible capacity;
 unfillable lexical-source shares are redistributed within the language.
@@ -195,7 +195,8 @@ indivisible split unit would recreate the source imbalance this stage prevents.
 Eligibility is row-based. A repository or path classified as `dictionary`,
 `classroom`, or another provenance domain is not excluded automatically. A
 structurally typed sentence may enter evaluation when it passes MT
-standardization, ambiguity, gloss, alignment, and compact-sentence gates.
+standardization, language, escaping, delimiter, gloss, alignment, and
+compact-sentence gates.
 Each side must contain at least two information-bearing units. The pair must
 contain at least six units in total, or five when both sides have terminal
 sentence punctuation. Punctuation does not count as a Chinese unit. This keeps
