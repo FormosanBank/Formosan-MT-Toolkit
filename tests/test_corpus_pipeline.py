@@ -40,6 +40,7 @@ from clean_xml import (  # noqa: E402
     tag_transform_sources,
 )
 from corpus_quality import (  # noqa: E402
+    alignment_quality,
     apply_quality_rules,
     deduplicate_pairs,
     has_annotation_gloss_structure,
@@ -1767,6 +1768,109 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertEqual(reasons["chinese-analysis"], "target_linguistic_analysis")
         self.assertEqual(reasons["truncated-analysis"], "target_linguistic_analysis")
         self.assertEqual(target_units("他是誰？", "chinese"), 3)
+
+    def test_bilingual_prompt_and_analysis_artifacts_are_quarantined(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("maita ku su anini."),
+                "row_id": "mixed-english",
+                "ami": "maita ku su anini.",
+                "target": "This reference still contains 中文 text.",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+            {
+                **mt_contract_fields("mita ku su anini."),
+                "row_id": "prompt",
+                "ami": "mita ku su anini.",
+                "target": "Source: Psalm 23:1, the Lord is my shepherd.",
+                "row_type": "sentence",
+                "source": "Lessons/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(pd.DataFrame(rows), "ami", "target")
+        accepted, rejected, _ = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="target",
+            target_language="english",
+            keep_redactions=False,
+        )
+
+        self.assertTrue(accepted.empty)
+        reasons = dict(zip(rejected["row_id"], rejected["disposition_reason"], strict=True))
+        self.assertEqual(reasons["mixed-english"], "english_target_script_mismatch")
+        self.assertEqual(reasons["prompt"], "target_prompt_scaffolding")
+
+    def test_chinese_source_copy_and_direct_analysis_are_quarantined(self) -> None:
+        rows = [
+            {
+                **mt_contract_fields("nanicowaay?"),
+                "row_id": "copied-source",
+                "ami": "nanicowaay?",
+                "target": "nanicowaay?我聞到臭味。",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+            {
+                **mt_contract_fields("uwas lmuhuw qani."),
+                "row_id": "direct-analysis",
+                "ami": "uwas lmuhuw qani.",
+                "target": "uwas lmuhuw語彙中的詞根是lmuhuw。",
+                "row_type": "sentence",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("aed ca qani."),
+                "row_id": "equals-analysis",
+                "ami": "aed ca qani.",
+                "target": "aed = ca 這件事很好。",
+                "row_type": "sentence",
+                "source": "Grammar/example.xml",
+            },
+            {
+                **mt_contract_fields("maolah ci Mayaw Aping."),
+                "row_id": "proper-name",
+                "ami": "maolah ci Mayaw Aping.",
+                "target": "Mayaw Aping是今天的講者。",
+                "row_type": "sentence",
+                "source": "Stories/example.xml",
+            },
+        ]
+        normalized, _ = normalize_dataframe(pd.DataFrame(rows), "ami", "target")
+        accepted, rejected, _ = apply_quality_rules(
+            normalized,
+            source_column="ami",
+            target_column="target",
+            target_language="chinese",
+            keep_redactions=False,
+        )
+
+        self.assertEqual(set(accepted["row_id"]), {"proper-name"})
+        reasons = dict(zip(rejected["row_id"], rejected["disposition_reason"], strict=True))
+        self.assertEqual(reasons["copied-source"], "target_copied_source_clause")
+        self.assertEqual(reasons["direct-analysis"], "target_linguistic_analysis")
+        self.assertEqual(reasons["equals-analysis"], "target_linguistic_analysis")
+
+    def test_sentence_shaped_lexical_material_is_train_only(self) -> None:
+        _, english_flags = alignment_quality(
+            "mafu qani",
+            "Five only. (It is possible that the speaker intended a longer explanation.)",
+            target_language="english",
+            row_type="sentence",
+            source_path="Dictionary/example.xml",
+        )
+        _, chinese_flags = alignment_quality(
+            "gung quzang qipu qaca qema qali",
+            "gung（牛） quzang（蝦） qipu（魚） qaca（鳥） qema（狗） qali（豬）",
+            target_language="chinese",
+            row_type="sentence",
+            source_path="Dictionary/example.xml",
+        )
+
+        self.assertIn("definition_like_sentence", english_flags)
+        self.assertIn("length_asymmetry", english_flags)
+        self.assertIn("lexical_content_sentence", chinese_flags)
 
     def test_alignment_flags_keep_explanations_train_only(self) -> None:
         rows = [

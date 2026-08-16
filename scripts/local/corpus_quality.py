@@ -125,6 +125,20 @@ CHINESE_GRAMMAR_NOTE_RE = re.compile(
     r"動詞\s*[-－—]|語法分析|詞根(?:是|為)"
     r")"
 )
+CHINESE_DIRECT_GRAMMAR_NOTE_RE = re.compile(
+    r"(?:\u8a9e\u5f59\u4e2d\u7684[^\n]{0,100}\u8a5e\u6839(?:\u662f|\u70ba)|"
+    r"\u8a5e\u6839(?:\u662f|\u70ba)\s*[A-Za-z'\u2019]|"
+    r"(?:\u4e3b\u4e8b|\u53d7\u4e8b|\u8655\u6240|\u53c3\u8003|\u5de5\u5177)\u7126\u9ede|"
+    r"(?:\u4e3b\u683c|\u659c\u683c|\u5c6c\u683c)\u6a19\u8a18|\u8a9e\u6cd5\u5206\u6790)"
+)
+TARGET_PROMPT_PREFIX_RE = re.compile(
+    r"^\s*(?:source|target|translation|reference|english|chinese|formosan)\s*:\s*",
+    re.IGNORECASE,
+)
+VOCABULARY_MAPPING_RE = re.compile(
+    r"[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f'\u2019-]{0,30}\s*"
+    r"[\uff08(][^\uff09)\n]{0,20}[\u3400-\u9fff][^\uff09)\n]{0,20}[\uff09)]"
+)
 DELIMITER_PAIRS = (
     ("(", ")"),
     ("[", "]"),
@@ -292,6 +306,8 @@ def target_gloss_reason(
     if normalized_translation_kind(translation_kind) in NON_TRANSLATION_KINDS:
         return "target_gloss_translation"
     text = str(value)
+    if TARGET_PROMPT_PREFIX_RE.match(text):
+        return "target_prompt_scaffolding"
     if has_annotation_gloss_structure(text):
         return "target_annotation_gloss"
     if has_appended_linguistic_analysis(text, target_language=target_language):
@@ -313,7 +329,11 @@ def target_gloss_reason(
 def has_appended_linguistic_analysis(value: str, *, target_language: str) -> bool:
     """Detect grammatical analysis appended to an otherwise free translation."""
     if target_language == "chinese":
-        return CHINESE_GRAMMAR_NOTE_RE.search(value) is not None
+        return bool(
+            CHINESE_GRAMMAR_NOTE_RE.search(value)
+            or CHINESE_DIRECT_GRAMMAR_NOTE_RE.search(value)
+            or "=" in value
+        )
     if target_language != "english":
         return False
 
@@ -347,6 +367,8 @@ def has_unbalanced_target_delimiters(value: str) -> bool:
 
 def english_language_quality(value: str) -> tuple[str, tuple[str, ...]]:
     """Return a quarantine reason or train-only flag for doubtful English."""
+    if CJK_RE.search(value) or KANA_HANGUL_RE.search(value):
+        return "english_target_script_mismatch", ()
     words = [match.group(0).casefold() for match in ENGLISH_WORD_RE.finditer(value)]
     anchor_candidates = {re.split(r"['’]", word, maxsplit=1)[0] for word in words}
     if len(words) < 4 or ENGLISH_ANCHOR_WORDS.intersection(anchor_candidates):
@@ -372,6 +394,34 @@ def english_language_quality(value: str) -> tuple[str, tuple[str, ...]]:
     ):
         return "english_target_language_mismatch", ()
     return "", ("english_language_uncertain",)
+
+
+def target_alignment_artifact_reason(
+    source: str,
+    target: str,
+    *,
+    target_language: str,
+) -> str:
+    """Detect source text copied in front of a free target translation."""
+    if target_language != "chinese":
+        return ""
+    first_han = CJK_RE.search(target)
+    if first_han is None:
+        return ""
+    prefix = target[: first_han.start()].strip()
+    if not prefix or not LATIN_RE.search(prefix):
+        return ""
+    normalized_prefix = letters_and_marks(prefix)
+    if len(normalized_prefix) < 4 or normalized_prefix not in letters_and_marks(source):
+        return ""
+    if re.search(r"[.!?\u3002\uff01\uff1f]\s*$", prefix) or "=" in prefix:
+        return "target_copied_source_clause"
+    return ""
+
+
+def has_vocabulary_mapping_list(value: str) -> bool:
+    """Return true for long word-to-gloss lists serialized as sentences."""
+    return len(VOCABULARY_MAPPING_RE.findall(value)) >= 6
 
 
 def is_explicit_gloss_code(value: str) -> bool:
@@ -513,6 +563,8 @@ def alignment_quality(
         return "target_heading_alignment_mismatch", ()
 
     flags: list[str] = []
+    if target_language == "chinese" and has_vocabulary_mapping_list(target):
+        flags.append("lexical_content_sentence")
     if source_units >= 4 and heading_like_target:
         flags.append("heading_like_target")
     target_is_punctuated = has_terminal_punctuation(target)
@@ -551,10 +603,10 @@ def alignment_quality(
         )
     ):
         flags.append("lexical_content_sentence")
-    if source_units <= 3 and target_count >= 18:
+    if source_units <= 3 and target_count >= 12:
         flags.append("length_asymmetry")
     explanatory_markers = (
-        (";" in target or "cf." in target.casefold() or target.count("(") >= 2)
+        (";" in target or "cf." in target.casefold() or target.count("(") >= 1)
         if target_language == "english"
         else (
             "；" in target
@@ -637,10 +689,6 @@ def quality_decision(
         return QualityDecision("rejected", "target_meta_label_only")
     target_scripts = script_counts(target)
     if target_language == "english":
-        if target_scripts["kana_hangul"]:
-            return QualityDecision("quarantine", "english_target_script_mismatch")
-        if target_scripts["cjk"] >= 2 and target_scripts["cjk"] > max(2, target_scripts["latin"] // 2):
-            return QualityDecision("quarantine", "english_target_script_mismatch")
         language_reason, language_flags = english_language_quality(target)
         if language_reason:
             return QualityDecision("quarantine", language_reason)
@@ -655,6 +703,14 @@ def quality_decision(
     target_key = letters_and_marks(target)
     if len(source_key) >= 4 and source_key == target_key:
         return QualityDecision("quarantine", "source_target_identity")
+
+    alignment_artifact = target_alignment_artifact_reason(
+        source,
+        target,
+        target_language=target_language,
+    )
+    if alignment_artifact:
+        return QualityDecision("quarantine", alignment_artifact)
 
     alignment_reason, alignment_flags = alignment_quality(
         source,

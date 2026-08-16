@@ -14,6 +14,7 @@ from corpus_quality import (
     english_language_quality,
     has_malformed_escaping,
     lexical_quality_reason,
+    target_alignment_artifact_reason,
     target_gloss_reason,
 )
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
@@ -156,14 +157,19 @@ def require_clean_pairs(
     )
     contaminated_count = 0
     sample_positions: list[int] = []
-    for position, (target, translation_kind, row_type, unit_context) in enumerate(
-        zip(
-            frame[target_column].astype(str),
-            translation_kinds,
-            row_types,
-            unit_contexts,
-            strict=True,
-        )
+    rows = zip(
+        frame.get(
+            "formosan_sentence",
+            pd.Series("", index=frame.index),
+        ).astype(str),
+        frame[target_column].astype(str),
+        translation_kinds,
+        row_types,
+        unit_contexts,
+        strict=True,
+    )
+    for position, (source, target, translation_kind, row_type, unit_context) in enumerate(
+        rows
     ):
         reason = target_gloss_reason(
             target,
@@ -180,6 +186,12 @@ def require_clean_pairs(
             reason = "malformed_target_escaping"
         if not reason and target_language == "english":
             reason, _ = english_language_quality(str(target))
+        if not reason:
+            reason = target_alignment_artifact_reason(
+                str(source),
+                str(target),
+                target_language=target_language,
+            )
         if reason:
             contaminated_count += 1
             if len(sample_positions) < 5:

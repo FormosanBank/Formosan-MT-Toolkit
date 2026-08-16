@@ -100,9 +100,10 @@ Production builds fail unless all of these conditions hold:
 - malformed, missing, rejected, quarantined, and deduplicated rows are logged;
 - sentence-internal `<W>` annotations, explicit interlinear gloss targets, and
   detected morphological gloss structures are excluded from model corpora;
-- appended grammatical analyses, wrong-language targets, and malformed escape
-  artifacts are quarantined; uncertain English and unbalanced delimiters are
-  retained for training but cannot enter evaluation;
+- appended grammatical analyses, prompt labels, copied bilingual clauses,
+  mixed-script targets, and malformed escape artifacts are quarantined;
+  uncertain English, unbalanced delimiters, compact lexical entries, and long
+  dictionary explanations are retained for training but cannot enter evaluation;
 - DeepL is limited to MT-eligible sentence rows with at least four Formosan and
   pivot-source units; completion is explicit and every response is validated;
 - only structurally standalone `<W>` entries with natural target text may enter

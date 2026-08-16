@@ -305,6 +305,7 @@ def evaluation_candidate_mask(
         "_target_tokens",
         "_formosan_terminal",
         "_target_terminal",
+        "_short_entry",
     }
     require_columns(frame, required, "evaluation eligibility")
     flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
@@ -329,6 +330,7 @@ def evaluation_candidate_mask(
             context="evaluation eligibility:mt_eval_eligible",
         )
         & ~frame["mt_normalization_confidence"].astype(str).eq("ambiguous")
+        & ~frame["_short_entry"]
         & frame["_formosan_tokens"].ge(min_formosan_tokens)
         & frame["_target_tokens"].ge(min_target_tokens)
         & sufficient_content

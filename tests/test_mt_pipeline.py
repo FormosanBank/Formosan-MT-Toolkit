@@ -28,8 +28,10 @@ from audit_corpus_exposure import (  # noqa: E402
 from build_experiment_splits import (  # noqa: E402
     GroupCandidate,
     NgramSimilarityIndex,
+    block_evaluation_conflicts_with_training,
     build_hard_split,
     choose_groups,
+    exclude_test_conflicts_with_validation,
     ngram_candidate_conflicts,
     one_edit_conflicts,
     split_targets,
@@ -798,6 +800,15 @@ class LeakageTests(unittest.TestCase):
                         "quality_flags": "",
                     },
                     {
+                        "row_id": "compact-long-target",
+                        "lang_code": "ami",
+                        "formosan_sentence": "ima su?",
+                        "english_sentence": "Who are you today?",
+                        "source": "fixture.xml",
+                        "row_type": "sentence",
+                        "quality_flags": "",
+                    },
+                    {
                         "row_id": "single-unit",
                         "lang_code": "ami",
                         "formosan_sentence": "millemungku",
@@ -851,8 +862,64 @@ class LeakageTests(unittest.TestCase):
 
         self.assertEqual(
             set(normalized.loc[candidates, "row_id"]),
-            {"balanced", "short-question"},
+            {"balanced", "compact-long-target"},
         )
+
+    def test_split_conflicts_block_the_full_similarity_neighborhood(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ami"] * 4,
+                "_formosan_skeleton": [
+                    "abcdefghijklmnopqrstuvwx",
+                    "abcdefghijklmnopqrstuvwy",
+                    "abcdefghijklmnopqrstuvwz",
+                    "completelydifferentstring",
+                ],
+                "_target_skeleton": [
+                    "thevalidationtranslationx",
+                    "thevalidationtranslationy",
+                    "thevalidationtranslationz",
+                    "unrelatedtargettranslation",
+                ],
+            }
+        )
+        group_ids = pd.Series(range(len(frame)), index=frame.index, dtype="int64")
+
+        candidate_mask = pd.Series(True, index=frame.index)
+        assignments = {0: "validate", 1: "test"}
+        blocked: set[int] = set()
+        result = exclude_test_conflicts_with_validation(
+            frame,
+            pd.Series(["validate", "test", "train", "train"]),
+            group_ids,
+            candidate_mask,
+            assignments,
+            blocked,
+            ngram_threshold=0.82,
+            include_one_edit=False,
+        )
+        self.assertGreater(result["blocked_candidate_rows"], 1)
+        self.assertEqual(blocked, {1, 2})
+        self.assertNotIn(1, assignments)
+        self.assertTrue(bool(candidate_mask.iloc[3]))
+
+        candidate_mask = pd.Series(True, index=frame.index)
+        assignments = {1: "test"}
+        blocked = set()
+        result = block_evaluation_conflicts_with_training(
+            frame,
+            pd.Series(["train", "test", "train", "train"]),
+            group_ids,
+            candidate_mask,
+            assignments,
+            blocked,
+            ngram_threshold=0.82,
+            include_one_edit=False,
+        )
+        self.assertGreater(result["blocked_candidate_rows"], 1)
+        self.assertEqual(blocked, {0, 1, 2})
+        self.assertNotIn(1, assignments)
+        self.assertTrue(bool(candidate_mask.iloc[3]))
 
     @staticmethod
     def hard_split_fixture() -> pd.DataFrame:

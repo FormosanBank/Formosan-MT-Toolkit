@@ -871,15 +871,34 @@ def exclude_test_conflicts_with_validation(
         int(group_id)
         for group_id in group_ids.loc[list(conflicts)]
     }
-    for group_id in conflict_groups:
+    blocked = set(conflicts)
+    if conflicts:
+        remaining = frame[
+            candidate_mask
+            & ~frame.index.isin(validate.index)
+        ]
+        blocked |= near_candidate_conflicts(
+            validate,
+            remaining,
+            ngram_threshold=ngram_threshold,
+            target_by_language=True,
+            include_one_edit=include_one_edit,
+            ngram_indexes=ngram_indexes,
+        )
+    blocked_groups = {
+        int(group_id)
+        for group_id in group_ids.loc[list(blocked)]
+    }
+    for group_id in blocked_groups:
         if assignments.get(group_id) == "test":
             assignments.pop(group_id)
-    candidate_mask.loc[list(conflicts)] = False
-    blocked_indexes.update(conflicts)
+    candidate_mask.loc[list(blocked)] = False
+    blocked_indexes.update(blocked)
     return {
         "conflicting_eval_rows": len(conflicts),
         "conflicting_groups": len(conflict_groups),
         "validate_test_conflicting_rows": len(conflicts),
+        "blocked_candidate_rows": len(blocked),
     }
 
 
@@ -908,13 +927,32 @@ def block_evaluation_conflicts_with_training(
         int(group_id)
         for group_id in group_ids.loc[list(conflicts)]
     }
-    for group_id in conflict_groups:
+    blocked = set(conflicts)
+    if conflicts:
+        conflict_rows = frame.loc[list(conflicts)]
+        remaining = frame[
+            candidate_mask
+            & ~frame.index.isin(conflicts)
+        ]
+        blocked |= near_candidate_conflicts(
+            conflict_rows,
+            remaining,
+            ngram_threshold=ngram_threshold,
+            include_one_edit=include_one_edit,
+            ngram_indexes=ngram_indexes,
+        )
+    blocked_groups = {
+        int(group_id)
+        for group_id in group_ids.loc[list(blocked)]
+    }
+    for group_id in blocked_groups:
         assignments.pop(group_id, None)
-    candidate_mask.loc[list(conflicts)] = False
-    blocked_indexes.update(conflicts)
+    candidate_mask.loc[list(blocked)] = False
+    blocked_indexes.update(blocked)
     return {
         "conflicting_eval_rows": len(conflicts),
         "conflicting_groups": len(conflict_groups),
+        "blocked_candidate_rows": len(blocked),
     }
 
 

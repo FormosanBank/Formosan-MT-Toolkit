@@ -114,7 +114,10 @@ translation fragment, are quarantined before pivoting or splitting. Long
 explanatory targets paired with very short Formosan text are retained for
 training but marked evaluation-ineligible. Short unpunctuated English
 fragments and lexical-looking sentence records are also retained only for
-training rather than being treated as clean sentence references. Targets
+training rather than being treated as clean sentence references. This includes
+long word-to-gloss lists stored in `<S>` records. Prompt labels, mixed-script
+English, copied Formosan clauses before Chinese translations, malformed `=`
+analyses, and explicit grammatical commentary are quarantined. Targets
 explicitly marked as `gloss` or `interlinear-gloss` are rejected. Unlabelled
 English targets are
 quarantined when recognized or mixed-case grammatical codes occur in
@@ -173,7 +176,8 @@ pairwise split labels and builds the model-facing split. It:
    validated synthetic pivot sentences only when human coverage is insufficient;
 5. computes normalized and punctuation/spacing-skeleton keys;
 6. removes held-out candidates with one-edit or character 4-gram Jaccard
-   conflicts, then refills evaluation from clean candidates; test/validation
+   conflicts, blocks their full current similarity neighborhood, then refills
+   evaluation from clean candidates; test/validation
    separation is target-language-task conditioned, with stricter cross-language
    reuse retained as a diagnostic; no training rows are discarded to create
    the benchmark;
@@ -199,9 +203,10 @@ standardization, language, escaping, delimiter, gloss, alignment, and
 compact-sentence gates.
 Each side must contain at least two information-bearing units. The pair must
 contain at least six units in total, or five when both sides have terminal
-sentence punctuation. Punctuation does not count as a Chinese unit. This keeps
-one-word entries and fragments in training while allowing compact questions
-and clauses into evaluation. Explicit lexemes, morphemes, explanatory
+sentence punctuation. Punctuation does not count as a Chinese unit. Rows with
+at most two Formosan units and at most three target units remain train-only,
+even when punctuated. Longer compact questions and clauses may enter
+evaluation. Explicit lexemes, morphemes, explanatory
 definition rows, and extreme length-asymmetry rows remain training-only.
 
 `source_corpus` records the exact public corpus root or private repository used
