@@ -36,6 +36,7 @@ MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_DEFAULTS["cleaning"][
     "max_training_units_per_side"
 ]
 TIER = SPLIT_DEFAULTS["headline_tier"]
+CHARACTER_NGRAM_ORDERS = (3, 4, 5)
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,20 @@ def jaccard_prefix(
     return tuple(sorted(grams)[: max(1, prefix_length)])
 
 
+def character_ngrams(value: str) -> frozenset[str]:
+    """Match TAME-MT's character 3/4/5-gram feature set."""
+    if not value:
+        return frozenset()
+    if len(value) < min(CHARACTER_NGRAM_ORDERS):
+        return frozenset({value})
+    return frozenset(
+        value[position : position + order]
+        for order in CHARACTER_NGRAM_ORDERS
+        if order <= len(value)
+        for position in range(len(value) - order + 1)
+    )
+
+
 class NgramSimilarityIndex:
     """Reusable exact character n-gram lookup for split refinement."""
 
@@ -187,13 +202,7 @@ class NgramSimilarityIndex:
         values = frame[column].astype(str)
         gram_counts: Counter[str] = Counter()
         for value in values:
-            if len(value) >= 8:
-                gram_counts.update(
-                    {
-                        value[position : position + 4]
-                        for position in range(len(value) - 3)
-                    }
-                )
+            gram_counts.update(character_ngrams(value))
         gram_ids = {
             gram: index
             for index, gram in enumerate(
@@ -202,13 +211,11 @@ class NgramSimilarityIndex:
         }
 
         for index, value in values.items():
-            if len(value) < 8:
+            raw_grams = character_ngrams(value)
+            if not raw_grams:
                 continue
             row_index = int(index)
-            grams = frozenset(
-                gram_ids[value[position : position + 4]]
-                for position in range(len(value) - 3)
-            )
+            grams = frozenset(gram_ids[gram] for gram in raw_grams)
             prefix = jaccard_prefix(grams, threshold)
             group = self.languages.at[index] if by_language else "_global"
             group_postings = self.postings.setdefault(group, {})
@@ -1219,13 +1226,13 @@ def build_hard_split(
     ngram_indexes = SplitNgramIndexes(
         formosan=NgramSimilarityIndex(
             frame,
-            "_formosan_skeleton",
+            "_formosan_key",
             by_language=True,
             threshold=ngram_threshold,
         ),
         target=NgramSimilarityIndex(
             frame,
-            "_target_skeleton",
+            "_target_key",
             by_language=False,
             threshold=ngram_threshold,
         ),

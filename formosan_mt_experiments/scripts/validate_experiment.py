@@ -396,13 +396,13 @@ def validate_splits(
     evaluation = keyed[split.isin(EVAL_SPLITS)]
     formosan_ngram_index = NgramSimilarityIndex(
         keyed,
-        "_formosan_skeleton",
+        "_formosan_key",
         by_language=True,
         threshold=ngram_threshold,
     )
     target_ngram_index = NgramSimilarityIndex(
         keyed,
-        "_target_skeleton",
+        "_target_key",
         by_language=False,
         threshold=ngram_threshold,
     )

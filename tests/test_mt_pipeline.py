@@ -685,6 +685,27 @@ class LeakageTests(unittest.TestCase):
                 expected,
             )
 
+    def test_ngram_index_matches_tame_high_exposure_boundary(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ckv", "ckv", "ssf", "ssf"],
+                "text": [
+                    "sessenan ti iku tu mai tu qunqunian temanan ti iku.",
+                    "sessenan iku tu mai tu qunqunian temanan ti iku.",
+                    "thithu palalawan sa suma a pakikalhian sa suma sa lalawa.",
+                    "thithu palalawan sa suma a pakikalhian sa lalawa.",
+                ],
+            }
+        )
+        index = NgramSimilarityIndex(
+            frame,
+            "text",
+            by_language=True,
+            threshold=0.95,
+        )
+
+        self.assertEqual(index.conflicts(pd.Index([1, 3]), pd.Index([0, 2])), {0, 2})
+
     def test_split_targets_use_all_pairs_as_denominator(self) -> None:
         self.assertEqual(
             split_targets(

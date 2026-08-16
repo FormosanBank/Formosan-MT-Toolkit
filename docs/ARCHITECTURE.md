@@ -174,7 +174,7 @@ pairwise split labels and builds the model-facing split. It:
 4. keeps every synthetic pivot row in training and balances evaluation across
    human source corpora where indivisible leakage groups permit;
 5. keeps exact and one-edit variants together, then removes held-out candidates
-   at or above 0.95 character 4-gram Jaccard
+   at or above 0.95 character 3/4/5-gram Jaccard
    conflicts, blocks their full current similarity neighborhood, then refills
    evaluation from clean candidates; target overlap is conditioned by Formosan
    language, and no training rows are discarded to create the benchmark;
