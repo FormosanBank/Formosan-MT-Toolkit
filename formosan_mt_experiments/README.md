@@ -48,7 +48,7 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 | Tokenizer | Formosan-aware SentencePiece extension |
 | Added pieces | 8,192 |
 | Max updates | 300,000 |
-| Microbatch / accumulation | 16 / 4 |
+| Microbatch / accumulation | 8 / 8 |
 | Maximum length | 384 |
 | Learning rate | `2e-5` |
 | Precision | bf16 |
