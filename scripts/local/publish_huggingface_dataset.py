@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package and optionally publish the public Formosan MT corpus."""
+"""Package and optionally publish a public or private Formosan MT corpus."""
 
 from __future__ import annotations
 
@@ -74,7 +74,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("corpus_builds/public_no_bible"),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--repo-id", default="FormosanBank/formosan-mt")
+    parser.add_argument(
+        "--repo-id",
+        help=(
+            "Hugging Face dataset repository. Defaults to FormosanBank/formosan-mt "
+            "or FormosanBank/formosan-mt-private with --private."
+        ),
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="Package a private build and require a private Hugging Face repository.",
+    )
     parser.add_argument("--upload", action="store_true")
     return parser.parse_args()
 
@@ -108,7 +119,12 @@ def source_snapshot(build_root: Path) -> dict[str, Any]:
     }
 
 
-def validate_public_frame(frame: pd.DataFrame, target_column: str) -> None:
+def validate_release_frame(
+    frame: pd.DataFrame,
+    target_column: str,
+    *,
+    private_release: bool,
+) -> None:
     required = {
         "lang_code",
         "formosan_sentence",
@@ -120,18 +136,19 @@ def validate_public_frame(frame: pd.DataFrame, target_column: str) -> None:
     }
     missing = sorted(required - set(frame.columns))
     if missing:
-        raise SystemExit(f"Public corpus is missing columns: {missing}")
-    if not frame["repository"].astype(str).eq("FormosanBank").all():
-        raise SystemExit("Public release contains a non-public repository")
-    if not frame["source"].astype(str).str.startswith("FormosanBank/").all():
-        raise SystemExit("Public release contains a non-public source path")
+        raise SystemExit(f"Release corpus is missing columns: {missing}")
+    if not private_release:
+        if not frame["repository"].astype(str).eq("FormosanBank").all():
+            raise SystemExit("Public release contains a non-public repository")
+        if not frame["source"].astype(str).str.startswith("FormosanBank/").all():
+            raise SystemExit("Public release contains a non-public source path")
     evaluation = frame[frame["split"].isin(["test", "validate"])]
     if evaluation["pivot_origin"].astype(str).eq("synthetic").any():
-        raise SystemExit("Public release contains synthetic evaluation rows")
+        raise SystemExit("Release contains synthetic evaluation rows")
     if not evaluation["mt_eval_eligible"].fillna(False).astype(bool).all():
-        raise SystemExit("Public release contains ineligible evaluation rows")
+        raise SystemExit("Release contains ineligible evaluation rows")
     if not evaluation["row_type"].astype(str).eq("sentence").all():
-        raise SystemExit("Public release contains non-sentence evaluation rows")
+        raise SystemExit("Release contains non-sentence evaluation rows")
 
 
 def package_config(
@@ -139,14 +156,20 @@ def package_config(
     output_dir: Path,
     config_name: str,
     spec: dict[str, Any],
+    *,
+    private_release: bool,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     split_dir = build_root / "formosan_mt_experiments" / "data" / f"splits_{spec['short']}_v1"
     input_path = split_dir / f"big_corpus_{spec['short']}_in_domain_hard.parquet"
     frame = pd.read_parquet(input_path)
-    validate_public_frame(frame, spec["target_column"])
+    validate_release_frame(
+        frame,
+        spec["target_column"],
+        private_release=private_release,
+    )
     ids = pd.Series(range(len(frame)), dtype="int64", name="id")
 
-    public = pd.DataFrame(
+    release = pd.DataFrame(
         {
             "id": ids,
             "source_lang": frame["lang_code"].astype(str),
@@ -160,7 +183,7 @@ def package_config(
         }
     )
     csv_name = f"formosan_{spec['short']}_hf.csv"
-    public.to_csv(output_dir / csv_name, index=False, lineterminator="\n")
+    release.to_csv(output_dir / csv_name, index=False, lineterminator="\n")
 
     provenance = frame[PROVENANCE_COLUMNS].copy()
     provenance.insert(0, "id", ids)
@@ -181,11 +204,14 @@ def package_config(
         sanitize_paths(exposure),
     )
 
-    split_counts = public["split"].value_counts().to_dict()
+    split_counts = release["split"].value_counts().to_dict()
     synthetic = frame["pivot_origin"].astype(str).eq("synthetic")
-    by_language = public.groupby("lang_code", sort=True).size().to_dict()
+    by_language = release.groupby("lang_code", sort=True).size().to_dict()
     by_language_split = (
-        public.groupby(["lang_code", "split"], sort=True).size().unstack(fill_value=0).to_dict("index")
+        release.groupby(["lang_code", "split"], sort=True)
+        .size()
+        .unstack(fill_value=0)
+        .to_dict("index")
     )
     return frame, {
         "rows": len(frame),
@@ -248,7 +274,12 @@ def metric_rows(output_dir: Path) -> list[tuple[str, int, float, float, float, f
     return rows
 
 
-def build_card(metadata: dict[str, Any], output_dir: Path) -> str:
+def build_card(
+    metadata: dict[str, Any],
+    output_dir: Path,
+    *,
+    private_release: bool,
+) -> str:
     configs = metadata["configs"]
     en = configs["formosan-en"]
     zh = configs["formosan-zh"]
@@ -268,18 +299,40 @@ def build_card(metadata: dict[str, Any], output_dir: Path) -> str:
         f"| {label} | {count:,} | {bleu:.2f} | {chrf:.2f} | {mean:.3f} | {near:.3%} |"
         for label, count, bleu, chrf, mean, near in metric_rows(output_dir)
     ]
-    public_commit = metadata["source_repositories"]["FormosanBank"]
+    repo_id = metadata["repo_id"]
+    release_label = "Private" if private_release else "Public"
+    dataset_name = (
+        "FormosanBank Machine Translation (Private)"
+        if private_release
+        else "FormosanBank Machine Translation"
+    )
+    access_text = (
+        "This is a private internal FormosanBank dataset. Access is limited to "
+        "authorized members of the FormosanBank Hugging Face organization."
+        if private_release
+        else "Public parallel corpora for 15 Indigenous Formosan languages aligned "
+        "with English and Mandarin Chinese."
+    )
+    size_category = "1M<n<10M" if total >= 1_000_000 else "100K<n<1M"
+    public_commit = metadata["source_repositories"].get("FormosanBank", "not present")
+    source_provenance = (
+        f"- FormosanBank commit: `{public_commit}`\n"
+        f"- Source repositories: {len(metadata['source_repositories']):,}"
+        if private_release
+        else f"- Public FormosanBank commit: `{public_commit}`"
+    )
+    citation_key = f"formosanbank_mt_{'private' if private_release else 'public'}_v3"
     return f"""---
 license: other
 license_name: formosanbank-terms-ai-use-addendum
 license_link: https://ai4commsci.gitbook.io/formosanbank/additional-resources/terms-of-use
-pretty_name: FormosanBank Machine Translation
+pretty_name: {dataset_name}
 task_categories:
 - translation
 language:
 {chr(10).join(f'- {code}' for code in [*LANGUAGE_NAMES, 'en', 'zh'])}
 size_categories:
-- 100K<n<1M
+- {size_category}
 tags:
 - noncommercial
 - no-commercial-ai
@@ -303,9 +356,9 @@ configs:
     path: formosan_zh_hf.csv
 ---
 
-# FormosanBank Machine Translation
+# {dataset_name}
 
-Public parallel corpora for 15 Indigenous Formosan languages aligned with English and Mandarin Chinese. This release uses canonical MT-standardized Formosan text, excludes `Formosan-Taiwan-Bible-Society-Bibles`, and keeps DeepL pivot translations in training only.
+{access_text} This release uses canonical MT-standardized Formosan text, excludes `Formosan-Taiwan-Bible-Society-Bibles`, and keeps DeepL pivot translations in training only.
 
 Commercial AI use is prohibited without prior written permission. See the [FormosanBank Terms of Use](https://ai4commsci.gitbook.io/formosanbank/additional-resources/terms-of-use).
 
@@ -331,7 +384,7 @@ The two main files preserve the established nine-column format: `id`, `source_la
 ```python
 from datasets import DatasetDict, load_dataset
 
-rows = load_dataset("FormosanBank/formosan-mt", "formosan-en", split="train")
+rows = load_dataset("{repo_id}", "formosan-en", split="train")
 dataset = DatasetDict({{
     split: rows.filter(lambda row: row["split"] == split)
     for split in ("train", "validate", "test")
@@ -352,7 +405,7 @@ TM scores measure nearest-neighbor translation-memory retrieval, not model quali
 
 ## Provenance
 
-- Public FormosanBank commit: `{public_commit}`
+{source_provenance}
 - FormosanBank QC commit: `{metadata['qc_revision']}`
 - Toolkit commit: `{metadata['toolkit']['commit']}`
 - MT standardization: `{metadata['mt_standardization']['id']}`
@@ -371,11 +424,11 @@ Artifact hashes and per-language counts are recorded in `provenance/release_meta
 ## Citation
 
 ```bibtex
-@misc{{formosanbank_mt_public_v3,
-  title        = {{FormosanBank Machine Translation Public Corpus}},
+@misc{{{citation_key},
+  title        = {{FormosanBank Machine Translation {release_label} Corpus}},
   author       = {{FormosanBank contributors}},
   year         = {{2026}},
-  howpublished = {{https://huggingface.co/datasets/FormosanBank/formosan-mt}}
+  howpublished = {{https://huggingface.co/datasets/{repo_id}}}
 }}
 ```
 
@@ -391,12 +444,21 @@ def write_checksums(output_dir: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    repo_id = args.repo_id or (
+        "FormosanBank/formosan-mt-private"
+        if args.private
+        else "FormosanBank/formosan-mt"
+    )
     build_root = args.build_root.resolve()
     output_dir = args.output_dir.resolve()
     manifest = read_complete_json(build_root / "mt_build_manifest.json")
     settings = manifest.get("settings", {})
-    if settings.get("public") is not True or settings.get("exclude_bible") is not True:
-        raise SystemExit("Hugging Face releases require a public no-Bible build")
+    expected_public = not args.private
+    if settings.get("public") is not expected_public:
+        release_type = "private" if args.private else "public"
+        raise SystemExit(f"Hugging Face {release_type} release uses the wrong build type")
+    if settings.get("exclude_bible") is not True:
+        raise SystemExit("Hugging Face releases require a no-Bible build")
     if output_dir in {Path("/"), Path.home(), build_root}:
         raise SystemExit(f"Unsafe output directory: {output_dir}")
     if output_dir.exists():
@@ -405,12 +467,19 @@ def main() -> None:
 
     configs = {}
     for name, spec in CONFIGS.items():
-        _, configs[name] = package_config(build_root, output_dir, name, spec)
+        _, configs[name] = package_config(
+            build_root,
+            output_dir,
+            name,
+            spec,
+            private_release=args.private,
+        )
     metadata = {
         "schema_version": 2,
         "complete": True,
         "created_at": utc_now(),
-        "repo_id": args.repo_id,
+        "repo_id": repo_id,
+        "private": args.private,
         "source_build_completed": manifest["created_at"],
         "source_build_manifest_sha256": sha256_file(build_root / "mt_build_manifest.json"),
         "source_repositories": source_snapshot(build_root),
@@ -426,19 +495,33 @@ def main() -> None:
             name = f"provenance/{kind}_{short}.json"
             metadata.setdefault("artifacts", {})[name] = artifact_record(output_dir / name)
     atomic_write_json(output_dir / "provenance/release_metadata.json", metadata)
-    (output_dir / "README.md").write_text(build_card(metadata, output_dir), encoding="utf-8")
+    (output_dir / "README.md").write_text(
+        build_card(metadata, output_dir, private_release=args.private),
+        encoding="utf-8",
+    )
     write_checksums(output_dir)
 
     print(f"Packaged {sum(value['rows'] for value in configs.values()):,} rows in {output_dir}")
     if args.upload:
         from huggingface_hub import HfApi
 
-        commit = HfApi().upload_folder(
-            repo_id=args.repo_id,
+        api = HfApi()
+        api.create_repo(
+            repo_id=repo_id,
+            repo_type="dataset",
+            private=args.private,
+            exist_ok=True,
+        )
+        info = api.dataset_info(repo_id)
+        if bool(info.private) is not args.private:
+            expected = "private" if args.private else "public"
+            raise SystemExit(f"Refusing upload: {repo_id} is not {expected}")
+        commit = api.upload_folder(
+            repo_id=repo_id,
             repo_type="dataset",
             folder_path=output_dir,
             commit_message=(
-                "Publish public no-Bible corpus "
+                f"Publish {'private' if args.private else 'public'} no-Bible corpus "
                 f"from {manifest['repository']['commit'][:12]}"
             ),
         )

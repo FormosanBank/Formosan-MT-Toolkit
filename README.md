@@ -133,6 +133,18 @@ python scripts/local/publish_huggingface_dataset.py \
 Add `--upload` to replace the files in `FormosanBank/formosan-mt` after
 reviewing the generated card, metadata, and checksums.
 
+Package the private no-Bible build for the private organization dataset:
+
+```bash
+python scripts/local/publish_huggingface_dataset.py \
+  --private \
+  --build-root corpus_builds/private_no_bible \
+  --output-dir /tmp/formosan-mt-private-hf
+```
+
+Adding `--upload` creates or updates `FormosanBank/formosan-mt-private` and
+refuses to upload unless the Hugging Face repository is private.
+
 ## Training
 
 The `formosan_mt_experiments/` package trains four unidirectional models:

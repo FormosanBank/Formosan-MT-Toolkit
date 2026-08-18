@@ -89,6 +89,7 @@ from pivot import (  # noqa: E402
     synthetic_row,
     write_pivot_output,
 )
+from publish_huggingface_dataset import validate_release_frame  # noqa: E402
 from qc_change_audit import (  # noqa: E402
     classify_cleaner_field_changes,
 )
@@ -103,6 +104,52 @@ from xml_repairs import repair_mt_xml_structure  # noqa: E402
 
 MT_PROFILE = load_mt_standard_profile(DEFAULT_PROFILE_PATH)
 MT_PROFILE_HASH = mt_profile_sha256(DEFAULT_PROFILE_PATH)
+
+
+class HuggingFaceDatasetPublisherTests(unittest.TestCase):
+    def release_frame(self, repository: str, source: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "lang_code": ["ami"],
+                "formosan_sentence": ["O maan ko faloco'?"],
+                "english_sentence": ["What are you thinking?"],
+                "dialect": ["Coastal"],
+                "source": [source],
+                "split": ["test"],
+                "repository": [repository],
+                "pivot_origin": ["original"],
+                "mt_eval_eligible": [True],
+                "row_type": ["sentence"],
+                **{
+                    column: ["value"]
+                    for column in (
+                        "row_id",
+                        "source_record_id",
+                        "content_sha256",
+                        "repository_commit",
+                        "xml_path",
+                        "xml_id",
+                        "kindOf",
+                        "standard_namespace",
+                        "standard_origin",
+                        "pivot_provider",
+                        "pivot_direction",
+                        "source_bucket",
+                        "eval_tier",
+                        "document_id",
+                    )
+                },
+            }
+        )
+
+    def test_private_release_allows_private_repository_rows(self) -> None:
+        frame = self.release_frame("Private-Dev-Repo", "Private-Dev-Repo/Final_XML/a.xml")
+        validate_release_frame(frame, "english_sentence", private_release=True)
+
+    def test_public_release_rejects_private_repository_rows(self) -> None:
+        frame = self.release_frame("Private-Dev-Repo", "Private-Dev-Repo/Final_XML/a.xml")
+        with self.assertRaisesRegex(SystemExit, "non-public repository"):
+            validate_release_frame(frame, "english_sentence", private_release=False)
 
 
 def text_sha256(value: str) -> str:
