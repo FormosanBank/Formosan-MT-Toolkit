@@ -2098,6 +2098,8 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("headline result uses `default` metadata", card)
         self.assertIn("Document overlap is diagnostic", card)
         self.assertIn("capacity-aware source", card)
+        self.assertIn("Synthetic pivots and\nlexical entries are train-only", card)
+        self.assertIn("FormosanBank/formosan-mt-private", card)
         self.assertIn("`20260809-210523`", card)
         self.assertIn("nllb-200", card)
 

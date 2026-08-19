@@ -272,7 +272,10 @@ This is a directional model for 15 Formosan languages. It uses the
 language/source sampling, direction/language controls, fixed coarse domain
 tags, and dialect tags. Domain and dialect metadata use independent training
 dropout so `unknown` and `default` are learned inference conditions. The model
-weights are public, but the private training corpus is not included.
+weights are public. The training corpus is distributed separately to
+authorized FormosanBank members through the access-controlled
+[`FormosanBank/formosan-mt-private`](https://huggingface.co/datasets/FormosanBank/formosan-mt-private)
+dataset and is not included with the weights.
 
 ## Model details
 
@@ -298,10 +301,9 @@ when source bucket or dialect metadata is unavailable.
 
 ## Evaluation
 
-The best checkpoint was selected on validation chrF2. Evaluation contains only
-eligible sentence pairs. Human references are preferred within each source;
-validated synthetic pivots are used only where human coverage is insufficient.
-Lexical entries remain train-only.
+The best checkpoint was selected on validation chrF2. Test and validation
+contain only eligible, human-translated sentence pairs. Synthetic pivots and
+lexical entries are train-only.
 The headline result uses `{headline_mode}` metadata controls, so it does not
 assume access to test-set domain or dialect labels.
 
@@ -380,6 +382,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-stamp")
     parser.add_argument("--checkpoint", choices=["best", "final"], default="best")
     parser.add_argument("--organization", default="FormosanBank")
+    parser.add_argument(
+        "--directions",
+        nargs="+",
+        choices=tuple(DIRECTIONS),
+        default=list(DIRECTIONS),
+        help="Directions to package and publish (default: all four)",
+    )
     parser.add_argument("--publish", action="store_true")
     return parser.parse_args()
 
@@ -544,7 +553,7 @@ def main() -> None:
                 manifest=manifest,
                 run_stamp=run_stamp,
             )
-            for code in DIRECTIONS
+            for code in args.directions
         ],
     }
     release_path = args.output_root / "release_manifest.json"
