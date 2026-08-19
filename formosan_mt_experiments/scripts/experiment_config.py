@@ -133,8 +133,38 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
             raise SystemExit("MiLMMT requires AdamW")
         if training.get("lr_scheduler") != "inverse_sqrt":
             raise SystemExit("MiLMMT requires inverse-sqrt learning-rate scheduling")
-        if profile.get("generation_defaults", {}).get("beam") != 1:
-            raise SystemExit("MiLMMT headline generation must use greedy decoding")
+        comparison = profile.get("comparison", {})
+        try:
+            baseline = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"Cannot load comparison baseline {DEFAULT_PROFILE}: {exc}") from exc
+        if comparison.get("baseline_recipe_id") != baseline.get("recipe_id"):
+            raise SystemExit("MiLMMT comparison baseline does not match the NLLB recipe")
+        if comparison.get("budget_basis") != "sample_presentations":
+            raise SystemExit("MiLMMT comparison must use a sample-presentation budget")
+        if comparison.get("claim_scope") != "matched_data_exposure_not_parameter_or_flop_matched":
+            raise SystemExit("MiLMMT comparison has an invalid claim scope")
+        presentations = training.get("steps", 0) * training.get("effective_batch_size", 0)
+        if comparison.get("sample_presentations") != presentations:
+            raise SystemExit("MiLMMT comparison sample-presentation budget is inconsistent")
+        for section, field_key in (
+            ("training_defaults", "matched_training_fields"),
+            ("generation_defaults", "matched_generation_fields"),
+        ):
+            fields = comparison.get(field_key)
+            if not isinstance(fields, list) or not fields:
+                raise SystemExit(f"MiLMMT comparison has no {field_key}")
+            mismatched = [
+                field
+                for field in fields
+                if field not in profile.get(section, {})
+                or field not in baseline.get(section, {})
+                or profile[section][field] != baseline[section][field]
+            ]
+            if mismatched:
+                raise SystemExit(
+                    f"MiLMMT comparison fields differ from NLLB in {section}: {mismatched}"
+                )
     if "default" not in profile.get("generation_defaults", {}).get("metadata_modes", []):
         raise SystemExit("Headline generation must include default metadata")
     return profile

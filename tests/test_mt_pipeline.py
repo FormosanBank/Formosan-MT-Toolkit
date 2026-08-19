@@ -1657,8 +1657,9 @@ class TokenizerSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "unsupported model_family"):
                 load_profile(path)
 
-    def test_milmmt_recipe_is_pinned_to_native_greedy_sft(self) -> None:
+    def test_milmmt_recipe_is_pinned_to_matched_native_sft(self) -> None:
         profile = load_profile(MILMMT_PROFILE)
+        baseline = load_profile(DEFAULT_PROFILE)
         self.assertEqual(profile["model_family"], "milmmt")
         self.assertEqual(
             profile["base_model"],
@@ -1670,9 +1671,25 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["tokenizer"], {"mode": "native"})
         self.assertEqual(profile["training_defaults"]["optimizer"], "adamw")
         self.assertEqual(profile["training_defaults"]["lr_scheduler"], "inverse_sqrt")
-        self.assertEqual(profile["training_defaults"]["best_metric"], "macro_chrF2")
+        self.assertEqual(profile["training_defaults"]["best_metric"], "chrF2")
         self.assertFalse(profile["training_defaults"]["use_tags"])
-        self.assertEqual(profile["generation_defaults"]["beam"], 1)
+        self.assertEqual(profile["generation_defaults"]["beam"], 4)
+        comparison = profile["comparison"]
+        self.assertEqual(
+            comparison["sample_presentations"],
+            profile["training_defaults"]["steps"]
+            * profile["training_defaults"]["effective_batch_size"],
+        )
+        for field in comparison["matched_training_fields"]:
+            self.assertEqual(
+                profile["training_defaults"][field],
+                baseline["training_defaults"][field],
+            )
+        for field in comparison["matched_generation_fields"]:
+            self.assertEqual(
+                profile["generation_defaults"][field],
+                baseline["generation_defaults"][field],
+            )
 
     def test_embedding_realignment_uses_token_identity(self) -> None:
         class Tokenizer:

@@ -159,7 +159,9 @@ The `formosan_mt_experiments/` package trains four unidirectional models:
 The default profile uses NLLB-200 with the established 8k Formosan
 SentencePiece extension and metadata controls. An experimental MiLMMT-46 1B
 profile uses Xiaomi's native tokenizer and translation prompt with
-response-only causal loss.
+response-only causal loss. Its training budget and model-selection schedule
+are matched to NLLB by sampled sentence presentations; tokenizer, optimizer,
+and objective remain architecture-appropriate.
 
 On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
 shared data root and submit from `formosan_mt_experiments/`:

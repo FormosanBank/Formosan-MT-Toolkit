@@ -64,19 +64,42 @@ NLLB generation starts the decoder with EOS and selects the target with
 | Base model | MiLMMT-46-1B-v1.0, pinned revision |
 | Tokenizer | Native Gemma 3 tokenizer |
 | Objective | Full-parameter response-only causal SFT |
-| Max updates | 20,000 |
-| Microbatch / accumulation | 2 / 16 |
+| Max updates | 300,000 |
+| Microbatch / accumulation | 8 / 8 |
+| Effective batch | 64 |
 | Maximum length | 512 |
 | Learning rate | `2e-5` |
 | Optimizer / schedule | AdamW / inverse square root |
 | Precision | bf16 |
-| Generation | Greedy |
-| Checkpoint selection | Macro validation chrF2 across languages |
+| Validation / test beam | 2 / 4 |
+| Checkpoint selection | Validation chrF2 |
 
 MiLMMT follows its official language-name prompt. Formosan names are learned
 during fine-tuning because the released model does not claim native Formosan
 support. The initial recipe intentionally omits metadata context and does not
 merge the NLLB SPM8k vocabulary.
+
+### NLLB Comparison Contract
+
+The MiLMMT profile is tied to the production NLLB profile. Both receive at
+most 19.2 million sampled sentence presentations: 300,000 updates with an
+effective batch of 64. They also share the learning rate, warmup, language
+sampling, source weighting, validation cadence and sample, beam widths,
+checkpoint metric, early-stopping window, and final generation controls.
+Profile loading fails if a declared matched field drifts.
+
+Architecture-specific settings remain native. NLLB uses its Formosan SPM8k
+tokenizer, metadata tokens, Adafactor, label smoothing, and encoder-decoder
+loss. MiLMMT uses its unchanged Gemma tokenizer, Xiaomi language-name prompt,
+AdamW with inverse-square-root decay, response-only causal loss, and gradient
+checkpointing. Its 512-token limit is shared by prompt, source, and response;
+NLLB applies its 384-token limit independently to source and target.
+
+This is a matched-data-exposure comparison, not a parameter- or FLOP-matched
+architecture experiment: MiLMMT has about 1B parameters and NLLB about 600M.
+Results therefore support claims about these two trained systems under the
+same data exposure, not about decoder-only and encoder-decoder models in
+isolation.
 
 The recipe is based on the
 [MiLMMT model card](https://huggingface.co/xiaomi-research/MiLMMT-46-1B-v1.0),
@@ -102,11 +125,14 @@ python scripts/tokenizer_audit.py \
 
 The audit reports sentence and word fragmentation, unknown tokens,
 Formosan-to-target token ratios, sequence-length percentiles, and the number
-of examples that would be truncated. For initial learning-rate pilots, submit
-separate run stamps with exported `LEARNING_RATE=5e-6` and `LEARNING_RATE=1e-5`.
-Keep `2e-5` as the paper-faithful comparison point.
-Use distinct `RUN_STAMP` values and export `SEED=42`, `SEED=43`, or `SEED=44`
-when running replicated final experiments.
+of examples that would be truncated. Use the fixed `2e-5` comparison profile
+for the primary NLLB comparison. Learning-rate sweeps are separate ablations,
+not replacements for that run. Use distinct `RUN_STAMP` values and export
+`SEED=42`, `SEED=43`, or `SEED=44` for replicated final experiments.
+
+The comparison microbatch targets an H200-class GPU. On smaller cards, keep
+the effective batch at 64 by lowering `BATCH_SIZE` and increasing
+`GRAD_ACCUM_STEPS` proportionally.
 
 ## Slurm Submission
 
