@@ -982,11 +982,36 @@ def fill_assignments(
             current = stratum_group_ids.map(assignments)
 
 
+def source_assignment_tolerance(
+    frame: pd.DataFrame,
+    indexes: pd.Index,
+    group_ids: pd.Series,
+    candidate_mask: pd.Series,
+) -> int:
+    source_frame = frame.loc[indexes]
+    synthetic = source_frame.get(
+        "pivot_origin",
+        pd.Series("original", index=source_frame.index),
+    ).astype(str).eq("synthetic")
+    eligible_indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
+    group_sizes = group_ids.loc[eligible_indexes].value_counts()
+    largest_group = int(group_sizes.max()) if not group_sizes.empty else 1
+    return max(
+        2,
+        math.ceil(
+            int((~synthetic).sum())
+            * SPLIT_DEFAULTS["source_ratio_tolerance"]
+        ),
+        largest_group - 1,
+    )
+
+
 def fill_language_shortfalls(
     frame: pd.DataFrame,
     group_ids: pd.Series,
     candidate_mask: pd.Series,
-    targets: dict[str, tuple[int, int]],
+    source_targets: dict[tuple[str, str], tuple[int, int]],
+    language_targets: dict[str, tuple[int, int]],
     assignments: dict[int, str],
     *,
     seed: int,
@@ -1000,34 +1025,103 @@ def fill_language_shortfalls(
         indexes = language_frame.index
         language_group_ids = group_ids.loc[indexes]
         current = language_group_ids.map(assignments)
-        target_test, target_validate = targets[language_key]
-        for split_name, target, reserve_target, seed_offset in (
-            ("validate", target_validate, target_test, 43),
-            ("test", target_test, target_validate, 29),
+        target_test, target_validate = language_targets[language_key]
+        source_indexes = {
+            str(source): source_frame.index
+            for source, source_frame in language_frame.groupby(
+                "_source_corpus", sort=True
+            )
+        }
+        for split_name, target, seed_offset in (
+            ("validate", target_validate, 43),
+            ("test", target_test, 29),
         ):
             missing = max(0, target - int(current.eq(split_name).sum()))
+            if not missing:
+                continue
             other_split = "test" if split_name == "validate" else "validate"
-            reserve_rows = max(
-                0,
-                reserve_target - int(current.eq(other_split).sum()),
-            )
-            groups = choose_groups(
-                candidate_groups(
+            source_order = []
+            for source, stratum_indexes in source_indexes.items():
+                stratum_current = group_ids.loc[stratum_indexes].map(assignments)
+                source_test, source_validate = source_targets.get(
+                    (language_key, source), (0, 0)
+                )
+                source_target = (
+                    source_test if split_name == "test" else source_validate
+                )
+                deficit = max(
+                    0,
+                    source_target - int(stratum_current.eq(split_name).sum()),
+                )
+                source_order.append((deficit, source))
+
+            for _, source in sorted(
+                source_order, key=lambda value: (-value[0], value[1])
+            ):
+                missing = max(0, target - int(current.eq(split_name).sum()))
+                if not missing:
+                    break
+                stratum_indexes = source_indexes[source]
+                stratum_current = group_ids.loc[stratum_indexes].map(assignments)
+                source_test, source_validate = source_targets.get(
+                    (language_key, source), (0, 0)
+                )
+                source_target = (
+                    source_test if split_name == "test" else source_validate
+                )
+                source_other_target = (
+                    source_validate if split_name == "test" else source_test
+                )
+                source_rows = int(stratum_current.eq(split_name).sum())
+                headroom = (
+                    source_target
+                    + source_assignment_tolerance(
+                        frame,
+                        stratum_indexes,
+                        group_ids,
+                        candidate_mask,
+                    )
+                    - source_rows
+                )
+                if headroom <= 0:
+                    continue
+                candidates = candidate_groups(
                     frame,
-                    indexes,
+                    stratum_indexes,
                     candidate_mask,
                     group_ids,
                     assignments,
-                ),
-                missing,
-                reserve_rows=reserve_rows,
-                seed=seed + offset * 1543 + seed_offset,
-                attempts=attempts,
-                allow_overshoot=False,
-            )
-            for group_id in groups:
-                assignments[group_id] = split_name
-            current = language_group_ids.map(assignments)
+                )
+                available_rows = sum(group.eligible_rows for group in candidates)
+                reserve_rows = max(
+                    max(
+                        0,
+                        source_other_target
+                        - int(stratum_current.eq(other_split).sum()),
+                    ),
+                    available_rows - min(missing, headroom),
+                )
+                desired_rows = min(
+                    missing,
+                    max(1, source_target - source_rows),
+                )
+                groups = choose_groups(
+                    candidates,
+                    desired_rows,
+                    reserve_rows=reserve_rows,
+                    seed=(
+                        seed
+                        + offset * 1543
+                        + seed_offset
+                        + sum(map(ord, source))
+                    ),
+                    attempts=attempts,
+                    allow_overshoot=True,
+                )
+                assignments.update(
+                    {group_id: split_name for group_id in groups}
+                )
+                current = language_group_ids.map(assignments)
 
 
 def exclude_test_conflicts_with_validation(
@@ -1340,6 +1434,7 @@ def build_hard_split(
             frame,
             group_ids,
             effective_candidate_mask,
+            source_targets,
             targets,
             assignments,
             seed=seed,
@@ -1576,14 +1671,11 @@ def build_hard_split(
                 pd.Series("original", index=source_frame.index),
             ).astype(str).eq("synthetic")
             human_source_rows = int((~synthetic_source).sum())
-            group_sizes = group_ids.loc[similarity_safe_source.index].value_counts()
-            largest_group = int(group_sizes.max()) if not group_sizes.empty else 1
-            assignment_tolerance = max(
-                2,
-                math.ceil(
-                    human_source_rows * SPLIT_DEFAULTS["source_ratio_tolerance"]
-                ),
-                largest_group - 1,
+            assignment_tolerance = source_assignment_tolerance(
+                frame,
+                source_frame.index,
+                group_ids,
+                effective_candidate_mask,
             )
             source_reports[language_key][bucket_key] = {
                 "input_rows": len(source_frame),

@@ -32,6 +32,7 @@ from build_experiment_splits import (  # noqa: E402
     build_hard_split,
     choose_groups,
     exclude_test_conflicts_with_validation,
+    fill_language_shortfalls,
     ngram_candidate_conflicts,
     one_edit_conflicts,
     split_targets,
@@ -1206,6 +1207,38 @@ class LeakageTests(unittest.TestCase):
             report["source_distribution_total_variation"]["ami"]["test"],
             0.025,
         )
+
+    def test_language_shortfall_refill_respects_source_targets(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ami"] * 12,
+                "_source_corpus": ["SourceA"] * 6 + ["SourceB"] * 6,
+                "_formosan_tokens": [100] * 6 + [10] * 6,
+                "_target_tokens": [100] * 6 + [10] * 6,
+                "pivot_origin": ["original"] * 12,
+            }
+        )
+        group_ids = pd.Series(range(12), index=frame.index, dtype="int64")
+        candidate_mask = pd.Series(True, index=frame.index)
+        assignments = {0: "test", 1: "test"}
+
+        fill_language_shortfalls(
+            frame,
+            group_ids,
+            candidate_mask,
+            {
+                ("ami", "SourceA"): (2, 0),
+                ("ami", "SourceB"): (4, 0),
+            },
+            {"ami": (6, 0)},
+            assignments,
+            seed=42,
+            attempts=20,
+        )
+
+        split = group_ids.map(assignments).fillna("train")
+        self.assertEqual(int(split.iloc[:6].eq("test").sum()), 2)
+        self.assertEqual(int(split.iloc[6:].eq("test").sum()), 4)
 
     def test_hard_split_redistributes_lexical_source_shortfall(self) -> None:
         raw = self.hard_split_fixture()
