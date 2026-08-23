@@ -21,19 +21,13 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
-import re
-import sys
-import time
 import unicodedata
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
-import requests
 from corpus_quality import (
     exact_key,
     normalize_text,
@@ -53,12 +47,63 @@ from pipeline_common import (
     sha256_file,
     utc_now,
 )
+from pivot_cache import (
+    PROVIDER,
+    append_jsonl,
+    load_cache,
+    load_cache_chain,
+    make_cache_key,
+    write_jsonl_atomic,
+)
+from pivot_deepl import (
+    DeepLClient,
+    DeepLFatalError,
+    DeepLKey,
+    DeepLQuotaExceeded,
+    DeepLRuntimeError,
+    batch_jobs,
+    choose_deepl_api_base,
+    discover_api_key_envs,
+    load_deepl_keys,
+    parse_api_key_envs,
+    read_deepl_usage_for_key,
+    request_body_size,
+)
+from pivot_types import (
+    CharBudget,
+    Direction,
+    DirectionStats,
+    LoadedCorpus,
+    OutputBuildResult,
+    TranslationJob,
+)
 from tqdm import tqdm
+
+__all__ = [
+    "CharBudget",
+    "DeepLClient",
+    "DeepLFatalError",
+    "DeepLKey",
+    "DeepLQuotaExceeded",
+    "DeepLRuntimeError",
+    "Direction",
+    "DirectionStats",
+    "OutputBuildResult",
+    "choose_deepl_api_base",
+    "discover_api_key_envs",
+    "load_cache",
+    "load_cache_chain",
+    "load_deepl_keys",
+    "make_cache_key",
+    "parse_api_key_envs",
+    "pivot_candidate_reason",
+    "synthetic_row",
+    "write_pivot_output",
+]
 
 DEEPL_MAX_TEXTS_PER_REQUEST = 50
 DEEPL_MAX_REQUEST_BYTES = 128 * 1024
 DEFAULT_SAFE_REQUEST_BYTES = 120 * 1024
-PROVIDER = "deepl"
 PIPELINE_CONFIG = load_pipeline_config()
 PIVOT_POLICY = PIPELINE_CONFIG["pivot"]
 MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_CONFIG["cleaning"][
@@ -92,95 +137,6 @@ PROVENANCE_COLUMNS = [
     "pivot_cache_key",
     "pivot_detected_source_lang",
 ]
-
-
-class DeepLRuntimeError(RuntimeError):
-    """Base class for DeepL runtime errors."""
-
-
-class DeepLQuotaExceeded(DeepLRuntimeError):
-    """Raised when DeepL reports quota exhaustion."""
-
-
-class DeepLFatalError(DeepLRuntimeError):
-    """Raised for non-retryable DeepL API errors."""
-
-
-@dataclass
-class Direction:
-    name: str
-    source_path: Path
-    original_target_path: Path
-    source_text_col: str
-    target_text_col: str
-    source_language: str
-    deepl_source_lang: str
-    deepl_target_lang: str
-    output_filename: str
-    cache_filename: str
-
-
-@dataclass
-class LoadedCorpus:
-    path: Path
-    frame: pd.DataFrame
-    profile: dict[str, str]
-
-
-@dataclass
-class DirectionStats:
-    direction: str
-    source_rows: int = 0
-    original_rows: int = 0
-    candidate_rows: int = 0
-    ineligible_source_rows: int = 0
-    candidate_exclusion_counts: dict[str, int] = field(default_factory=dict)
-    empty_source_rows: int = 0
-    cached_unique_before: int = 0
-    missing_unique_before: int = 0
-    translated_unique: int = 0
-    translated_chars: int = 0
-    target_overlap_rows_skipped: int = 0
-    target_overlap_unique_skipped: int = 0
-    deferred_by_budget_unique: int = 0
-    deferred_by_budget_chars: int = 0
-    skipped_over_request_limit: int = 0
-    stopped_reason: Optional[str] = None
-    synthetic_rows_available: int = 0
-    synthetic_rows_missing: int = 0
-    synthetic_rows_quarantined: int = 0
-    synthetic_rows_written: int = 0
-    duplicate_rows_skipped: int = 0
-    split_overrides: int = 0
-    output_rows: int = 0
-    errors: int = 0
-    cache_path: Optional[str] = None
-    read_cache_paths: Optional[list[str]] = None
-    cache_conflicts: int = 0
-    cache_conflict_path: Optional[str] = None
-    cache_conflict_sha256: Optional[str] = None
-    output_path: Optional[str] = None
-    quarantine_path: Optional[str] = None
-    quarantine_sha256: Optional[str] = None
-
-
-@dataclass
-class CharBudget:
-    remaining: Optional[int]
-
-    def take(self, amount: int) -> None:
-        if self.remaining is not None:
-            self.remaining -= amount
-
-    def exhausted(self) -> bool:
-        return self.remaining is not None and self.remaining <= 0
-
-
-@dataclass
-class TranslationJob:
-    key: str
-    text: str
-    chars: int
 
 
 def bool_value(value: object) -> bool:
@@ -228,178 +184,6 @@ def pivot_candidate_reason(row: Mapping[str, Any], direction: Direction) -> str:
     if metadata_reason:
         return metadata_reason
     return ""
-
-
-@dataclass
-class OutputBuildResult:
-    original_rows: int = 0
-    synthetic_rows_available: int = 0
-    synthetic_rows_missing: int = 0
-    synthetic_rows_quarantined: int = 0
-    synthetic_rows_written: int = 0
-    target_overlap_rows_skipped: int = 0
-    duplicate_rows_skipped: int = 0
-    split_overrides: int = 0
-    output_rows: int = 0
-    incomplete_path: Optional[str] = None
-    quarantine_path: Optional[str] = None
-    quarantine_sha256: Optional[str] = None
-
-
-@dataclass
-class DeepLKey:
-    env_name: str
-    auth_key: str
-    api_base: str
-
-
-class DeepLClient:
-    def __init__(
-        self,
-        keys: list[DeepLKey],
-        timeout: float,
-        max_retries: int,
-        retry_backoff: float,
-    ) -> None:
-        if not keys:
-            raise ValueError("DeepLClient requires at least one API key.")
-        self.keys = keys
-        self.key_index = 0
-        self.timeout = timeout
-        self.max_retries = max(1, max_retries)
-        self.retry_backoff = retry_backoff
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Content-Type": "application/json",
-                "User-Agent": "FormosanMT-Pivot/1.0",
-            }
-        )
-        self._apply_current_key()
-
-    @property
-    def current_key(self) -> DeepLKey:
-        return self.keys[self.key_index]
-
-    @property
-    def active_env_name(self) -> str:
-        return self.current_key.env_name
-
-    def _apply_current_key(self) -> None:
-        self.session.headers["Authorization"] = f"DeepL-Auth-Key {self.current_key.auth_key}"
-
-    def _advance_key(self) -> bool:
-        if self.key_index + 1 >= len(self.keys):
-            return False
-        exhausted_name = self.current_key.env_name
-        self.key_index += 1
-        self._apply_current_key()
-        print(
-            f"DeepL key {exhausted_name} exhausted; switching to {self.current_key.env_name}.",
-            file=sys.stderr,
-        )
-        return True
-
-    def translate(
-        self,
-        texts: list[str],
-        *,
-        source_lang: str,
-        target_lang: str,
-        split_sentences: str,
-        preserve_formatting: bool,
-        model_type: Optional[str],
-    ) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "text": texts,
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-            "split_sentences": split_sentences,
-            "preserve_formatting": preserve_formatting,
-        }
-        if model_type:
-            payload["model_type"] = model_type
-
-        last_quota_error = ""
-        while True:
-            url = f"{self.current_key.api_base}/v2/translate"
-            last_error = ""
-            for attempt in range(1, self.max_retries + 1):
-                try:
-                    resp = self.session.post(url, json=payload, timeout=self.timeout)
-                except requests.RequestException as exc:
-                    last_error = str(exc)
-                    if attempt == self.max_retries:
-                        raise DeepLRuntimeError(f"DeepL request failed: {last_error}") from exc
-                    sleep_for = self.retry_backoff * attempt
-                    time.sleep(sleep_for)
-                    continue
-
-                if resp.status_code == 200:
-                    data = resp.json()
-                    translations = data.get("translations", [])
-                    if len(translations) != len(texts):
-                        raise DeepLRuntimeError(
-                            "DeepL returned a different number of translations "
-                            f"({len(translations)}) than inputs ({len(texts)})."
-                        )
-                    return translations
-
-                body = _safe_response_text(resp)
-                if resp.status_code == 456:
-                    last_quota_error = f"{self.current_key.env_name}: {body}"
-                    if self._advance_key():
-                        break
-                    raise DeepLQuotaExceeded(f"All DeepL API keys exhausted. Last error: {last_quota_error}")
-                if resp.status_code in {401, 403, 404}:
-                    bad_name = self.current_key.env_name
-                    print(
-                        f"DeepL key {bad_name} is invalid or forbidden (HTTP {resp.status_code}); skipping it.",
-                        file=sys.stderr,
-                    )
-                    if self._advance_key():
-                        break
-                    raise DeepLFatalError(
-                        f"All DeepL API keys failed. Last error from {bad_name}: HTTP {resp.status_code}: {body}"
-                    )
-                if resp.status_code == 400:
-                    raise DeepLFatalError(f"DeepL HTTP 400 using {self.current_key.env_name}: {body}")
-
-                retry_after = resp.headers.get("Retry-After")
-                if resp.status_code in {408, 409, 429, 500, 502, 503, 504} and attempt < self.max_retries:
-                    if retry_after and retry_after.isdigit():
-                        sleep_for = float(retry_after)
-                    else:
-                        sleep_for = self.retry_backoff * attempt
-                    time.sleep(sleep_for)
-                    last_error = f"HTTP {resp.status_code}: {body}"
-                    continue
-
-                raise DeepLRuntimeError(f"DeepL HTTP {resp.status_code} using {self.current_key.env_name}: {body}")
-            else:
-                raise DeepLRuntimeError(f"DeepL request failed after retries: {last_error}")
-
-    def usage(self) -> Optional[dict[str, Any]]:
-        url = f"{self.current_key.api_base}/v2/usage"
-        try:
-            resp = self.session.get(url, timeout=self.timeout)
-            if resp.status_code != 200:
-                print(
-                    f"Warning: could not read DeepL usage for {self.current_key.env_name}: HTTP {resp.status_code}",
-                    file=sys.stderr,
-                )
-                return None
-            return resp.json()
-        except requests.RequestException as exc:
-            print(f"Warning: could not read DeepL usage for {self.current_key.env_name}: {exc}", file=sys.stderr)
-            return None
-
-
-def _safe_response_text(resp: requests.Response) -> str:
-    text = resp.text.strip()
-    if len(text) > 500:
-        text = text[:500] + "..."
-    return text or resp.reason
 
 
 def find_project_root(start: Path) -> Path:
@@ -483,249 +267,6 @@ def formosan_key(row: pd.Series) -> tuple[str, str]:
     lang_code = str(row.get("lang_code", "") or "").strip().lower()
     formosan = normalize_key_text(row.get("formosan_sentence", ""))
     return lang_code, formosan
-
-
-def choose_deepl_api_base(auth_key: str, override: Optional[str]) -> str:
-    if override:
-        return override.rstrip("/")
-    if auth_key.endswith(":fx"):
-        return "https://api-free.deepl.com"
-    return "https://api.deepl.com"
-
-
-def discover_api_key_envs(environ: Optional[Mapping[str, str]] = None) -> list[str]:
-    """Return configured DEEPL_API_KEY variables in stable numeric order."""
-    source = os.environ if environ is None else environ
-    names: list[tuple[int, str]] = []
-    for env_name, value in source.items():
-        match = re.fullmatch(r"DEEPL_API_KEY(?:_(\d+))?", env_name)
-        if match and str(value).strip():
-            suffix = int(match.group(1) or 1)
-            names.append((suffix, env_name))
-    return [env_name for _, env_name in sorted(names, key=lambda item: (item[0], item[1]))]
-
-
-def parse_api_key_envs(raw: str) -> list[str]:
-    if str(raw or "").strip().lower() == "auto":
-        return discover_api_key_envs()
-    envs = [part.strip() for part in str(raw or "").split(",") if part.strip()]
-    out: list[str] = []
-    seen: set[str] = set()
-    for env_name in envs:
-        if env_name not in seen:
-            out.append(env_name)
-            seen.add(env_name)
-    return out
-
-
-def load_deepl_keys(env_names: list[str], api_base_override: Optional[str]) -> list[DeepLKey]:
-    keys: list[DeepLKey] = []
-    for env_name in env_names:
-        auth_key = os.getenv(env_name, "").strip()
-        if not auth_key:
-            continue
-        keys.append(
-            DeepLKey(
-                env_name=env_name,
-                auth_key=auth_key,
-                api_base=choose_deepl_api_base(auth_key, api_base_override),
-            )
-        )
-    return keys
-
-
-def read_deepl_usage_for_key(key: DeepLKey, timeout: float) -> Optional[dict[str, Any]]:
-    headers = {"Authorization": f"DeepL-Auth-Key {key.auth_key}"}
-    try:
-        resp = requests.get(f"{key.api_base}/v2/usage", headers=headers, timeout=timeout)
-        if resp.status_code != 200:
-            print(
-                f"Warning: could not read DeepL usage for {key.env_name}: HTTP {resp.status_code}",
-                file=sys.stderr,
-            )
-            return None
-        usage = resp.json()
-        usage["api_key_env"] = key.env_name
-        return usage
-    except requests.RequestException as exc:
-        print(f"Warning: could not read DeepL usage for {key.env_name}: {exc}", file=sys.stderr)
-        return None
-
-
-def make_cache_key(
-    *,
-    provider: str,
-    source_lang: str,
-    target_lang: str,
-    text: str,
-    split_sentences: str,
-    preserve_formatting: bool,
-    model_type: Optional[str],
-) -> str:
-    payload = {
-        "provider": provider,
-        "source_lang": source_lang,
-        "target_lang": target_lang,
-        "split_sentences": split_sentences,
-        "preserve_formatting": preserve_formatting,
-        "model_type": model_type or "",
-        "text": text,
-    }
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()
-
-
-def load_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
-    cache: dict[str, dict[str, Any]] = {}
-    if not cache_path.exists():
-        return cache
-
-    with cache_path.open("r", encoding="utf-8") as fh:
-        for line_no, line in enumerate(fh, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(f"Malformed DeepL cache record {cache_path}:{line_no}: {exc}") from exc
-            key = record.get("key")
-            translation = record.get("translation")
-            if not isinstance(key, str) or not isinstance(translation, str):
-                raise RuntimeError(f"Invalid DeepL cache record {cache_path}:{line_no}: missing string key/translation")
-            expected_key = make_cache_key(
-                provider=str(record.get("provider") or PROVIDER),
-                source_lang=str(record.get("source_lang") or ""),
-                target_lang=str(record.get("target_lang") or ""),
-                text=str(record.get("text") or ""),
-                split_sentences=str(record.get("split_sentences") or "0"),
-                preserve_formatting=bool(record.get("preserve_formatting", True)),
-                model_type=(str(record.get("model_type_requested")) if record.get("model_type_requested") else None),
-            )
-            if key != expected_key:
-                raise RuntimeError(f"DeepL cache key mismatch at {cache_path}:{line_no}; cache may be corrupt")
-            existing = cache.get(key)
-            if existing is not None and existing.get("translation") != translation:
-                raise RuntimeError(f"Conflicting DeepL translations for cache key {key} in {cache_path}")
-            cache[key] = record
-    return cache
-
-
-def load_cache_chain(
-    cache_paths: Iterable[Path],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Load cache layers in increasing priority order and audit conflicts."""
-    merged: dict[str, dict[str, Any]] = {}
-    selected_paths: dict[str, Path] = {}
-    conflicts: list[dict[str, Any]] = []
-    for cache_path in cache_paths:
-        for key, record in load_cache(cache_path).items():
-            existing = merged.get(key)
-            if existing is not None and existing.get("translation") != record.get("translation"):
-                conflicts.append(
-                    {
-                        "cache_key": key,
-                        "text": str(record.get("text") or existing.get("text") or ""),
-                        "lower_priority_cache": str(selected_paths[key]),
-                        "lower_priority_created_at": str(existing.get("created_at") or ""),
-                        "lower_priority_translation": str(existing.get("translation") or ""),
-                        "higher_priority_cache": str(cache_path),
-                        "higher_priority_created_at": str(record.get("created_at") or ""),
-                        "selected_translation": str(record.get("translation") or ""),
-                        "selection_policy": "later_cache_wins",
-                    }
-                )
-            merged[key] = record
-            selected_paths[key] = cache_path
-    return merged, conflicts
-
-
-def write_jsonl_atomic(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-
-
-def append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        for record in records:
-            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-
-
-def request_body_size(
-    texts: list[str],
-    *,
-    source_lang: str,
-    target_lang: str,
-    split_sentences: str,
-    preserve_formatting: bool,
-    model_type: Optional[str],
-) -> int:
-    payload: dict[str, Any] = {
-        "text": texts,
-        "source_lang": source_lang,
-        "target_lang": target_lang,
-        "split_sentences": split_sentences,
-        "preserve_formatting": preserve_formatting,
-    }
-    if model_type:
-        payload["model_type"] = model_type
-    return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-
-
-def batch_jobs(
-    jobs: Iterable[TranslationJob],
-    *,
-    max_texts: int,
-    max_request_bytes: int,
-    source_lang: str,
-    target_lang: str,
-    split_sentences: str,
-    preserve_formatting: bool,
-    model_type: Optional[str],
-) -> Iterable[list[TranslationJob]]:
-    batch: list[TranslationJob] = []
-    for job in jobs:
-        one_size = request_body_size(
-            [job.text],
-            source_lang=source_lang,
-            target_lang=target_lang,
-            split_sentences=split_sentences,
-            preserve_formatting=preserve_formatting,
-            model_type=model_type,
-        )
-        if one_size > max_request_bytes:
-            if batch:
-                yield batch
-                batch = []
-            yield [job]
-            continue
-
-        candidate = batch + [job]
-        candidate_size = request_body_size(
-            [j.text for j in candidate],
-            source_lang=source_lang,
-            target_lang=target_lang,
-            split_sentences=split_sentences,
-            preserve_formatting=preserve_formatting,
-            model_type=model_type,
-        )
-        if batch and (len(candidate) > max_texts or candidate_size > max_request_bytes):
-            yield batch
-            batch = [job]
-        else:
-            batch = candidate
-
-    if batch:
-        yield batch
 
 
 def candidate_jobs(
