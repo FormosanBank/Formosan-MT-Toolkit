@@ -2166,6 +2166,14 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
+            "formosan_mt_experiments/scripts/training_data.py",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/scripts/training_state.py",
+            repository_paths,
+        )
+        self.assertIn(
             "scripts/shared/columnar_io.py",
             repository_paths,
         )
