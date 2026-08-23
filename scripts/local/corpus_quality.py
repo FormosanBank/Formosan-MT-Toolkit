@@ -45,18 +45,6 @@ STAGE_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 SPEAKER_PREFIX_RE = re.compile(r"^[A-Z][：:]\s*")
-LEXICAL_PATH_HINTS = (
-    "dictionary",
-    "dict/",
-    "dict-",
-    "dicts",
-    "lexicon",
-    "wordlist",
-    "vocab",
-    "詞表",
-    "學習詞表",
-    "learning_vocabulary",
-)
 NON_TRANSLATION_KINDS = frozenset({"gloss", "interlinear-gloss"})
 GLOSS_TAGS = frozenset(
     """
@@ -262,13 +250,10 @@ def has_terminal_punctuation(value: str) -> bool:
     return bool(text) and text[-1] in TERMINAL_PUNCTUATION
 
 
-def normalized_row_type(value: object, source_path: object) -> str:
+def normalized_row_type(value: object) -> str:
     existing = str(value or "").strip().lower()
     if existing in {"sentence", "lexeme", "morpheme"}:
         return existing
-    path = str(source_path or "").lower()
-    if any(hint in path for hint in LEXICAL_PATH_HINTS):
-        return "lexeme"
     return "unknown"
 
 
@@ -603,7 +588,6 @@ def alignment_quality(
     *,
     target_language: str,
     row_type: str,
-    source_path: object = "",
 ) -> tuple[str, tuple[str, ...]]:
     """Find high-confidence alignment failures and risky explanatory rows."""
     if row_type != "sentence":
@@ -646,25 +630,12 @@ def alignment_quality(
         ),
         "",
     )
-    path_is_lexical = any(
-        hint in str(source_path or "").casefold() for hint in LEXICAL_PATH_HINTS
-    )
     english_lexical_evidence = target_language == "english" and (
         ";" in target
         or target.lstrip().startswith("(")
         or (first_target_letter and first_target_letter.islower())
     )
-    if (
-        source_units <= 4
-        and (
-            english_lexical_evidence
-            or (
-                target_count <= 12
-                and not target_is_punctuated
-                and path_is_lexical
-            )
-        )
-    ):
+    if source_units <= 4 and english_lexical_evidence:
         flags.append("lexical_content_sentence")
     if source_units <= 3 and target_count >= 12:
         flags.append("length_asymmetry")
@@ -798,7 +769,6 @@ def quality_decision(
         target,
         target_language=target_language,
         row_type=row_type,
-        source_path=row.get("source", ""),
     )
     if alignment_reason:
         return QualityDecision("quarantine", alignment_reason)
@@ -839,12 +809,8 @@ def normalize_dataframe(
         output[column] = normalized
         output[ledger_column] = ledgers
     output["row_type"] = [
-        normalized_row_type(row_type, source)
-        for row_type, source in zip(
-            output.get("row_type", pd.Series([""] * len(output))),
-            output.get("source", pd.Series([""] * len(output))),
-            strict=True,
-        )
+        normalized_row_type(row_type)
+        for row_type in output.get("row_type", pd.Series([""] * len(output)))
     ]
     return output, transformations
 

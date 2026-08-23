@@ -142,11 +142,11 @@ backs off on transient errors, and writes each successful response immediately
 to a content-keyed JSONL cache. Rebuilds read shared and build-local caches
 before spending quota.
 
-Only structurally typed, MT-eligible sentence rows enter pivoting. Known
-lexical sources, ambiguous standards, gloss targets, and rows below the
-four-unit Formosan or pivot-source floor are excluded before cache lookup or
-billing. Existing cache entries remain reusable but are joined only for rows
-that still satisfy this policy.
+Only structurally typed, MT-eligible sentence rows enter pivoting. Provenance
+paths never determine eligibility. Explicit lexemes and morphemes, ambiguous
+standards, gloss targets, and rows below the four-unit Formosan or pivot-source
+floor are excluded before cache lookup or billing. Existing cache entries
+remain reusable but are joined only for rows that still satisfy this policy.
 
 Pivot rows retain provider, direction, source text, origin, cache key, detected
 language, and inherited XML provenance. Responses pass the same script,

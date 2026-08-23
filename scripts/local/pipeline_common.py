@@ -43,7 +43,6 @@ def load_pipeline_config() -> dict[str, Any]:
         pivot.get("require_complete") is not True
         or pivot.get("eligible_row_types") != ["sentence"]
         or pivot.get("require_mt_eval_eligible") is not True
-        or pivot.get("exclude_lexical_sources") is not True
         or not isinstance(pivot.get("min_formosan_tokens"), int)
         or pivot["min_formosan_tokens"] < 1
         or not isinstance(pivot.get("min_source_units"), int)

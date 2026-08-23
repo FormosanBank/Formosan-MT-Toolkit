@@ -34,8 +34,8 @@ the pinned QC source.
 This refreshes repository heads, reuses valid content-addressed stages, reuses
 DeepL responses by content key, and reruns every downstream stage affected by
 changed XML or code. DeepL work is planned only for MT-eligible sentence rows;
-lexicons, morphemes, known lexical sources, and rows below the four-unit length
-floor do not require cache entries.
+explicit lexemes, morphemes, and rows below the four-unit length floor do not
+require cache entries. Repository and path names never determine eligibility.
 
 Force corpus stages to rerun while still reusing paid DeepL responses:
 

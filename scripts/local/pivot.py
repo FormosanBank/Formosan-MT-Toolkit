@@ -35,7 +35,6 @@ from typing import Any, Iterable, Mapping, Optional
 import pandas as pd
 import requests
 from corpus_quality import (
-    LEXICAL_PATH_HINTS,
     exact_key,
     normalize_text,
     quality_decision,
@@ -193,12 +192,6 @@ def pivot_candidate_reason(row: Mapping[str, Any], direction: Direction) -> str:
     }
     if row_type not in allowed_types:
         return "non_sentence"
-
-    source_path = str(row.get("source") or "").casefold()
-    if PIVOT_POLICY["exclude_lexical_sources"] and any(
-        hint in source_path for hint in LEXICAL_PATH_HINTS
-    ):
-        return "lexical_source"
 
     if PIVOT_POLICY["require_mt_eval_eligible"] and not bool_value(
         row.get("mt_eval_eligible")

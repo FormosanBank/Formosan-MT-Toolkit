@@ -1463,6 +1463,20 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         self.assertEqual(len(accepted), 1)
         self.assertEqual(len(rejected), 0)
 
+    def test_cleaning_does_not_infer_row_type_from_provenance(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "formosan": "mako ko tawki niyam.",
+                    "english": "The weather is good today.",
+                    "row_type": "",
+                    "source": "Formosan-ILRDF_Dicts/Final_XML/Amis/sample.xml",
+                }
+            ]
+        )
+        normalized, _ = normalize_dataframe(frame, "formosan", "english")
+        self.assertEqual(normalized.loc[0, "row_type"], "unknown")
+
     def test_literal_none_is_not_treated_as_missing_csv_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "data.csv"
@@ -2012,14 +2026,12 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             "Five only. (It is possible that the speaker intended a longer explanation.)",
             target_language="english",
             row_type="sentence",
-            source_path="Dictionary/example.xml",
         )
         _, chinese_flags = alignment_quality(
             "gung quzang qipu qaca qema qali",
             "gung（牛） quzang（蝦） qipu（魚） qaca（鳥） qema（狗） qali（豬）",
             target_language="chinese",
             row_type="sentence",
-            source_path="Dictionary/example.xml",
         )
 
         self.assertIn("definition_like_sentence", english_flags)
@@ -2533,8 +2545,13 @@ class PivotContractTests(unittest.TestCase):
                 (output_dir / "big_corpus_en_pivot.csv").exists()
             )
 
-    def test_pivot_eligibility_excludes_lexical_and_short_rows(self) -> None:
+    def test_pivot_eligibility_is_structural_and_content_based(self) -> None:
         sentence = self.source_row()
+        self.assertEqual(pivot_candidate_reason(sentence, self.direction()), "")
+
+        sentence["source"] = (
+            "Formosan-ILRDF_Dicts/Formosan-ILRDF_Dicts/Final_XML/Amis/sample.xml"
+        )
         self.assertEqual(pivot_candidate_reason(sentence, self.direction()), "")
 
         lexeme = sentence.copy()
