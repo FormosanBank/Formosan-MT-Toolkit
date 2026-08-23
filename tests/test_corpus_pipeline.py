@@ -3146,6 +3146,32 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                         "pivot_origin",
                     ].ne("synthetic").all()
                 )
+                signature_columns = [
+                    "row_id",
+                    "source_record_id",
+                    "lang_code",
+                    "formosan_sentence",
+                    column,
+                    "row_type",
+                    "pivot_origin",
+                    "split",
+                ]
+                signature = hashlib.sha256(
+                    json.dumps(
+                        frame[signature_columns]
+                        .fillna("")
+                        .astype(str)
+                        .to_dict("records"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                expected_signatures = {
+                    "en": "7fc0951c31639cef7ad16c1343d95640f51cbe4466dd778aad2108a18560afb5",
+                    "zh": "1c9d2ccc029d27ddc24c5bc6618be2bf50490bc73eff6111b7e152dadd9c5708",
+                }
+                self.assertEqual(signature, expected_signatures[short])
 
 
 class LargeArtifactSafetyTests(unittest.TestCase):
