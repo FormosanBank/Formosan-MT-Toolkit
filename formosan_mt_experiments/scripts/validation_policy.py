@@ -73,7 +73,6 @@ REQUIRED_PROVENANCE = {
 }
 
 
-
 def validate_provenance(frame: pd.DataFrame) -> dict[str, object]:
     missing_columns = sorted(REQUIRED_PROVENANCE - set(frame.columns))
     empty_counts = {
@@ -611,4 +610,3 @@ def validate_splits(
         "source_ratio_tolerance": source_ratio_tolerance,
         "ngram_jaccard_threshold": ngram_threshold,
     }
-

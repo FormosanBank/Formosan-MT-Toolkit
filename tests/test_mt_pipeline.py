@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -793,6 +794,55 @@ class LeakageTests(unittest.TestCase):
                 validation_index.conflicts(reference, candidates),
                 split_index.conflicts(reference, candidates),
             )
+
+    def test_candidate_validation_index_matches_split_index_randomized(self) -> None:
+        rng = random.Random(917)
+        alphabet = "abcdefghijklmnopqrstuvwxyz "
+        for sample in range(10):
+            values: list[str] = []
+            languages: list[str] = []
+            for _ in range(50):
+                value = "".join(
+                    rng.choice(alphabet)
+                    for _ in range(rng.randint(2, 50))
+                )
+                if values and rng.random() < 0.35:
+                    value = values[rng.randrange(len(values))]
+                    if value and rng.random() < 0.7:
+                        offset = rng.randrange(len(value))
+                        value = (
+                            value[:offset]
+                            + rng.choice(alphabet)
+                            + value[offset + 1 :]
+                        )
+                values.append(value)
+                languages.append(rng.choice(["ami", "bnn", "tay"]))
+            frame = pd.DataFrame(
+                {"lang_code": languages, "text": values},
+                index=range(sample * 100, sample * 100 + len(values)),
+            )
+            indexes = list(frame.index)
+            rng.shuffle(indexes)
+            reference = pd.Index(indexes[:30])
+            candidates = pd.Index(indexes[30:])
+            for threshold in (0.70, 0.82, 0.95):
+                for by_language in (False, True):
+                    split_index = NgramSimilarityIndex(
+                        frame,
+                        "text",
+                        by_language=by_language,
+                        threshold=threshold,
+                    )
+                    validation_index = ValidationNgramIndex(
+                        frame,
+                        "text",
+                        by_language=by_language,
+                        threshold=threshold,
+                    )
+                    self.assertEqual(
+                        validation_index.conflicts(reference, candidates),
+                        split_index.conflicts(reference, candidates),
+                    )
 
     def test_ngram_index_matches_tame_high_exposure_boundary(self) -> None:
         frame = pd.DataFrame(
