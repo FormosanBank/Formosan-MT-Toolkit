@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
-import hashlib
+import sys
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SHARED_SCRIPTS = PROJECT_ROOT / "scripts" / "shared"
+sys.path.insert(0, str(SHARED_SCRIPTS))
+from reproducibility import sha256_file  # noqa: E402
 
 ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
     "configs/milmmt_1b_experiment.json",
     "scripts/bootstrap_predictions.py",
     "scripts/build_experiment_splits.py",
-    "scripts/columnar_cache.py",
     "scripts/evaluate_directional.py",
     "scripts/experiment_config.py",
     "scripts/formosan_mt_inference.py",
@@ -44,15 +48,9 @@ ACTIVE_REPOSITORY_FILES = (
     "scripts/local/corpus_quality.py",
     "scripts/local/mt_standardization.py",
     "scripts/local/standardize_mt_corpus.py",
+    "scripts/shared/columnar_io.py",
+    "scripts/shared/reproducibility.py",
 )
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def artifact_record(deployment_path: Path, repository_path: str) -> dict[str, str]:

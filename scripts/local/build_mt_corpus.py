@@ -756,6 +756,8 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                     script("scripts/local/filter_split_corpus.py"),
                     script("scripts/local/corpus_quality.py"),
                     script("scripts/local/pipeline_common.py"),
+                    script("scripts/shared/columnar_io.py"),
+                    script("scripts/shared/reproducibility.py"),
                 ],
             )
             cache_name = f"filter_{target}"
@@ -785,7 +787,12 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                     cache,
                     cache_name,
                     filter_key,
-                    [output_path, *report_path.parent.glob("*")],
+                    [
+                        output_path,
+                        output_path.with_suffix(".parquet"),
+                        output_path.with_suffix(".parquet.json"),
+                        *report_path.parent.glob("*"),
+                    ],
                     lang.code,
                 )
     if not args.dry_run:
@@ -933,6 +940,8 @@ def build_aggregates(
             script("scripts/local/build_big_corpus.py"),
             script("scripts/local/corpus_quality.py"),
             script("scripts/local/pipeline_common.py"),
+            script("scripts/shared/columnar_io.py"),
+            script("scripts/shared/reproducibility.py"),
         ],
     )
     cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, cache_name, key)
@@ -974,7 +983,11 @@ def build_aggregates(
                 [
                     output_dir / "aggregate_manifest.json",
                     output_dir / "big_corpus_en.csv",
+                    output_dir / "big_corpus_en.parquet",
+                    output_dir / "big_corpus_en.parquet.json",
                     output_dir / "big_corpus_zh.csv",
+                    output_dir / "big_corpus_zh.parquet",
+                    output_dir / "big_corpus_zh.parquet.json",
                 ],
                 "build",
             )
@@ -1133,7 +1146,8 @@ def build_hard_splits(
             script("formosan_mt_experiments/scripts/audit_corpus_exposure.py"),
             script("formosan_mt_experiments/scripts/experiment_config.py"),
             script("formosan_mt_experiments/scripts/mt_common.py"),
-            script("formosan_mt_experiments/scripts/columnar_cache.py"),
+            script("scripts/shared/columnar_io.py"),
+            script("scripts/shared/reproducibility.py"),
             script("formosan_mt_experiments/configs/default_experiment.json"),
         ],
     )

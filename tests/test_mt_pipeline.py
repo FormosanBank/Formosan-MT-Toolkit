@@ -15,9 +15,10 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
+sys.path.insert(0, str(ROOT / "scripts/shared"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
-import columnar_cache  # noqa: E402
+import columnar_io  # noqa: E402
 import milmmt_runtime as milmmt  # noqa: E402
 import nllb_runtime as nllb  # noqa: E402
 import tokenizer_audit  # noqa: E402
@@ -38,7 +39,7 @@ from build_experiment_splits import (  # noqa: E402
     one_edit_conflicts,
     split_targets,
 )
-from columnar_cache import read_csv_or_columnar, write_columnar_cache  # noqa: E402
+from columnar_io import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import (  # noqa: E402
     DEFAULT_PROFILE,
     MILMMT_PROFILE,
@@ -100,9 +101,9 @@ class ColumnarCacheTests(unittest.TestCase):
             cached = release.assign(_normalized=["x", "y"])
             release.to_csv(csv_path, index=False)
             with mock.patch.object(
-                columnar_cache,
+                columnar_io,
                 "sha256_file",
-                wraps=columnar_cache.sha256_file,
+                wraps=columnar_io.sha256_file,
             ) as hasher:
                 write_columnar_cache(cached, csv_path)
                 hashed_calls = hasher.call_count
@@ -2109,9 +2110,10 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn(
-            "formosan_mt_experiments/scripts/columnar_cache.py",
+            "scripts/shared/columnar_io.py",
             repository_paths,
         )
+        self.assertIn("scripts/shared/reproducibility.py", repository_paths)
         self.assertIn(
             "formosan_mt_experiments/scripts/evaluate_directional.py",
             repository_paths,

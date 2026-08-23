@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 from pathlib import Path
@@ -18,7 +17,15 @@ from corpus_quality import (
     target_gloss_reason,
     target_metadata_reason,
 )
-from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
+from pipeline_common import (
+    atomic_write_json,
+    read_csv_or_columnar,
+    sha256_file,
+    stable_json_hash,
+    utc_now,
+    write_columnar_cache,
+    write_csv_atomic,
+)
 
 PIVOT_QUARANTINE_RE = re.compile(
     r"^pivot_rejections_(?:en2zh|zh2en)\.csv$"
@@ -113,7 +120,7 @@ CANONICAL_SUFFIX = [
 
 def read_csv(path: Path) -> pd.DataFrame:
     try:
-        frame = pd.read_csv(
+        frame = read_csv_or_columnar(
             path,
             dtype=str,
             keep_default_na=False,
@@ -343,18 +350,6 @@ def require_output_space(paths: list[Path], output_dir: Path) -> None:
         )
 
 
-def write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
-    """Write a CSV without leaving a truncated release artifact on failure."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.incomplete")
-    temporary.unlink(missing_ok=True)
-    try:
-        frame.to_csv(temporary, index=False)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def load_inputs(directory: Path, output_names: set[str]) -> tuple[list[pd.DataFrame], list[pd.DataFrame], list[dict]]:
     english: list[pd.DataFrame] = []
     chinese: list[pd.DataFrame] = []
@@ -413,6 +408,7 @@ def write_target(frames: list[pd.DataFrame], path: Path, target_column: str) -> 
         raise SystemExit(f"Aggregate input contains non-accepted MT-standard rows for {path.name}")
     output = output[canonical_order(output, target_column)]
     write_csv_atomic(output, path)
+    write_columnar_cache(output, path)
     return output
 
 
@@ -473,11 +469,13 @@ def main() -> None:
                 "path": str(english_path),
                 "rows": len(english),
                 "sha256": sha256_file(english_path) if not english.empty else None,
+                "columnar_path": str(english_path.with_suffix(".parquet")),
             },
             "chinese": {
                 "path": str(chinese_path),
                 "rows": len(chinese),
                 "sha256": sha256_file(chinese_path) if not chinese.empty else None,
+                "columnar_path": str(chinese_path.with_suffix(".parquet")),
             },
         },
         "complete": True,

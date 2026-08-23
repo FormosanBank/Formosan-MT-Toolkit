@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import subprocess
-import tempfile
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+SHARED_SCRIPTS = Path(__file__).resolve().parents[1] / "shared"
+sys.path.insert(0, str(SHARED_SCRIPTS))
+from reproducibility import (  # noqa: E402,F401
+    atomic_write_json,
+    sha256_bytes,
+    sha256_file,
+    stable_json_hash,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "corpus_pipeline.json"
@@ -91,36 +98,22 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+def read_csv_or_columnar(path: Path, **csv_options: Any) -> Any:
+    from columnar_io import read_csv_or_columnar as read_table
+
+    return read_table(path, **csv_options)
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def write_csv_atomic(frame: Any, path: Path) -> None:
+    from columnar_io import write_csv_atomic as write_table
+
+    write_table(frame, path)
 
 
-def stable_json_hash(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return sha256_bytes(payload)
+def write_columnar_cache(frame: Any, csv_path: Path) -> Path:
+    from columnar_io import write_columnar_cache as write_cache
 
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        Path(tmp_name).replace(path)
-    except Exception:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
+    return write_cache(frame, csv_path)
 
 
 def git_state(repo: Path = PROJECT_ROOT) -> dict[str, Any]:

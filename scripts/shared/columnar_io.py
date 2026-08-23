@@ -1,12 +1,13 @@
-"""Checksum-bound Parquet companions for large canonical corpus CSVs."""
+"""Checksum-bound Parquet companions for canonical corpus CSVs."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
-from experiment_config import sha256_file
+from reproducibility import atomic_write_json, sha256_file
 
 CACHE_SCHEMA_VERSION = 2
 
@@ -38,21 +39,23 @@ def verified_artifact(path: Path, record: object) -> dict[str, object] | None:
         "mtime_ns": stat.st_mtime_ns,
         "inode": stat.st_ino,
     }
-    expected_identity = {name: record.get(name) for name in identity}
-    if identity == expected_identity:
+    if identity == {name: record.get(name) for name in identity}:
         return record
     if sha256_file(path) != expected_hash:
         return None
     return artifact_record(path, expected_hash)
 
 
-def write_manifest(path: Path, manifest: dict[str, object]) -> None:
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+def write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
+    """Write a canonical CSV without exposing a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.incomplete")
+    temporary.unlink(missing_ok=True)
+    try:
+        frame.to_csv(temporary, index=False)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_columnar_cache(frame: pd.DataFrame, csv_path: Path) -> Path:
@@ -61,17 +64,21 @@ def write_columnar_cache(frame: pd.DataFrame, csv_path: Path) -> Path:
     try:
         frame.to_parquet(temporary, index=False, compression="zstd")
     except ImportError as exc:
-        raise SystemExit("Columnar corpus caching requires pyarrow; install requirements.txt") from exc
+        raise SystemExit(
+            "Columnar corpus caching requires pyarrow; install requirements.txt"
+        ) from exc
     temporary.replace(parquet_path)
-    manifest = {
-        "schema_version": CACHE_SCHEMA_VERSION,
-        "complete": True,
-        "canonical_csv": artifact_record(csv_path),
-        "parquet": artifact_record(parquet_path),
-        "rows": len(frame),
-        "columns": list(frame.columns),
-    }
-    write_manifest(manifest_path, manifest)
+    atomic_write_json(
+        manifest_path,
+        {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "complete": True,
+            "canonical_csv": artifact_record(csv_path),
+            "parquet": artifact_record(parquet_path),
+            "rows": len(frame),
+            "columns": list(frame.columns),
+        },
+    )
     return parquet_path
 
 
@@ -85,7 +92,10 @@ def upgrade_manifest(
         return manifest
     csv_hash = sha256_file(csv_path)
     parquet_hash = sha256_file(parquet_path)
-    if manifest.get("canonical_csv_sha256") != csv_hash or manifest.get("parquet_sha256") != parquet_hash:
+    if (
+        manifest.get("canonical_csv_sha256") != csv_hash
+        or manifest.get("parquet_sha256") != parquet_hash
+    ):
         raise SystemExit(f"Stale or corrupt columnar cache beside {csv_path}")
     upgraded = {
         "schema_version": CACHE_SCHEMA_VERSION,
@@ -95,7 +105,7 @@ def upgrade_manifest(
         "rows": manifest.get("rows"),
         "columns": manifest.get("columns"),
     }
-    write_manifest(manifest_path, upgraded)
+    atomic_write_json(manifest_path, upgraded)
     return upgraded
 
 
@@ -122,7 +132,7 @@ def read_csv_or_columnar(csv_path: Path, **csv_options) -> pd.DataFrame:
     if csv_record != manifest["canonical_csv"] or parquet_record != manifest["parquet"]:
         manifest["canonical_csv"] = csv_record
         manifest["parquet"] = parquet_record
-        write_manifest(manifest_path, manifest)
+        atomic_write_json(manifest_path, manifest)
     try:
         frame = pd.read_parquet(parquet_path)
     except ImportError as exc:

@@ -19,7 +19,14 @@ from corpus_quality import (
     normalize_dataframe,
     reason_counts,
 )
-from pipeline_common import atomic_write_json, load_pipeline_config, stable_json_hash, utc_now
+from pipeline_common import (
+    atomic_write_json,
+    load_pipeline_config,
+    sha256_file,
+    utc_now,
+    write_columnar_cache,
+    write_csv_atomic,
+)
 
 RESERVED_COLUMNS = {
     "row_id",
@@ -184,8 +191,7 @@ def validate_extraction_contract(input_path: Path, frame: pd.DataFrame) -> dict:
 
 
 def write_rejection_ledger(rows: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rows.to_csv(path, index=False)
+    write_csv_atomic(rows, path)
 
 
 def filter_rule_counts(rows: pd.DataFrame) -> dict[str, int]:
@@ -338,7 +344,8 @@ def main() -> None:
         raise SystemExit("All extracted rows were rejected or quarantined")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    accepted.to_csv(args.output, index=False)
+    write_csv_atomic(accepted, args.output)
+    write_columnar_cache(accepted, args.output)
     report_dir = args.report_dir or args.output.parent / "filter_reports" / args.output.stem
     rejection_path = report_dir / "rejected_rows.csv"
     write_rejection_ledger(rejected, rejection_path)
@@ -374,7 +381,7 @@ def main() -> None:
         "transformation_counts": dict(sorted(transformation_counts.items())),
         "row_type_counts": reason_counts(accepted["row_type"].astype(str)),
         "rejection_ledger": str(rejection_path),
-        "rejection_ledger_sha256": stable_json_hash(rejected.fillna("").astype(str).to_dict("records")),
+        "rejection_ledger_sha256": sha256_file(rejection_path),
         "input_extraction_report": str(args.input.with_suffix(".extraction.json")),
         "input_extraction_inventory_sha256": extraction_report.get("file_inventory_sha256"),
         "complete": True,

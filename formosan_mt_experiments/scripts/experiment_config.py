@@ -3,15 +3,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = EXPERIMENT_ROOT.parent
+SHARED_SCRIPTS = PROJECT_ROOT / "scripts" / "shared"
+sys.path.insert(0, str(SHARED_SCRIPTS))
+from columnar_io import read_csv_or_columnar, write_columnar_cache  # noqa: E402,F401,I001
+from reproducibility import sha256_file, stable_json_hash  # noqa: E402
 DEFAULT_PROFILE = EXPERIMENT_ROOT / "configs" / "default_experiment.json"
 MILMMT_PROFILE = EXPERIMENT_ROOT / "configs" / "milmmt_1b_experiment.json"
 CORPUS_PIPELINE_CONFIG = PROJECT_ROOT / "config" / "corpus_pipeline.json"
@@ -46,22 +50,8 @@ def load_corpus_pipeline_config() -> dict[str, Any]:
     return pipeline
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def stable_hash(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+    return stable_json_hash(value)
 
 
 def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:

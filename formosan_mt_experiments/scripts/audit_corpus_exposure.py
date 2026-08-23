@@ -9,10 +9,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pandas as pd
-from columnar_cache import read_csv_or_columnar
 from experiment_config import sha256_file
 from mt_common import (
     normalize_target_language,
+    read_csv_or_columnar,
     source_corpus,
     target_col_for,
     write_json,

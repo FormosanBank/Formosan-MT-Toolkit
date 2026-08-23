@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-from columnar_cache import write_columnar_cache
 from experiment_config import load_corpus_pipeline_config
 from mt_common import (
     add_normalized_columns,
@@ -26,6 +25,7 @@ from mt_common import (
     target_col_for,
     target_tag_for,
     weighted_apportioned_counts,
+    write_columnar_cache,
     write_json,
 )
 

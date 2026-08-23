@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 import pandas as pd
-from columnar_cache import read_csv_or_columnar
+from experiment_config import read_csv_or_columnar, write_columnar_cache  # noqa: F401
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"

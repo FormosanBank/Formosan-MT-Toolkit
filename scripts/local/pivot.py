@@ -48,6 +48,7 @@ from pipeline_common import (
     atomic_write_json,
     content_row_id,
     load_pipeline_config,
+    read_csv_or_columnar,
     sha256_bytes,
     sha256_file,
     utc_now,
@@ -117,6 +118,13 @@ class Direction:
     deepl_target_lang: str
     output_filename: str
     cache_filename: str
+
+
+@dataclass
+class LoadedCorpus:
+    path: Path
+    frame: pd.DataFrame
+    profile: dict[str, str]
 
 
 @dataclass
@@ -411,7 +419,12 @@ def now_iso() -> str:
 def read_corpus(path: Path, label: str) -> pd.DataFrame:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
-    return pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+    return read_csv_or_columnar(
+        path,
+        dtype=str,
+        keep_default_na=False,
+        encoding="utf-8-sig",
+    )
 
 
 def validate_columns(df: pd.DataFrame, path: Path, columns: Iterable[str]) -> None:
@@ -441,6 +454,24 @@ def validate_mt_standard_contract(df: pd.DataFrame, path: Path) -> dict[str, str
         "id": next(iter(profile_ids)),
         "sha256": profile_hash,
     }
+
+
+def load_source_corpora(directions: Iterable[Direction]) -> dict[Path, LoadedCorpus]:
+    loaded: dict[Path, LoadedCorpus] = {}
+    for direction in directions:
+        for path in (direction.source_path, direction.original_target_path):
+            if path in loaded:
+                continue
+            frame = read_corpus(path, "pivot source corpus")
+            loaded[path] = LoadedCorpus(
+                path=path,
+                frame=frame,
+                profile=validate_mt_standard_contract(frame, path),
+            )
+    profiles = {tuple(corpus.profile.values()) for corpus in loaded.values()}
+    if len(profiles) != 1:
+        raise SystemExit("Pivot sources do not share one MT standardization profile")
+    return loaded
 
 
 def normalize_key_text(value: Any) -> str:
@@ -773,10 +804,14 @@ def translate_direction(
     args: argparse.Namespace,
     client: Optional[DeepLClient],
     budget: CharBudget,
+    source_df: pd.DataFrame | None = None,
+    target_df: pd.DataFrame | None = None,
 ) -> tuple[dict[str, dict[str, Any]], DirectionStats]:
     stats = DirectionStats(direction=direction.name)
-    source_df = read_corpus(direction.source_path, f"{direction.name} source corpus")
-    target_df = read_corpus(direction.original_target_path, f"{direction.name} target corpus")
+    if source_df is None:
+        source_df = read_corpus(direction.source_path, f"{direction.name} source corpus")
+    if target_df is None:
+        target_df = read_corpus(direction.original_target_path, f"{direction.name} target corpus")
     validate_columns(source_df, direction.source_path, [*BASE_COLUMNS, direction.source_text_col])
     validate_columns(target_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
     source_profile = validate_mt_standard_contract(source_df, direction.source_path)
@@ -1087,10 +1122,17 @@ def write_pivot_output(
     *,
     args: argparse.Namespace,
     cache: dict[str, dict[str, Any]],
+    original_df: pd.DataFrame | None = None,
+    source_df: pd.DataFrame | None = None,
 ) -> OutputBuildResult:
     result = OutputBuildResult()
-    original_df = read_corpus(direction.original_target_path, f"{direction.name} original target corpus")
-    source_df = read_corpus(direction.source_path, f"{direction.name} source corpus")
+    if original_df is None:
+        original_df = read_corpus(
+            direction.original_target_path,
+            f"{direction.name} original target corpus",
+        )
+    if source_df is None:
+        source_df = read_corpus(direction.source_path, f"{direction.name} source corpus")
     result.original_rows = len(original_df)
 
     validate_columns(original_df, direction.original_target_path, [*BASE_COLUMNS, direction.target_text_col])
@@ -1238,6 +1280,7 @@ def write_manifest(
     direction_stats: list[DirectionStats],
     usage: Optional[dict[str, Any]],
     sources: dict[str, str],
+    loaded_corpora: Mapping[Path, LoadedCorpus] | None = None,
 ) -> Path:
     manifest_path = args.out_dir / "pivot_manifest.json"
     stats_payload = [stats.__dict__ for stats in direction_stats]
@@ -1258,15 +1301,16 @@ def write_manifest(
         }
         for name, path in sources.items()
     }
-    source_profiles = {
-        tuple(
-            validate_mt_standard_contract(
-                read_corpus(Path(path), name),
-                Path(path),
-            ).values()
+    source_profiles = set()
+    for name, path_string in sources.items():
+        path = Path(path_string)
+        loaded = (loaded_corpora or {}).get(path)
+        profile = (
+            loaded.profile
+            if loaded is not None
+            else validate_mt_standard_contract(read_corpus(path, name), path)
         )
-        for name, path in sources.items()
-    }
+        source_profiles.add(tuple(profile.values()))
     if len(source_profiles) != 1:
         raise SystemExit("Pivot sources do not share one MT standardization profile")
     profile_id, profile_hash = next(iter(source_profiles))
@@ -1484,6 +1528,8 @@ def main() -> None:
     if args.splits.strip().lower() not in {"all", "*"}:
         raise SystemExit("Corpus pipeline v3 requires --splits all; splitting occurs once after pivoting")
     directions = build_directions(args)
+    selected_directions = [directions[name] for name in selected_direction_names]
+    loaded_corpora = load_source_corpora(selected_directions)
 
     api_key_env_names = parse_api_key_envs(args.api_key_env)
     args.api_key_env_names = api_key_env_names
@@ -1530,13 +1576,15 @@ def main() -> None:
     print(f"Directions:   {', '.join(selected_direction_names)}")
     print(f"Splits:       {args.splits}")
 
-    for name in selected_direction_names:
-        direction = directions[name]
+    for direction in selected_directions:
+        name = direction.name
         cache, stats = translate_direction(
             direction,
             args=args,
             client=client,
             budget=budget,
+            source_df=loaded_corpora[direction.source_path].frame,
+            target_df=loaded_corpora[direction.original_target_path].frame,
         )
         caches[name] = cache
         all_stats.append(stats)
@@ -1548,6 +1596,8 @@ def main() -> None:
                 direction,
                 args=args,
                 cache=caches[stats.direction],
+                original_df=loaded_corpora[direction.original_target_path].frame,
+                source_df=loaded_corpora[direction.source_path].frame,
             )
             stats.original_rows = result.original_rows
             stats.synthetic_rows_available = result.synthetic_rows_available
@@ -1577,6 +1627,7 @@ def main() -> None:
                 "big_corpus_en": str(args.big_corpus_en),
                 "big_corpus_zh": str(args.big_corpus_zh),
             },
+            loaded_corpora=loaded_corpora,
         )
 
     print("\nDone.")
