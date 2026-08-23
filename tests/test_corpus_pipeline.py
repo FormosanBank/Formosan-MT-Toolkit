@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
+import stage_cache  # noqa: E402
 from build_big_corpus import (  # noqa: E402
     corpus_frame,
     discover_inputs,
@@ -100,7 +101,12 @@ from qc_reporting import (  # noqa: E402
     run_cleaner_command,
     summarize_validator_findings,
 )
-from stage_cache import cached_stage_valid, record_cached_stage  # noqa: E402
+from stage_cache import (  # noqa: E402
+    cached_stage_valid,
+    file_inventory,
+    load_stage_cache,
+    record_cached_stage,
+)
 from xml_repairs import repair_mt_xml_structure  # noqa: E402
 
 MT_PROFILE = load_mt_standard_profile(DEFAULT_PROFILE_PATH)
@@ -2720,7 +2726,7 @@ class PivotContractTests(unittest.TestCase):
             output.parent.mkdir()
             output.write_text("original", encoding="utf-8")
             cache_path = root / ".stage_cache" / "ami.json"
-            cache: dict[str, object] = {"schema_version": 1, "stages": {}}
+            cache: dict[str, object] = {"schema_version": 2, "stages": {}}
             paths = BuildPaths(
                 root=root,
                 raw_dir=root / "raw",
@@ -2730,18 +2736,78 @@ class PivotContractTests(unittest.TestCase):
                 manifest_path=root / "manifest.json",
                 source_snapshot_path=root / "snapshot.json",
             )
-            record_cached_stage(
-                paths.root,
-                cache_path,
-                cache,
-                "qc",
-                "stage-key",
-                [output],
-                "ami",
+            with mock.patch.object(
+                stage_cache,
+                "sha256_file",
+                wraps=stage_cache.sha256_file,
+            ) as hasher:
+                record_cached_stage(
+                    paths.root,
+                    cache_path,
+                    cache,
+                    "qc",
+                    "stage-key",
+                    [output],
+                    "ami",
+                )
+                hashed_calls = hasher.call_count
+                self.assertTrue(
+                    cached_stage_valid(paths.root, cache, "qc", "stage-key")
+                )
+                self.assertEqual(hasher.call_count, hashed_calls)
+
+                file_inventory([output], paths.root)
+                file_inventory([output], paths.root)
+                self.assertEqual(hasher.call_count, hashed_calls)
+
+                output.write_text("modified", encoding="utf-8")
+                self.assertFalse(
+                    cached_stage_valid(paths.root, cache, "qc", "stage-key")
+                )
+                self.assertGreater(hasher.call_count, hashed_calls)
+
+    def test_stage_cache_upgrades_verified_v1_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "processed" / "sample.csv"
+            output.parent.mkdir()
+            output.write_text("row_id\nfixture\n", encoding="utf-8")
+            cache_path = root / ".stage_cache" / "build.json"
+            cache_path.parent.mkdir()
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "stages": {
+                            "aggregate": {
+                                "key": "stage-key",
+                                "outputs": {
+                                    "processed/sample.csv": hashlib.sha256(
+                                        output.read_bytes()
+                                    ).hexdigest()
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
             )
-            self.assertTrue(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
-            output.write_text("modified", encoding="utf-8")
-            self.assertFalse(cached_stage_valid(paths.root, cache, "qc", "stage-key"))
+
+            cache = load_stage_cache(cache_path)
+
+            self.assertEqual(cache["schema_version"], 2)
+            self.assertTrue(
+                cached_stage_valid(root, cache, "aggregate", "stage-key")
+            )
+            persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+            record = persisted["stages"]["aggregate"]["outputs"][
+                "processed/sample.csv"
+            ]
+            self.assertEqual(record["bytes"], output.stat().st_size)
+            self.assertEqual(
+                record["sha256"],
+                hashlib.sha256(output.read_bytes()).hexdigest(),
+            )
 
     def test_malformed_cache_is_a_hard_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
