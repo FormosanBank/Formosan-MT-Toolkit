@@ -13,7 +13,6 @@ from pathlib import Path
 
 import nllb_runtime as nllb
 import pandas as pd
-from build_experiment_splits import NgramSimilarityIndex
 from experiment_config import (
     DEFAULT_PROFILE,
     load_corpus_pipeline_config,
@@ -34,6 +33,7 @@ from mt_common import (
     weighted_apportioned_counts,
     write_json,
 )
+from validation_similarity import ValidationNgramIndex
 
 PIPELINE_DEFAULTS = load_corpus_pipeline_config()
 SPLIT_DEFAULTS = PIPELINE_DEFAULTS["splits"]
@@ -214,8 +214,8 @@ def pairwise_leakage(
     left: pd.DataFrame,
     right: pd.DataFrame,
     *,
-    formosan_ngram_index: NgramSimilarityIndex,
-    target_ngram_index: NgramSimilarityIndex,
+    formosan_ngram_index: ValidationNgramIndex,
+    target_ngram_index: ValidationNgramIndex,
     formosan_by_language: bool = True,
     target_by_language: bool = False,
 ) -> dict[str, object]:
@@ -393,13 +393,13 @@ def validate_splits(
     test = keyed[split.eq("test")]
     validate = keyed[split.eq("validate")]
     evaluation = keyed[split.isin(EVAL_SPLITS)]
-    formosan_ngram_index = NgramSimilarityIndex(
+    formosan_ngram_index = ValidationNgramIndex(
         keyed,
         "_formosan_key",
         by_language=True,
         threshold=ngram_threshold,
     )
-    target_ngram_index = NgramSimilarityIndex(
+    target_ngram_index = ValidationNgramIndex(
         keyed,
         "_target_key",
         by_language=False,

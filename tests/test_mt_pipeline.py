@@ -27,18 +27,7 @@ from audit_corpus_exposure import (  # noqa: E402
     build_tame_config,
     gate_errors,
 )
-from build_experiment_splits import (  # noqa: E402
-    GroupCandidate,
-    NgramSimilarityIndex,
-    block_evaluation_conflicts_with_training,
-    build_hard_split,
-    choose_groups,
-    exclude_test_conflicts_with_validation,
-    fill_language_shortfalls,
-    ngram_candidate_conflicts,
-    one_edit_conflicts,
-    split_targets,
-)
+from build_experiment_splits import build_hard_split  # noqa: E402
 from columnar_io import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import (  # noqa: E402
     DEFAULT_PROFILE,
@@ -76,6 +65,19 @@ from publish_huggingface_models import (  # noqa: E402
     validate_checkpoint,
 )
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
+from split_allocation import (  # noqa: E402
+    GroupCandidate,
+    choose_groups,
+    fill_language_shortfalls,
+    split_targets,
+)
+from split_similarity import (  # noqa: E402
+    NgramSimilarityIndex,
+    block_evaluation_conflicts_with_training,
+    exclude_test_conflicts_with_validation,
+    ngram_candidate_conflicts,
+    one_edit_conflicts,
+)
 from train_directional import metric_improved, metric_value, training_source_texts  # noqa: E402
 from training_code_inventory import build_code_inventory  # noqa: E402
 from validate_experiment import (  # noqa: E402
@@ -83,6 +85,7 @@ from validate_experiment import (  # noqa: E402
     validate_splits,
     validate_tags,
 )
+from validation_similarity import ValidationNgramIndex  # noqa: E402
 from write_submission_manifest import (  # noqa: E402
     build_job_graph,
     corpus_record,
@@ -736,6 +739,40 @@ class LeakageTests(unittest.TestCase):
             self.assertEqual(
                 index.conflicts(reference.index, candidates.index),
                 expected,
+            )
+
+    def test_independent_validation_index_matches_split_index(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "lang_code": ["ami", "ami", "ami", "bnn", "bnn"],
+                "text": [
+                    "abcdefghijklmnopqrstuvwxyz",
+                    "abcdefghijklmnopqrstuvwxzz",
+                    "completely unrelated value",
+                    "abcdefghijklmnopqrstuvwxyz",
+                    "another unrelated sentence",
+                ],
+            },
+            index=[10, 11, 12, 13, 14],
+        )
+        reference = pd.Index([10, 14])
+        candidates = pd.Index([11, 12, 13])
+        for by_language in (False, True):
+            split_index = NgramSimilarityIndex(
+                frame,
+                "text",
+                by_language=by_language,
+                threshold=0.82,
+            )
+            validation_index = ValidationNgramIndex(
+                frame,
+                "text",
+                by_language=by_language,
+                threshold=0.82,
+            )
+            self.assertEqual(
+                validation_index.conflicts(reference, candidates),
+                split_index.conflicts(reference, candidates),
             )
 
     def test_ngram_index_matches_tame_high_exposure_boundary(self) -> None:
