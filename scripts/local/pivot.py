@@ -263,7 +263,17 @@ def normalize_key_text(value: Any) -> str:
     return " ".join(text.split()).strip()
 
 
-def formosan_key(row: pd.Series) -> tuple[str, str]:
+def frame_records(
+    frame: pd.DataFrame,
+    columns: Iterable[str] | None = None,
+) -> Iterable[dict[str, Any]]:
+    """Iterate rows without constructing a pandas Series for each row."""
+    names = list(columns) if columns is not None else list(frame.columns)
+    for values in frame.loc[:, names].itertuples(index=False, name=None):
+        yield dict(zip(names, values, strict=True))
+
+
+def formosan_key(row: Mapping[str, Any]) -> tuple[str, str]:
     lang_code = str(row.get("lang_code", "") or "").strip().lower()
     formosan = normalize_key_text(row.get("formosan_sentence", ""))
     return lang_code, formosan
@@ -288,7 +298,19 @@ def candidate_jobs(
     seen: set[str] = set()
     seen_overlap: set[tuple[str, str]] = set()
 
-    for _, row in df.iterrows():
+    candidate_columns = list(
+        dict.fromkeys(
+            [
+                "row_type",
+                "mt_eval_eligible",
+                "mt_normalization_confidence",
+                "formosan_sentence",
+                direction.source_text_col,
+                "translation_kind",
+            ]
+        )
+    )
+    for row in frame_records(df, candidate_columns):
         exclusion = pivot_candidate_reason(row, direction)
         if exclusion:
             stats.ineligible_source_rows += 1
@@ -534,12 +556,13 @@ def translate_direction(
 
 
 def target_formosan_keys(df: pd.DataFrame) -> set[tuple[str, str]]:
-    keys: set[tuple[str, str]] = set()
-    for _, row in df.iterrows():
-        key = formosan_key(row)
-        if key[0] and key[1]:
-            keys.add(key)
-    return keys
+    languages = df["lang_code"].astype(str).str.strip().str.lower()
+    forms = df["formosan_sentence"].map(normalize_key_text)
+    return {
+        (language, formosan)
+        for language, formosan in zip(languages, forms, strict=True)
+        if language and formosan
+    }
 
 
 def output_columns(
@@ -582,7 +605,7 @@ def detected_source_mismatch(record: dict[str, Any], direction: Direction) -> bo
 
 
 def synthetic_row(
-    source_row: pd.Series,
+    source_row: Mapping[str, Any],
     record: dict[str, Any],
     direction: Direction,
     cache_key: str,
@@ -594,7 +617,7 @@ def synthetic_row(
     if not normalized.text:
         return None, "empty_pivot_translation"
 
-    row = {str(column): value for column, value in source_row.to_dict().items()}
+    row = {str(column): value for column, value in source_row.items()}
     row.pop(direction.source_text_col, None)
     row[direction.target_text_col] = normalized.text
     row["target_raw"] = raw_translation
@@ -636,7 +659,7 @@ def synthetic_row(
     )
 
     decision = quality_decision(
-        pd.Series(row),
+        row,
         source_column="formosan_sentence",
         target_column=direction.target_text_col,
         target_language=target_profile(direction)[0],
@@ -699,7 +722,7 @@ def write_pivot_output(
         writer = csv.DictWriter(fh, fieldnames=output_cols, extrasaction="ignore")
         writer.writeheader()
 
-        for _, row in original_df.iterrows():
+        for row in frame_records(original_df):
             target_text = str(row.get(direction.target_text_col, "")).strip()
             formosan = str(row.get("formosan_sentence", "")).strip()
             lang_code = str(row.get("lang_code", "")).strip()
@@ -716,7 +739,7 @@ def write_pivot_output(
                 result.duplicate_rows_skipped += 1
                 continue
             seen_rows.add(dedupe_key)
-            out_row = row.to_dict()
+            out_row = dict(row)
             out_row["pivot_origin"] = str(row.get("pivot_origin") or "original")
             for column in PROVENANCE_COLUMNS:
                 out_row.setdefault(column, "")
@@ -726,8 +749,8 @@ def write_pivot_output(
         result.synthetic_rows_available = 0
         result.synthetic_rows_missing = 0
 
-        for _, row in tqdm(
-            source_df.iterrows(),
+        for row in tqdm(
+            frame_records(source_df),
             total=len(source_df),
             desc=f"write {direction.name}",
             unit="row",
