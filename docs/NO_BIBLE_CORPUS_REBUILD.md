@@ -84,15 +84,21 @@ The source aggregate and pivot manifests must already be complete.
 ## Performance And Logs
 
 Three language preparation pipelines run concurrently by default. Use
-`--language-workers 1` for serial debugging. Normal output contains one
-progress display plus stage timing and rule summaries. Full child commands and
-raw output are written under `corpus_builds/public_no_bible/logs/`. Add
-`--verbose` only when live subprocess output is needed.
+`--language-workers 1` for serial debugging. English and Chinese release
+analysis also runs concurrently; use `--analysis-workers 1` when less than 24
+GB of memory is available. Normal output contains one progress display plus
+stage timing and rule summaries. Full child commands and raw output are written
+under `corpus_builds/public_no_bible/logs/`. Add `--verbose` only when live
+subprocess output is needed; verbose mode runs stages serially so their output
+remains readable.
 
 Raw XML is cached by verified Git blob ID. A full build resolves each public
 repository snapshot once and parses each XML blob once before routing it by
-language. Large internal tables use checksummed Parquet companions while CSV
-remains the release format.
+language. Content-addressed stage records reuse unchanged language and release
+artifacts after checksum verification. Large internal tables use checksummed
+Parquet companions and column projection while CSV remains the release format.
+Use `--no-stage-cache` only when testing stage implementation changes or
+intentionally measuring a cold build.
 
 If GitHub rate limits a run, resume with the existing partial cache and lower
 download concurrency:

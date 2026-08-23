@@ -9,6 +9,26 @@ production corpus should come from the orchestrator so paths, cleanup, pivot
 cache reuse, hard splitting, validation, and checksummed manifests stay
 consistent.
 
+The active code is organized by responsibility:
+
+| Boundary | Owner |
+|---|---|
+| CLI and build contract | `build_cli.py`, `build_context.py` |
+| Readable subprocess output | `build_output.py` |
+| Immutable GitHub discovery and fetch | `github_snapshot.py`, `fetch_xml.py` |
+| Pinned QC and source-tier inventory | `qc_checkout.py`, `qc_inventory.py`, `clean_xml.py` |
+| Model-facing standardization | `mt_standardization.py`, `standardize_mt_corpus.py` |
+| Provenance loading and row extraction | `extraction_inventory.py`, `make_corpus.py` |
+| Row quality policy | `corpus_quality.py`, `filter_split_corpus.py` |
+| Pivot policy, cache, provider, and output | `pivot_corpus.py`, `pivot_cache.py`, `pivot_deepl.py`, `pivot_output.py` |
+| Hard split allocation and similarity | `split_allocation.py`, `split_similarity.py`, `build_experiment_splits.py` |
+| Independent release gates | `validation_policy.py`, `validation_similarity.py`, `validate_experiment.py` |
+| Final artifact and provenance bundle | `build_release.py` |
+
+Policy stays in versioned configuration and the narrow quality or allocation
+modules. Orchestration modules pass explicit commands and artifacts between
+stages; they do not duplicate text-cleaning, split, or model behavior.
+
 ### 1. Acquisition
 
 `fetch_xml.py` enumerates repositories visible through GitHub, resolves each
@@ -256,8 +276,29 @@ downstream stage whose key changes.
 
 Acquisition refreshes repository heads unless explicitly skipped or reused.
 Three language pipelines run concurrently by default. `--language-workers 1`
-disables concurrency, and `--no-stage-cache` forces a cold rebuild without
-weakening any QC, split, validation, or exposure gate.
+disables that concurrency. English and Chinese split, validation, and exposure
+jobs run concurrently by default; use `--analysis-workers 1` on a machine with
+less than 24 GB of available memory. Concurrency is bounded at both levels so
+the pipeline does not multiply large dataframe workloads without an explicit
+operator choice.
+
+Canonical release artifacts remain CSV. Checksum-bound Parquet companions are
+internal read caches and support column projection, so split policy and
+validation do not repeatedly parse provenance columns they do not use. The
+splitter materializes full provenance only after assignments are final. The
+independent validator uses an exact candidate-side similarity join instead of
+holding a second full Python n-gram index in memory.
+
+Extraction streams accepted rows into same-filesystem temporary CSVs and
+promotes them only after every XML file and provenance inventory passes.
+Aggregate, pivot, split, and manifest writes use the same atomic promotion
+rule. Interrupted work can leave logs or caches, but it cannot replace a
+completed corpus with a partial file.
+
+The hash index reuses a digest only while file identity and metadata still
+match, including across hard links. Any uncertainty falls back to SHA-256.
+`--no-stage-cache` forces a cold rebuild without weakening QC, split,
+validation, or exposure gates.
 
 ### 9. NLLB Training
 

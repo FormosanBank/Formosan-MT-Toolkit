@@ -9,9 +9,9 @@ evaluation code.
 The supported workflow is corpus pipeline v3. It keeps the supplied XML
 `kindOf="standard"` tier, derives a separate model-facing standardization,
 records every transformation, keeps approved standalone lexical rows in
-training, and creates source-balanced hard evaluation splits. Human sentence
-references are preferred; validated pivot sentences are used only when a
-source lacks enough human parallel sentences.
+training, and creates source-balanced hard evaluation splits from human
+sentence references. Validated DeepL pivots expand training only; synthetic
+rows never enter validation or test.
 
 ## Quick Start
 
