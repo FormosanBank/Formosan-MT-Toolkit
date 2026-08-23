@@ -13,6 +13,7 @@ from experiment_config import (
     sha256_file,
 )
 from mt_common import (
+    PARALLEL_CORE_COLUMNS,
     normalize_target_language,
     read_parallel_csv,
     target_col_for,
@@ -20,6 +21,16 @@ from mt_common import (
 )
 from split_cli import parse_validation_args
 from validation_policy import REQUIRED_PROVENANCE, validate_provenance, validate_splits
+
+SPLIT_VALIDATION_COLUMNS = {
+    *PARALLEL_CORE_COLUMNS,
+    "row_id",
+    "row_type",
+    "xml_unit_context",
+    "split",
+    "pivot_origin",
+    "translation_kind",
+}
 
 
 def validate_tags(
@@ -75,6 +86,12 @@ def main() -> None:
         raise SystemExit("Input must have a split column")
 
     provenance = validate_provenance(frame)
+    validation_columns = [
+        column
+        for column in frame.columns
+        if column in SPLIT_VALIDATION_COLUMNS or column == target_col
+    ]
+    frame = frame.loc[:, validation_columns].copy()
     split_report = None
     if args.split_report:
         try:
