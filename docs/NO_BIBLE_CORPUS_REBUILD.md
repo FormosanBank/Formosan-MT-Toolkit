@@ -9,7 +9,7 @@ CSVs, paid DeepL caches, and provenance manifests stay under the ignored
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-corpus.txt
 cp .env.example .env
 ```
 

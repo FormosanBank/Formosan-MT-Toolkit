@@ -20,7 +20,7 @@ git clone https://github.com/FormosanBank/Formosan-MT-Toolkit.git
 cd Formosan-MT-Toolkit
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-corpus.txt
 cp .env.example .env
 ```
 
@@ -125,6 +125,7 @@ details.
 Package the completed public build in the stable Hugging Face dataset format:
 
 ```bash
+pip install -r requirements-publish.txt
 python scripts/local/publish_huggingface_dataset.py \
   --build-root corpus_builds/public_no_bible \
   --output-dir /tmp/formosan-mt-hf
@@ -148,6 +149,10 @@ refuses to upload unless the Hugging Face repository is private.
 ## Training
 
 The `formosan_mt_experiments/` package trains four unidirectional models:
+
+```bash
+pip install -r requirements-training.txt
+```
 
 | Direction | Input | Output |
 |---|---|---|

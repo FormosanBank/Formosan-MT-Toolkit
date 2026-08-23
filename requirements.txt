@@ -1,14 +1,1 @@
-numpy==2.3.2
-pandas==2.3.2
-pyarrow==24.0.0
-protobuf==5.29.5
-python-dotenv==1.1.1
-requests==2.32.5
-sacrebleu==2.5.1
-sacremoses==0.1.1
-sentencepiece==0.2.1
-tame-mt==0.2.2
-torch==2.9.0
-tqdm==4.67.1
-transformers==4.56.1
-urllib3==2.5.0
+-r requirements-training.txt
