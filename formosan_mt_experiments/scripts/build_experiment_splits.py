@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -45,6 +46,69 @@ MAX_TRAINING_UNITS_PER_SIDE = PIPELINE_DEFAULTS["cleaning"][
     "max_training_units_per_side"
 ]
 TIER = SPLIT_DEFAULTS["headline_tier"]
+
+SPLIT_REQUIRED_COLUMNS = ("row_id", "row_type")
+SPLIT_OPTIONAL_COLUMNS = ("pivot_origin", "quality_flags")
+SPLIT_CONTRACT_ONLY_COLUMNS = (
+    "dialect",
+    "kindOf",
+    "standard_namespace",
+    "formosan_mt_standard",
+    "mt_standard_sha256",
+    "mt_normalization_status",
+    "mt_standard_profile",
+    "mt_standard_profile_sha256",
+)
+
+
+def split_projection_columns(path: Path) -> list[str]:
+    """Return the non-core columns needed to assign splits.
+
+    The release table carries dozens of provenance fields that do not affect
+    allocation or similarity. Keeping them out of the policy frame avoids
+    copying them through every sort, group, and index construction.
+    """
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            header = next(csv.reader(handle))
+    except (OSError, StopIteration) as exc:
+        raise SystemExit(f"Cannot read corpus header from {path}: {exc}") from exc
+    available = set(header)
+    missing = sorted(set(SPLIT_REQUIRED_COLUMNS) - available)
+    if missing:
+        raise SystemExit(f"Hard-split input is missing required columns: {missing}")
+    return [
+        *SPLIT_REQUIRED_COLUMNS,
+        *(column for column in SPLIT_OPTIONAL_COLUMNS if column in available),
+    ]
+
+
+def materialize_full_rows(
+    full_frame: pd.DataFrame,
+    policy_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Join policy results back onto full provenance rows in policy order."""
+    base = full_frame.drop(
+        columns=["source_bucket", "_source_bucket"],
+        errors="ignore",
+    ).copy()
+    base["__row_key"] = base["row_id"].astype(str)
+    if base["__row_key"].duplicated().any():
+        raise SystemExit("Cannot materialize split output with duplicate row_id values")
+    lookup = base.set_index("__row_key", drop=True)
+    row_keys = policy_frame["row_id"].astype(str).tolist()
+    missing = sorted(set(row_keys) - set(lookup.index))
+    if missing:
+        raise SystemExit(
+            "Cannot materialize split output; policy rows are absent from the "
+            f"release table: {missing[:5]}"
+        )
+    materialized = lookup.loc[row_keys].reset_index(drop=True)
+    for column in policy_frame.columns:
+        values = policy_frame[column].reset_index(drop=True)
+        if column == "split" or column not in materialized.columns:
+            materialized[column] = values
+    return materialized
 
 
 def deduplicate_input(
@@ -125,6 +189,7 @@ def build_hard_split(
     ngram_threshold: float,
     registry_in: Path | None,
     preserve_internal: bool = False,
+    compact_policy: bool = False,
     max_eval_units_per_side: int = SPLIT_DEFAULTS["max_eval_units_per_side"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     frame = frame.drop(
@@ -136,6 +201,8 @@ def build_hard_split(
     if "kindOf" not in frame.columns or not frame["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Hard splitting requires every row to use kindOf=standard")
     mt_profile = mt_standard_contract(frame, context="hard-split input")
+    if compact_policy:
+        frame = frame.drop(columns=list(SPLIT_CONTRACT_ONLY_COLUMNS))
 
     frame = add_normalized_columns(
         frame.copy(),
@@ -517,9 +584,13 @@ def main() -> None:
     output_prefix = args.output_prefix or f"big_corpus_{short}"
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw = read_parallel_csv(args.input, target_col=target_col)
+    policy_input = read_parallel_csv(
+        args.input,
+        target_col=target_col,
+        columns=split_projection_columns(args.input),
+    )
     output, excluded, duplicates, report = build_hard_split(
-        raw,
+        policy_input,
         target_col=target_col,
         test_ratio=args.test_ratio,
         val_ratio=args.val_ratio,
@@ -535,8 +606,15 @@ def main() -> None:
         ngram_threshold=args.ngram_jaccard_threshold,
         registry_in=args.registry_in,
         preserve_internal=True,
+        compact_policy=True,
     )
     validate_report(report)
+
+    full_input = read_parallel_csv(args.input, target_col=target_col)
+    output = materialize_full_rows(full_input, output)
+    excluded = materialize_full_rows(full_input, excluded)
+    duplicates = materialize_full_rows(full_input, duplicates)
+    del full_input, policy_input
 
     internal_columns = [column for column in output.columns if column.startswith("_")]
     release_output = output.drop(columns=internal_columns)
