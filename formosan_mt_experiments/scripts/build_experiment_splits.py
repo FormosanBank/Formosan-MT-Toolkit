@@ -4,20 +4,16 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 from experiment_config import load_corpus_pipeline_config
 from mt_common import (
     add_normalized_columns,
-    bool_series,
     evaluation_candidate_mask,
     mt_standard_contract,
     normalize_target_language,
     read_parallel_csv,
-    split_counts,
-    split_counts_by_language,
     target_col_for,
     target_tag_for,
     write_columnar_cache,
@@ -28,10 +24,10 @@ from split_allocation import (
     fill_assignments,
     fill_language_shortfalls,
     materialize_splits,
-    source_assignment_tolerance,
     source_stratum_targets,
 )
 from split_cli import parse_split_args
+from split_reporting import SplitReportContext, build_split_report
 from split_similarity import (
     NgramSimilarityIndex,
     SplitNgramIndexes,
@@ -41,7 +37,6 @@ from split_similarity import (
     group_safe_evaluation_mask,
     leakage_group_ids,
     near_candidate_conflicts,
-    overlap_summary,
 )
 
 PIPELINE_DEFAULTS = load_corpus_pipeline_config()
@@ -401,327 +396,39 @@ def build_hard_split(
             f"validate/test={len(validate_test_near)}"
         )
 
-    ratio_shortfalls: dict[str, dict] = {}
-    for language, language_frame in output.groupby("lang_code", sort=True):
-        counts = Counter(language_frame["split"])
-        target_test, target_validate = targets[str(language)]
-        language_reports[str(language)].update(
-            {
-                "output_rows": len(language_frame),
-                "train_rows": counts["train"],
-                "test_rows": counts["test"],
-                "validate_rows": counts["validate"],
-                "test_fraction_of_eligible_sentences": (
-                    counts["test"]
-                    / max(
-                        language_reports[str(language)]["eligible_sentence_rows"],
-                        1,
-                    )
-                ),
-                "validate_fraction_of_eligible_sentences": (
-                    counts["validate"]
-                    / max(
-                        language_reports[str(language)]["eligible_sentence_rows"],
-                        1,
-                    )
-                ),
-                "test_fraction_of_all_input_rows": (
-                    counts["test"]
-                    / max(language_reports[str(language)]["rows_total"], 1)
-                ),
-                "validate_fraction_of_all_input_rows": (
-                    counts["validate"]
-                    / max(language_reports[str(language)]["rows_total"], 1)
-                ),
-                "synthetic_eval_rows": int(
-                    (
-                        language_frame.get(
-                            "pivot_origin",
-                            pd.Series("original", index=language_frame.index),
-                        ).eq("synthetic")
-                        & language_frame["split"].isin({"test", "validate"})
-                    ).sum()
-                ),
-                "human_eval_rows": int(
-                    (
-                        ~language_frame.get(
-                            "pivot_origin",
-                            pd.Series("original", index=language_frame.index),
-                        ).eq("synthetic")
-                        & language_frame["split"].isin({"test", "validate"})
-                    ).sum()
-                ),
-            }
+    report = build_split_report(
+        SplitReportContext(
+            frame=frame,
+            output=output,
+            excluded=excluded,
+            duplicate_rows=duplicate_rows,
+            candidate_mask=candidate_mask,
+            effective_candidate_mask=effective_candidate_mask,
+            group_ids=group_ids,
+            targets=targets,
+            source_targets=source_targets,
+            language_reports=language_reports,
+            heldout_group_non_eval=heldout_group_non_eval,
+            validate_test_blocked_indexes=validate_test_blocked_indexes,
+            ngram_train_blocked_indexes=ngram_train_blocked_indexes,
+            train_eval_blocked_indexes=train_eval_blocked_indexes,
+            final_near=final_near,
+            validate_test_near=validate_test_near,
+            validate_test_near_global=validate_test_near_global,
+            near_iterations=near_iterations,
+            ngram_threshold=ngram_threshold,
+            test_ratio=test_ratio,
+            val_ratio=val_ratio,
+            min_formosan_tokens=min_formosan_tokens,
+            min_target_tokens=min_target_tokens,
+            min_combined_tokens=min_combined_tokens,
+            min_punctuated_combined_tokens=min_punctuated_combined_tokens,
+            max_eval_units_per_side=max_eval_units_per_side,
+            mt_profile=mt_profile,
+            registry_in=registry_in,
+            registry_stats=registry_stats,
         )
-        if counts["test"] != target_test or counts["validate"] != target_validate:
-            ratio_shortfalls[str(language)] = {
-                "test": counts["test"],
-                "target_test": target_test,
-                "validate": counts["validate"],
-                "target_validate": target_validate,
-            }
-
-    source_reports: dict[str, dict[str, dict[str, object]]] = {}
-    source_shortfalls: dict[str, dict[str, dict[str, int]]] = {}
-    source_distribution_tvd: dict[str, dict[str, float]] = {}
-    for language, language_frame in frame.groupby("lang_code", sort=True):
-        language_key = str(language)
-        source_reports[language_key] = {}
-        source_shortfalls[language_key] = {}
-        language_synthetic = (
-            language_frame.get(
-                "pivot_origin",
-                pd.Series("original", index=language_frame.index),
-            )
-            .astype(str)
-            .eq("synthetic")
-        )
-        human_language = language_frame[~language_synthetic]
-        eligible_language = language_frame[
-            candidate_mask.loc[language_frame.index]
-        ]
-        all_distribution = Counter(human_language["_source_corpus"])
-        split_distributions = {
-            split_name: Counter(
-                eligible_language[
-                    eligible_language["split"].eq(split_name)
-                ]["_source_corpus"]
-            )
-            for split_name in ("test", "validate")
-        }
-        source_distribution_tvd[language_key] = {}
-        for split_name, distribution in split_distributions.items():
-            total = sum(distribution.values())
-            all_total = sum(all_distribution.values())
-            source_distribution_tvd[language_key][split_name] = (
-                0.5
-                * sum(
-                    abs(
-                        all_distribution[source] / max(all_total, 1)
-                        - distribution[source] / max(total, 1)
-                    )
-                    for source in set(all_distribution) | set(distribution)
-                )
-            )
-        for source, source_frame in language_frame.groupby(
-            "_source_corpus", sort=True
-        ):
-            source_key = str(source)
-            eligible_source = source_frame[
-                candidate_mask.loc[source_frame.index]
-            ]
-            similarity_safe_source = source_frame[
-                effective_candidate_mask.loc[source_frame.index]
-            ]
-            target_test, target_validate = source_targets.get(
-                (language_key, source_key),
-                (0, 0),
-            )
-            counts = Counter(source_frame["split"])
-            eligible_counts = Counter(eligible_source["split"])
-            synthetic_source = source_frame.get(
-                "pivot_origin",
-                pd.Series("original", index=source_frame.index),
-            ).astype(str).eq("synthetic")
-            human_source_rows = int((~synthetic_source).sum())
-            assignment_tolerance = source_assignment_tolerance(
-                frame,
-                source_frame.index,
-                group_ids,
-                effective_candidate_mask,
-            )
-            source_reports[language_key][source_key] = {
-                "input_rows": len(source_frame),
-                "human_input_rows": human_source_rows,
-                "synthetic_input_rows": int(synthetic_source.sum()),
-                "eligible_sentence_rows": len(eligible_source),
-                "similarity_safe_sentence_rows": len(similarity_safe_source),
-                "eligible_human_rows": len(eligible_source),
-                "eligible_synthetic_rows": 0,
-                "train_rows": counts["train"],
-                "test_rows": counts["test"],
-                "validate_rows": counts["validate"],
-                "excluded_rows": counts["excluded"],
-                "eligible_train_rows": eligible_counts["train"],
-                "target_test_rows": target_test,
-                "target_validate_rows": target_validate,
-                "assignment_tolerance_rows": assignment_tolerance,
-                "test_fraction": counts["test"] / max(human_source_rows, 1),
-                "validate_fraction": (
-                    counts["validate"] / max(human_source_rows, 1)
-                ),
-                "test_fraction_of_eligible_sentences": (
-                    counts["test"] / max(len(eligible_source), 1)
-                ),
-                "validate_fraction_of_eligible_sentences": (
-                    counts["validate"] / max(len(eligible_source), 1)
-                ),
-                "synthetic_test_rows": int(
-                    (
-                        synthetic_source
-                        & source_frame["split"].eq("test")
-                    ).sum()
-                ),
-                "synthetic_validate_rows": int(
-                    (
-                        synthetic_source
-                        & source_frame["split"].eq("validate")
-                    ).sum()
-                ),
-            }
-            if (
-                abs(counts["test"] - target_test) > assignment_tolerance
-                or abs(counts["validate"] - target_validate)
-                > assignment_tolerance
-            ):
-                source_shortfalls[language_key][source_key] = {
-                    "test": counts["test"],
-                    "target_test": target_test,
-                    "validate": counts["validate"],
-                    "target_validate": target_validate,
-                    "tolerance": assignment_tolerance,
-                }
-        if not source_shortfalls[language_key]:
-            source_shortfalls.pop(language_key)
-
-    lexical_like_eval_rows = int(
-        (
-            output["split"].isin({"test", "validate"})
-            & ~evaluation_candidate_mask(
-                output,
-                min_formosan_tokens=min_formosan_tokens,
-                min_target_tokens=min_target_tokens,
-                min_combined_tokens=min_combined_tokens,
-                min_punctuated_combined_tokens=min_punctuated_combined_tokens,
-                max_eval_units_per_side=max_eval_units_per_side,
-            )
-        ).sum()
     )
-    overlaps = overlap_summary(train, evaluation)
-    output_complete = len(output) == len(frame) and excluded.empty
-    report = {
-        "schema_version": 3,
-        "complete": (
-            output_complete
-            and not ratio_shortfalls
-            and not source_shortfalls
-        ),
-        "tier": TIER,
-        "evaluation_length_policy": {
-            "min_formosan_tokens": min_formosan_tokens,
-            "min_target_tokens": min_target_tokens,
-            "min_combined_tokens": min_combined_tokens,
-            "min_punctuated_combined_tokens": min_punctuated_combined_tokens,
-            "max_eval_units_per_side": max_eval_units_per_side,
-        },
-        "input_rows": len(frame) + len(duplicate_rows),
-        "deduplicated_input_rows": len(frame),
-        "duplicate_rows_removed": len(duplicate_rows),
-        "output_rows": len(output),
-        "excluded_rows": len(excluded),
-        "excluded_heldout_group_rows": int(
-            heldout_group_non_eval.sum()
-        ),
-        "blocked_validate_test_candidate_rows": len(
-            validate_test_blocked_indexes
-        ),
-        "blocked_permanent_train_candidate_rows": len(
-            ngram_train_blocked_indexes
-        ),
-        "blocked_train_evaluation_candidate_rows": len(
-            train_eval_blocked_indexes
-        ),
-        "synthetic_eval_rows": int(
-            (
-                output.get("pivot_origin", pd.Series("original", index=output.index))
-                .eq("synthetic")
-                & output["split"].isin({"test", "validate"})
-            ).sum()
-        ),
-        "synthetic_eval_rows_by_split": {
-            split_name: int(
-                (
-                    output.get(
-                        "pivot_origin",
-                        pd.Series("original", index=output.index),
-                    ).eq("synthetic")
-                    & output["split"].eq(split_name)
-                ).sum()
-            )
-            for split_name in ("test", "validate")
-        },
-        "synthetic_eval_policy": SPLIT_DEFAULTS["synthetic_eval_policy"],
-        "synthetic_train_rows": int(
-            (
-                output.get(
-                    "pivot_origin",
-                    pd.Series("original", index=output.index),
-                ).eq("synthetic")
-                & output["split"].eq("train")
-            ).sum()
-        ),
-        "mt_ineligible_eval_rows": int(
-            (
-                ~bool_series(
-                    output["mt_eval_eligible"],
-                    context="hard-split output:mt_eval_eligible",
-                )
-                & output["split"].isin({"test", "validate"})
-            ).sum()
-        ),
-        "ambiguous_normalization_eval_rows": int(
-            (
-                output["mt_normalization_confidence"].astype(str).eq("ambiguous")
-                & output["split"].isin({"test", "validate"})
-            ).sum()
-        ),
-        "lexeme_eval_rows": int(
-            (
-                output["row_type"].isin({"lexeme", "morpheme"})
-                & output["split"].isin({"test", "validate"})
-            ).sum()
-        ),
-        "lexical_like_eval_rows": lexical_like_eval_rows,
-        "document_overlap_train_eval": len(
-            set(train["_document_key"]) & set(evaluation["_document_key"])
-        ),
-        "document_overlap_validate_test": len(
-            set(test["_document_key"]) & set(validate["_document_key"])
-        ),
-        "near_duplicate_train_eval_rows": len(final_near),
-        "near_duplicate_validate_test_rows": len(validate_test_near),
-        "cross_language_near_duplicate_validate_test_rows": len(
-            validate_test_near_global - validate_test_near
-        ),
-        "near_duplicate_iterations": near_iterations,
-        "ngram_jaccard_threshold": ngram_threshold,
-        "overlap": overlaps,
-        "split_counts": split_counts(output),
-        "split_counts_by_language": split_counts_by_language(output),
-        "mt_standardization": mt_profile,
-        "languages": language_reports,
-        "source_strata": source_reports,
-        "source_distribution_total_variation": source_distribution_tvd,
-        "ratio_basis": SPLIT_DEFAULTS["ratio_basis"],
-        "required_ratios": {"test": test_ratio, "validate": val_ratio},
-        "ratio_shortfalls": ratio_shortfalls,
-        "source_ratio_shortfalls": source_shortfalls,
-        "benchmark_registry_input": str(registry_in) if registry_in else None,
-        "benchmark_registry_stats": registry_stats,
-    }
-    if not output_complete or ratio_shortfalls or source_shortfalls:
-        raise SystemExit(
-            "Could not construct source-balanced sentence evaluation sets: "
-            + json.dumps(
-                {
-                    "output_rows": len(output),
-                    "deduplicated_input_rows": len(frame),
-                    "languages": ratio_shortfalls,
-                    "sources": source_shortfalls,
-                },
-                sort_keys=True,
-            )
-        )
 
     internal_columns = [column for column in output.columns if column.startswith("_")]
     if preserve_internal:
