@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from collections import Counter
 from pathlib import Path
@@ -32,6 +31,7 @@ from split_allocation import (
     source_assignment_tolerance,
     source_stratum_targets,
 )
+from split_cli import parse_split_args
 from split_similarity import (
     NgramSimilarityIndex,
     SplitNgramIndexes,
@@ -787,68 +787,8 @@ def write_registry(path: Path, output: pd.DataFrame, report: dict) -> None:
     write_json(path, payload)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build the source-stratified hard MT split.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
-    parser.add_argument("--target-col")
-    parser.add_argument("--output-prefix")
-    parser.add_argument("--train-ratio", type=float, default=SPLIT_DEFAULTS["train_ratio"])
-    parser.add_argument("--val-ratio", type=float, default=SPLIT_DEFAULTS["validate_ratio"])
-    parser.add_argument("--test-ratio", type=float, default=SPLIT_DEFAULTS["test_ratio"])
-    parser.add_argument("--seed", type=int, default=SPLIT_DEFAULTS["seed"])
-    parser.add_argument(
-        "--min-formosan-tokens",
-        type=int,
-        default=SPLIT_DEFAULTS["min_formosan_tokens"],
-    )
-    parser.add_argument(
-        "--min-target-tokens",
-        type=int,
-        default=SPLIT_DEFAULTS["min_target_tokens"],
-    )
-    parser.add_argument(
-        "--min-combined-tokens",
-        type=int,
-        default=SPLIT_DEFAULTS["min_combined_tokens"],
-    )
-    parser.add_argument(
-        "--min-punctuated-combined-tokens",
-        type=int,
-        default=SPLIT_DEFAULTS["min_punctuated_combined_tokens"],
-    )
-    parser.add_argument(
-        "--max-eval-units-per-side",
-        type=int,
-        default=SPLIT_DEFAULTS["max_eval_units_per_side"],
-    )
-    parser.add_argument("--min-test-rows", type=int, default=SPLIT_DEFAULTS["min_test_rows"])
-    parser.add_argument(
-        "--min-validate-rows",
-        type=int,
-        default=SPLIT_DEFAULTS["min_validate_rows"],
-    )
-    parser.add_argument("--selection-attempts", type=int, default=200)
-    parser.add_argument(
-        "--ngram-jaccard-threshold",
-        type=float,
-        default=SPLIT_DEFAULTS["character_ngram_jaccard_threshold"],
-    )
-    parser.add_argument("--registry-in", type=Path)
-    parser.add_argument(
-        "--tiers",
-        default=TIER,
-        help="Compatibility option; only in_domain_hard is supported.",
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
+    args = parse_split_args()
     requested_tiers = {value.strip() for value in args.tiers.split(",") if value.strip()}
     if requested_tiers != {TIER}:
         raise SystemExit(f"Corpus pipeline v3 supports only --tiers {TIER}")

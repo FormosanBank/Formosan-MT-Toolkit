@@ -29,6 +29,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "scripts/setup_milmmt.py",
     "scripts/setup_tokenizer_sweep.py",
     "scripts/split_allocation.py",
+    "scripts/split_cli.py",
     "scripts/split_similarity.py",
     "scripts/tokenizer_audit.py",
     "scripts/train_directional.py",

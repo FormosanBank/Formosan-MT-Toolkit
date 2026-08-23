@@ -3,27 +3,22 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import sys
-import unicodedata
 from collections import Counter
 from pathlib import Path
 
 import nllb_runtime as nllb
 import pandas as pd
 from experiment_config import (
-    DEFAULT_PROFILE,
     load_corpus_pipeline_config,
-    load_profile,
     profile_record,
     sha256_file,
 )
 from mt_common import (
     add_normalized_columns,
     bool_series,
-    direction_choices,
     evaluation_candidate_mask,
     mt_standard_contract,
     normalize_target_language,
@@ -33,7 +28,12 @@ from mt_common import (
     weighted_apportioned_counts,
     write_json,
 )
-from validation_similarity import ValidationNgramIndex
+from split_cli import parse_validation_args
+from validation_similarity import (
+    ValidationNgramIndex,
+    add_validation_keys,
+    pairwise_leakage,
+)
 
 PIPELINE_DEFAULTS = load_corpus_pipeline_config()
 SPLIT_DEFAULTS = PIPELINE_DEFAULTS["splits"]
@@ -82,222 +82,6 @@ REQUIRED_PROVENANCE = {
     "dialect",
 }
 
-
-def normalize(value: object) -> str:
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
-    return " ".join(text.split())
-
-
-def skeleton(value: object) -> str:
-    return "".join(
-        character
-        for character in normalize(value)
-        if unicodedata.category(character)[0] in {"L", "N", "M"}
-    )
-
-
-def add_validation_keys(
-    frame: pd.DataFrame,
-    *,
-    target_col: str,
-) -> pd.DataFrame:
-    output = frame.copy()
-    output["_formosan_key"] = output["formosan_sentence"].map(normalize)
-    output["_target_key"] = output[target_col].map(normalize)
-    output["_pair_key"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_formosan_key"]
-        + "\u241f"
-        + output["_target_key"]
-    )
-    output["_formosan_skeleton"] = output["formosan_sentence"].map(skeleton)
-    output["_target_skeleton"] = output[target_col].map(skeleton)
-    output["_formosan_task_key"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_formosan_key"]
-    )
-    output["_target_task_key"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_target_key"]
-    )
-    output["_formosan_task_skeleton"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_formosan_skeleton"]
-    )
-    output["_target_task_skeleton"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_target_skeleton"]
-    )
-    output["_pair_skeleton"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["_formosan_skeleton"]
-        + "\u241f"
-        + output["_target_skeleton"]
-    )
-    output["_document_key"] = (
-        output["lang_code"].astype(str)
-        + "\u241f"
-        + output["source"].astype(str)
-    )
-    return output
-
-
-def overlap_count(
-    left: pd.DataFrame,
-    right: pd.DataFrame,
-    column: str,
-) -> int:
-    return len(set(left[column].astype(str)) & set(right[column].astype(str)))
-
-
-def deletion_keys(value: str) -> set[str]:
-    return {
-        value[:position] + value[position + 1 :]
-        for position in range(len(value))
-    }
-
-
-def one_edit_conflict_count(
-    reference: pd.DataFrame,
-    candidates: pd.DataFrame,
-    column: str,
-    *,
-    by_language: bool,
-) -> int:
-    """Count candidate rows at Levenshtein distance at most one."""
-    if reference.empty or candidates.empty:
-        return 0
-    conflicts: set[int] = set()
-    reference_groups = (
-        reference.groupby("lang_code", sort=False)
-        if by_language
-        else [("_global", reference)]
-    )
-    candidate_groups = (
-        {
-            str(language): group
-            for language, group in candidates.groupby("lang_code", sort=False)
-        }
-        if by_language
-        else {"_global": candidates}
-    )
-    for language, reference_group in reference_groups:
-        candidate_group = candidate_groups.get(str(language))
-        if candidate_group is None:
-            continue
-        exact: set[str] = set()
-        deleted: set[str] = set()
-        for value in reference_group[column].astype(str):
-            if not value:
-                continue
-            exact.add(value)
-            deleted.update(deletion_keys(value))
-        reference_neighborhood = exact | deleted
-        for index, value in candidate_group[column].astype(str).items():
-            if not value:
-                continue
-            if value in reference_neighborhood:
-                conflicts.add(int(index))
-                continue
-            if not deletion_keys(value).isdisjoint(reference_neighborhood):
-                conflicts.add(int(index))
-    return len(conflicts)
-
-
-def pairwise_leakage(
-    left: pd.DataFrame,
-    right: pd.DataFrame,
-    *,
-    formosan_ngram_index: ValidationNgramIndex,
-    target_ngram_index: ValidationNgramIndex,
-    formosan_by_language: bool = True,
-    target_by_language: bool = False,
-) -> dict[str, object]:
-    formosan_key = (
-        "_formosan_task_key"
-        if formosan_by_language
-        else "_formosan_key"
-    )
-    target_key = (
-        "_target_task_key"
-        if target_by_language
-        else "_target_key"
-    )
-    formosan_skeleton = (
-        "_formosan_task_skeleton"
-        if formosan_by_language
-        else "_formosan_skeleton"
-    )
-    target_skeleton = (
-        "_target_task_skeleton"
-        if target_by_language
-        else "_target_skeleton"
-    )
-    exact = {
-        name: overlap_count(left, right, column)
-        for name, column in (
-            ("formosan", formosan_key),
-            ("target", target_key),
-            ("pair", "_pair_key"),
-        )
-    }
-    skeleton_overlap = {
-        name: overlap_count(left, right, column)
-        for name, column in (
-            ("formosan", formosan_skeleton),
-            ("target", target_skeleton),
-            ("pair", "_pair_skeleton"),
-        )
-    }
-    one_edit = {
-        "formosan": one_edit_conflict_count(
-            left,
-            right,
-            "_formosan_skeleton",
-            by_language=True,
-        ),
-        "target": one_edit_conflict_count(
-            left,
-            right,
-            "_target_skeleton",
-            by_language=target_by_language,
-        ),
-    }
-    character_ngram = {
-        "formosan": len(
-            formosan_ngram_index.conflicts(left.index, right.index)
-        ),
-        "target": len(
-            target_ngram_index.conflicts(
-                left.index,
-                right.index,
-                same_language=target_by_language,
-            )
-        ),
-    }
-    return {
-        "exact_overlap": exact,
-        "skeleton_overlap": skeleton_overlap,
-        "one_edit_conflicting_rows": one_edit,
-        "character_ngram_conflicting_rows": character_ngram,
-        "document_overlap": overlap_count(left, right, "_document_key"),
-        "formosan_by_language": formosan_by_language,
-        "target_by_language": target_by_language,
-        "ok": not any(
-            value
-            for family in (exact, skeleton_overlap, one_edit, character_ngram)
-            for value in family.values()
-        ),
-        "document_disjoint": (
-            overlap_count(left, right, "_document_key") == 0
-        ),
-    }
 
 
 def validate_provenance(frame: pd.DataFrame) -> dict[str, object]:
@@ -873,112 +657,8 @@ def validate_tags(
     }
 
 
-def parse_args() -> argparse.Namespace:
-    preliminary = argparse.ArgumentParser(add_help=False)
-    preliminary.add_argument(
-        "--profile",
-        type=Path,
-        default=DEFAULT_PROFILE,
-    )
-    known, _ = preliminary.parse_known_args()
-    load_profile(known.profile)
-    split_defaults = SPLIT_DEFAULTS
-    parser = argparse.ArgumentParser(
-        parents=[preliminary],
-        description="Independently validate a release Formosan MT corpus.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument(
-        "--target-lang",
-        choices=["english", "chinese"],
-        default=None,
-    )
-    parser.add_argument("--target-col")
-    parser.add_argument(
-        "--split-report",
-        type=Path,
-        help="Original hard-split report used to validate all-pair targets.",
-    )
-    parser.add_argument("--tokenizer", type=Path)
-    parser.add_argument("--direction", choices=direction_choices())
-    parser.add_argument(
-        "--min-test-ratio",
-        type=float,
-        default=split_defaults["test_ratio"],
-    )
-    parser.add_argument(
-        "--min-validate-ratio",
-        type=float,
-        default=split_defaults["validate_ratio"],
-    )
-    parser.add_argument(
-        "--min-test-rows",
-        type=int,
-        default=split_defaults["min_test_rows"],
-    )
-    parser.add_argument(
-        "--min-validate-rows",
-        type=int,
-        default=split_defaults["min_validate_rows"],
-    )
-    parser.add_argument(
-        "--ngram-jaccard-threshold",
-        type=float,
-        default=split_defaults[
-            "character_ngram_jaccard_threshold"
-        ],
-    )
-    parser.add_argument(
-        "--min-formosan-tokens",
-        type=int,
-        default=split_defaults["min_formosan_tokens"],
-    )
-    parser.add_argument(
-        "--min-target-tokens",
-        type=int,
-        default=split_defaults["min_target_tokens"],
-    )
-    parser.add_argument(
-        "--min-combined-tokens",
-        type=int,
-        default=split_defaults["min_combined_tokens"],
-    )
-    parser.add_argument(
-        "--min-punctuated-combined-tokens",
-        type=int,
-        default=split_defaults["min_punctuated_combined_tokens"],
-    )
-    parser.add_argument(
-        "--max-eval-units-per-side",
-        type=int,
-        default=split_defaults["max_eval_units_per_side"],
-    )
-    parser.add_argument(
-        "--source-ratio-tolerance",
-        type=float,
-        default=split_defaults["source_ratio_tolerance"],
-        help="Allowed per-source split deviation in addition to one row.",
-    )
-    parser.add_argument("--report", "--output-json", dest="report", type=Path)
-    parser.add_argument(
-        "--require-human-eval",
-        action="store_true",
-        default=not split_defaults["synthetic_eval"],
-        help="Reject synthetic pivot references in evaluation.",
-    )
-    parser.add_argument(
-        "--require-document-holdout-report",
-        action="store_true",
-        help="Require source XML documents to be disjoint across splits.",
-    )
-    args = parser.parse_args()
-    args.profile = known.profile
-    return args
-
-
 def main() -> None:
-    args = parse_args()
+    args = parse_validation_args()
     target_lang = normalize_target_language(
         args.target_lang,
         args.target_col,

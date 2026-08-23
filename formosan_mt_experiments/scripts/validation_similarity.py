@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections import Counter
 
 import pandas as pd
@@ -165,3 +166,184 @@ class ValidationNgramIndex:
         intersection = len(left & right)
         union = len(left) + len(right) - intersection
         return bool(union and intersection / union >= threshold)
+
+
+def normalize(value: object) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(text.split())
+
+
+def skeleton(value: object) -> str:
+    return "".join(
+        character
+        for character in normalize(value)
+        if unicodedata.category(character)[0] in {"L", "N", "M"}
+    )
+
+
+def add_validation_keys(
+    frame: pd.DataFrame,
+    *,
+    target_col: str,
+) -> pd.DataFrame:
+    output = frame.copy()
+    output["_formosan_key"] = output["formosan_sentence"].map(normalize)
+    output["_target_key"] = output[target_col].map(normalize)
+    output["_pair_key"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_formosan_key"]
+        + "\u241f"
+        + output["_target_key"]
+    )
+    output["_formosan_skeleton"] = output["formosan_sentence"].map(skeleton)
+    output["_target_skeleton"] = output[target_col].map(skeleton)
+    output["_formosan_task_key"] = output["lang_code"].astype(str) + "\u241f" + output["_formosan_key"]
+    output["_target_task_key"] = output["lang_code"].astype(str) + "\u241f" + output["_target_key"]
+    output["_formosan_task_skeleton"] = (
+        output["lang_code"].astype(str) + "\u241f" + output["_formosan_skeleton"]
+    )
+    output["_target_task_skeleton"] = (
+        output["lang_code"].astype(str) + "\u241f" + output["_target_skeleton"]
+    )
+    output["_pair_skeleton"] = (
+        output["lang_code"].astype(str)
+        + "\u241f"
+        + output["_formosan_skeleton"]
+        + "\u241f"
+        + output["_target_skeleton"]
+    )
+    output["_document_key"] = output["lang_code"].astype(str) + "\u241f" + output["source"].astype(str)
+    return output
+
+
+def overlap_count(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    column: str,
+) -> int:
+    return len(set(left[column].astype(str)) & set(right[column].astype(str)))
+
+
+def deletion_keys(value: str) -> set[str]:
+    return {value[:position] + value[position + 1 :] for position in range(len(value))}
+
+
+def one_edit_conflict_count(
+    reference: pd.DataFrame,
+    candidates: pd.DataFrame,
+    column: str,
+    *,
+    by_language: bool,
+) -> int:
+    """Count candidate rows at Levenshtein distance at most one."""
+    if reference.empty or candidates.empty:
+        return 0
+    conflicts: set[int] = set()
+    reference_groups = (
+        reference.groupby("lang_code", sort=False)
+        if by_language
+        else [("_global", reference)]
+    )
+    candidate_groups = (
+        {
+            str(language): group
+            for language, group in candidates.groupby("lang_code", sort=False)
+        }
+        if by_language
+        else {"_global": candidates}
+    )
+    for language, reference_group in reference_groups:
+        candidate_group = candidate_groups.get(str(language))
+        if candidate_group is None:
+            continue
+        exact: set[str] = set()
+        deleted: set[str] = set()
+        for value in reference_group[column].astype(str):
+            if not value:
+                continue
+            exact.add(value)
+            deleted.update(deletion_keys(value))
+        reference_neighborhood = exact | deleted
+        for index, value in candidate_group[column].astype(str).items():
+            if not value:
+                continue
+            if value in reference_neighborhood:
+                conflicts.add(int(index))
+                continue
+            if not deletion_keys(value).isdisjoint(reference_neighborhood):
+                conflicts.add(int(index))
+    return len(conflicts)
+
+
+def pairwise_leakage(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    *,
+    formosan_ngram_index: ValidationNgramIndex,
+    target_ngram_index: ValidationNgramIndex,
+    formosan_by_language: bool = True,
+    target_by_language: bool = False,
+) -> dict[str, object]:
+    formosan_key = "_formosan_task_key" if formosan_by_language else "_formosan_key"
+    target_key = "_target_task_key" if target_by_language else "_target_key"
+    formosan_skeleton = (
+        "_formosan_task_skeleton" if formosan_by_language else "_formosan_skeleton"
+    )
+    target_skeleton = "_target_task_skeleton" if target_by_language else "_target_skeleton"
+    exact = {
+        name: overlap_count(left, right, column)
+        for name, column in (
+            ("formosan", formosan_key),
+            ("target", target_key),
+            ("pair", "_pair_key"),
+        )
+    }
+    skeleton_overlap = {
+        name: overlap_count(left, right, column)
+        for name, column in (
+            ("formosan", formosan_skeleton),
+            ("target", target_skeleton),
+            ("pair", "_pair_skeleton"),
+        )
+    }
+    one_edit = {
+        "formosan": one_edit_conflict_count(
+            left,
+            right,
+            "_formosan_skeleton",
+            by_language=True,
+        ),
+        "target": one_edit_conflict_count(
+            left,
+            right,
+            "_target_skeleton",
+            by_language=target_by_language,
+        ),
+    }
+    character_ngram = {
+        "formosan": len(formosan_ngram_index.conflicts(left.index, right.index)),
+        "target": len(
+            target_ngram_index.conflicts(
+                left.index,
+                right.index,
+                same_language=target_by_language,
+            )
+        ),
+    }
+    document_overlap = overlap_count(left, right, "_document_key")
+    return {
+        "exact_overlap": exact,
+        "skeleton_overlap": skeleton_overlap,
+        "one_edit_conflicting_rows": one_edit,
+        "character_ngram_conflicting_rows": character_ngram,
+        "document_overlap": document_overlap,
+        "formosan_by_language": formosan_by_language,
+        "target_by_language": target_by_language,
+        "ok": not any(
+            value
+            for family in (exact, skeleton_overlap, one_edit, character_ngram)
+            for value in family.values()
+        ),
+        "document_disjoint": document_overlap == 0,
+    }
