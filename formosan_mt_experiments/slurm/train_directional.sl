@@ -99,6 +99,7 @@ add_override WARMUP_STEPS --warmup-steps
 add_override WEIGHT_DECAY --weight-decay
 add_override MAX_GRAD_NORM --max-grad-norm
 add_override LANGUAGE_SAMPLING_ALPHA --language-sampling-alpha
+add_override LEXICAL_ROW_SAMPLING_WEIGHT --lexical-row-sampling-weight
 add_override SEED --seed
 add_override SAVE_INTERVAL --save-interval
 add_override EVAL_INTERVAL --eval-interval

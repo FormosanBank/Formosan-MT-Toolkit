@@ -37,6 +37,7 @@ from mt_common import (
     language_sampling_probs,
     normalize_target_language,
     read_parallel_csv,
+    row_type_sampling_probs,
     target_col_for,
     target_language_from_direction,
     write_json,
@@ -163,8 +164,17 @@ def prepare_data(
             target_lang=args.target_lang,
         )
         runtime.validate_task(tokenizer, task)
+        normalized_train = train_sub.reset_index(drop=True)
+        try:
+            sampling_probs = row_type_sampling_probs(
+                normalized_train["row_type"],
+                args.lexical_row_sampling_weight,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"Cannot construct row sampling for {lang}: {exc}") from exc
         train_by_lang[lang] = {
-            "df": train_sub.reset_index(drop=True),
+            "df": normalized_train,
+            "row_sampling_probs": np.asarray(sampling_probs, dtype=np.float64),
             "task": task,
         }
         if not val_sub.empty:
@@ -192,6 +202,18 @@ def prepare_data(
             "validation_metadata_mode": args.validation_metadata_mode,
             "training_metadata_fallback": training_metadata_fallback,
             "dialect_tag_dropout": float(args.dialect_tag_dropout),
+            "row_type_sampling": {
+                "sentence_weight": 1.0,
+                "lexical_weight": float(args.lexical_row_sampling_weight),
+                "basis": "explicit XML row_type within each selected language",
+                "train_by_language": {
+                    lang: {
+                        str(row_type): int(count)
+                        for row_type, count in info["df"]["row_type"].value_counts().sort_index().items()
+                    }
+                    for lang, info in train_by_lang.items()
+                },
+            },
             "synthetic_train_rows": int(
                 train.get(
                     "pivot_origin",
@@ -676,6 +698,12 @@ def main() -> None:
         help="Language sampling exponent p(lang) proportional to row_count^alpha.",
     )
     parser.add_argument(
+        "--lexical-row-sampling-weight",
+        type=float,
+        default=defaults["lexical_row_sampling_weight"],
+        help="Per-row weight for lexemes and morphemes relative to sentence weight 1.0.",
+    )
+    parser.add_argument(
         "--dialect-tag-dropout",
         type=float,
         default=defaults["dialect_tag_dropout"],
@@ -753,6 +781,8 @@ def main() -> None:
         raise SystemExit("--early-stopping-patience cannot be negative.")
     if not 0.0 <= args.language_sampling_alpha <= 1.0:
         raise SystemExit("--language-sampling-alpha must be between 0 and 1.")
+    if not 0.0 < args.lexical_row_sampling_weight <= 1.0:
+        raise SystemExit("--lexical-row-sampling-weight must be greater than 0 and at most 1.")
     if not 0.0 <= args.dialect_tag_dropout <= 1.0:
         raise SystemExit("--dialect-tag-dropout must be between 0 and 1.")
     random.seed(args.seed)
@@ -901,6 +931,7 @@ def main() -> None:
                 len(df),
                 size=args.batch_size,
                 replace=True,
+                p=info["row_sampling_probs"],
             )
             batch = df.iloc[sampled]
             source_texts, dropout_counts = training_source_texts(

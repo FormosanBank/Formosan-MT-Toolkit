@@ -19,9 +19,10 @@ NLLB inputs use target, source-language, and dialect controls:
 ```
 
 Training selects languages with probability proportional to
-`training_rows^0.5`, then samples rows uniformly within the selected language.
-Repository names and source paths do not affect training probability or model
-inputs.
+`training_rows^0.5`. Within the selected language, sentence rows have weight
+`1.0` and explicit standalone lexeme or morpheme rows have weight `0.25`.
+Repository names, source paths, and guessed domains do not affect training
+probability or model inputs.
 
 ## Required Corpus Contract
 
@@ -197,10 +198,10 @@ adapt those two setup lines to the cluster environment when needed.
 Training logs loss, learning rate, gradient norm, throughput, peak CUDA memory,
 validation loss, perplexity, BLEU, chrF2, TER, exact match, empty-output rate,
 output/reference length ratio, and applied metadata-dropout counts. Direction
-and language tags are always retained. Domain and dialect tags independently
-fall back to `unknown` and `default` for 25% of training presentations.
-Checkpoint selection uses `unknown`/`default` metadata to match headline
-inference. Generation metrics include per-language breakdowns.
+and language tags are always retained. Dialect tags fall back to `default` for
+25% of training presentations. Checkpoint selection uses the default dialect
+to match headline inference. Generation metrics include per-language
+breakdowns.
 
 Each generation validation atomically updates `resume/` with model, optimizer,
 scheduler, scaler, random state, and run-contract hash. Successful training

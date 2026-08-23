@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "milmmt46-1b-v1-directional-v3",
+  "recipe_id": "milmmt46-1b-v1-directional-v4",
   "model_family": "milmmt",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -42,7 +42,7 @@
     "use_metadata": true
   },
   "comparison": {
-    "baseline_recipe_id": "nllb200-spm8k-directional-v6",
+    "baseline_recipe_id": "nllb200-spm8k-directional-v7",
     "budget_basis": "sample_presentations",
     "sample_presentations": 19200000,
     "claim_scope": "matched_data_exposure_not_parameter_or_flop_matched",
@@ -52,6 +52,7 @@
       "learning_rate",
       "warmup_steps",
       "language_sampling_alpha",
+      "lexical_row_sampling_weight",
       "use_tags",
       "dialect_tag_dropout",
       "precision",
@@ -89,6 +90,7 @@
     "optimizer": "adamw",
     "lr_scheduler": "inverse_sqrt",
     "language_sampling_alpha": 0.5,
+    "lexical_row_sampling_weight": 0.25,
     "use_tags": true,
     "dialect_tag_dropout": 0.25,
     "precision": "bf16",

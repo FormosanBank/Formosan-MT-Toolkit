@@ -124,6 +124,9 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         value = training.get(name)
         if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
             raise SystemExit(f"Experiment profile has invalid {name}")
+    lexical_weight = training.get("lexical_row_sampling_weight")
+    if not isinstance(lexical_weight, (int, float)) or not 0.0 < float(lexical_weight) <= 1.0:
+        raise SystemExit("Experiment profile has invalid lexical_row_sampling_weight")
     if training.get("validation_metadata_mode") not in {"default", "oracle"}:
         raise SystemExit("Experiment profile has invalid validation_metadata_mode")
     if training.get("effective_batch_size") != (training.get("batch_size", 0) * training.get("grad_accum_steps", 0)):

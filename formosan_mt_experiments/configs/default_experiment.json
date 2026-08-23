@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "nllb200-spm8k-directional-v6",
+  "recipe_id": "nllb200-spm8k-directional-v7",
   "model_family": "nllb",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -51,6 +51,7 @@
     "warmup_steps": 4000,
     "weight_decay": 0.001,
     "language_sampling_alpha": 0.5,
+    "lexical_row_sampling_weight": 0.25,
     "use_tags": true,
     "dialect_tag_dropout": 0.25,
     "precision": "bf16",

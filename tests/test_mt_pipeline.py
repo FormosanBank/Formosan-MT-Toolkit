@@ -50,6 +50,7 @@ from mt_common import (  # noqa: E402
     add_normalized_columns,
     evaluation_candidate_mask,
     language_sampling_probs,
+    row_type_sampling_probs,
     source_corpus,
     special_tokens_from_corpus,
     weighted_apportioned_counts,
@@ -540,6 +541,19 @@ class LeakageTests(unittest.TestCase):
         probabilities = language_sampling_probs({"ami": 100, "ssf": 25}, 0.5)
         self.assertAlmostEqual(probabilities["ami"], 2 / 3)
         self.assertAlmostEqual(probabilities["ssf"], 1 / 3)
+
+    def test_row_sampling_uses_only_explicit_structural_type(self) -> None:
+        probabilities = row_type_sampling_probs(
+            ["sentence", "sentence", "lexeme", "morpheme"],
+            lexical_weight=0.25,
+        )
+        self.assertAlmostEqual(sum(probabilities), 1.0)
+        self.assertAlmostEqual(probabilities[0], probabilities[2] * 4)
+        self.assertAlmostEqual(probabilities[1], probabilities[3] * 4)
+
+    def test_row_sampling_rejects_unknown_structural_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported row types"):
+            row_type_sampling_probs(["sentence", "dictionary"], lexical_weight=0.25)
 
     def test_source_corpus_preserves_exact_public_and_private_identity(self) -> None:
         self.assertEqual(
@@ -1700,6 +1714,7 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["training_defaults"]["lr_scheduler"], "inverse_sqrt")
         self.assertEqual(profile["training_defaults"]["best_metric"], "chrF2")
         self.assertTrue(profile["training_defaults"]["use_tags"])
+        self.assertEqual(profile["training_defaults"]["lexical_row_sampling_weight"], 0.25)
         self.assertEqual(profile["generation_defaults"]["beam"], 4)
         comparison = profile["comparison"]
         self.assertEqual(

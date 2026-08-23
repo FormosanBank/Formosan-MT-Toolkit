@@ -562,3 +562,22 @@ def language_sampling_probs(counts: Mapping[str, int], alpha: float) -> dict[str
     weighted = {k: math.pow(max(v, 1), alpha) for k, v in counts.items()}
     total = sum(weighted.values())
     return {k: v / total for k, v in weighted.items()}
+
+
+def row_type_sampling_probs(
+    row_types: Iterable[object],
+    lexical_weight: float,
+) -> list[float]:
+    """Return within-language row probabilities from explicit XML row types."""
+    if not 0.0 < lexical_weight <= 1.0:
+        raise ValueError("lexical_weight must be greater than 0 and at most 1")
+    normalized = [str(value).strip().casefold() for value in row_types]
+    supported = {"sentence", "lexeme", "morpheme"}
+    unknown = sorted(set(normalized) - supported)
+    if unknown:
+        raise ValueError(f"unsupported row types: {unknown}")
+    weights = [lexical_weight if value in {"lexeme", "morpheme"} else 1.0 for value in normalized]
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("cannot sample an empty row collection")
+    return [weight / total for weight in weights]

@@ -271,11 +271,13 @@ and hash every setup artifact.
 `train_directional.py` verifies the corpus, independent validation, setup,
 profile, and file hashes before training. It trains one direction per
 checkpoint with language-temperature sampling (`p(language)` proportional to
-`training_rows^0.5`) and uniform row sampling inside each selected language.
-It applies 25% dialect-tag dropout, performs fixed human per-language generation
-validation, selects best by chrF2, supports early stopping, and binds every
-resume/checkpoint to an immutable run contract. Source paths and repository
-names do not affect model inputs or sampling weights.
+`training_rows^0.5`). Inside each selected language, explicit sentence rows
+have sampling weight `1.0`; standalone lexeme and morpheme rows have weight
+`0.25`. It applies 25% dialect-tag dropout, performs fixed human per-language
+generation validation, selects best by chrF2, supports early stopping, and
+binds every resume/checkpoint to an immutable run contract. Source paths,
+repository names, and inferred domains do not affect model inputs or sampling
+weights.
 
 `evaluate_directional.py` evaluates the entire human test split. Default
 dialect tags are the headline score; oracle dialect tags are a separate
