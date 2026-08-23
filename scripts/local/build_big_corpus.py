@@ -131,7 +131,10 @@ def read_csv(path: Path) -> pd.DataFrame:
         raise SystemExit(f"Cannot read corpus CSV {path}: {exc}") from exc
     if frame.empty:
         raise SystemExit(f"Corpus CSV is empty: {path}")
-    return frame
+    # Parquet preserves per-file numeric and boolean inference. Aggregation has
+    # always treated the canonical CSV contract as text, so normalize both read
+    # paths before concatenating files with different inferred schemas.
+    return frame.fillna("").astype(str)
 
 
 def canonical_order(frame: pd.DataFrame, target_column: str) -> list[str]:

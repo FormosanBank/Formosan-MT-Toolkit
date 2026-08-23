@@ -28,6 +28,7 @@ from build_big_corpus import (  # noqa: E402
     estimated_output_bytes,
     require_clean_pairs,
     write_csv_atomic,
+    write_target,
 )
 from build_context import BuildPaths, replace_with_hardlink  # noqa: E402
 from build_release import package_training_provenance  # noqa: E402
@@ -79,7 +80,7 @@ from mt_standardization import (
 from mt_standardization import (
     profile_sha256 as mt_profile_sha256,
 )
-from pipeline_common import load_pipeline_config  # noqa: E402
+from pipeline_common import load_pipeline_config, write_columnar_cache  # noqa: E402
 from pivot import (  # noqa: E402
     Direction,
     load_cache,
@@ -1081,6 +1082,42 @@ class AcquisitionTests(unittest.TestCase):
             loaded.loc[0, "english_sentence"],
             "What are you thinking?",
         )
+
+    def test_aggregation_normalizes_columnar_provenance_to_csv_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            loaded = []
+            for name, row_id, xml_id in (
+                ("numeric", "row-1", 0),
+                ("text", "row-2", "sample_S1"),
+            ):
+                path = root / f"{name}.csv"
+                frame = pd.DataFrame(
+                    [
+                        {
+                            **mt_contract_fields("malu ku su."),
+                            "lang_code": "ami",
+                            "formosan_sentence": "malu ku su.",
+                            "english": f"Good {name} example.",
+                            "target_lang": "eng",
+                            "row_id": row_id,
+                            "source_record_id": f"record-{row_id}",
+                            "source": f"Repo/XML/{name}.xml",
+                            "row_type": "sentence",
+                            "xml_id": xml_id,
+                        }
+                    ]
+                )
+                frame.to_csv(path, index=False)
+                write_columnar_cache(frame, path)
+                _, cached, _ = corpus_frame(path)
+                loaded.append(cached)
+
+            output = root / "big_corpus_en.csv"
+            combined = write_target(loaded, output, "english_sentence")
+
+            self.assertEqual(combined["xml_id"].tolist(), ["0", "sample_S1"])
+            self.assertTrue(output.with_suffix(".parquet").is_file())
 
     def test_graphql_repository_resolution_preserves_selection_order(self) -> None:
         response = mock.Mock()
