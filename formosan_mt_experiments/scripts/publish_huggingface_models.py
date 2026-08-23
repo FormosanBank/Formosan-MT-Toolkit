@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from experiment_config import load_profile, profile_record, sha256_file
-from mt_common import CODE_TO_LID, DOMAIN_BUCKETS, FORMOSAN_CODES
+from mt_common import CODE_TO_LID, FORMOSAN_CODES
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = EXPERIMENT_ROOT.parent
@@ -128,19 +128,13 @@ model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
 model.to("cuda" if torch.cuda.is_available() else "cpu")
 NLLB_LIDS = {NLLB_LIDS!r}
 
-def translate(text, lang_code, source_bucket="unknown", dialect="default"):
+def translate(text, lang_code, dialect="default"):
 {normalization_line.rstrip()}
     tokenizer.src_lang = {source_lid}
-    source_bucket = source_bucket if source_bucket in {DOMAIN_BUCKETS!r} else "unknown"
-    domain_tag = f"<dom_{{source_bucket}}>"
-    if tokenizer.convert_tokens_to_ids(domain_tag) == tokenizer.unk_token_id:
-        domain_tag = "<dom_unknown>"
     dialect_tag = f"<dialect_{{dialect}}>"
     if tokenizer.convert_tokens_to_ids(dialect_tag) == tokenizer.unk_token_id:
         dialect_tag = "<dialect_default>"
-    prompt = (
-        f"{prefix} {{domain_tag}} {{dialect_tag}} {{text}}"
-    )
+    prompt = f"{prefix} {{dialect_tag}} {{text}}"
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     output = model.generate(
         **inputs,
@@ -268,11 +262,11 @@ model-index:
 **Release:** `{run_stamp}`, validation-selected step {metadata['step']:,}
 
 This is a directional model for 15 Formosan languages. It uses the
-`private_no_bible` leakage-controlled corpus, {tokenizer_note}, balanced
-language/source sampling, direction/language controls, fixed coarse domain
-tags, and dialect tags. Domain and dialect metadata use independent training
-dropout so `unknown` and `default` are learned inference conditions. The model
-weights are public. The training corpus is distributed separately to
+`private_no_bible` leakage-controlled corpus, {tokenizer_note}, temperature-
+balanced language sampling, direction/language controls, and dialect tags.
+Rows are sampled uniformly within each language. Dialect-tag dropout makes
+`default` a normal inference condition. The model weights are public. The
+training corpus is distributed separately to
 authorized FormosanBank members through the access-controlled
 [`FormosanBank/formosan-mt-private`](https://huggingface.co/datasets/FormosanBank/formosan-mt-private)
 dataset and is not included with the weights.
@@ -296,8 +290,8 @@ dataset and is not included with the weights.
 
 {usage}
 
-The control tags are part of the training contract. Use `unknown` and `default`
-when source bucket or dialect metadata is unavailable.
+The control tags are part of the training contract. Use `default` when dialect
+metadata is unavailable.
 
 ## Evaluation
 
@@ -305,7 +299,7 @@ The best checkpoint was selected on validation chrF2. Test and validation
 contain only eligible, human-translated sentence pairs. Synthetic pivots and
 lexical entries are train-only.
 The headline result uses `{headline_mode}` metadata controls, so it does not
-assume access to test-set domain or dialect labels.
+assume access to test-set dialect labels.
 
 | Split | Rows |
 |---|---:|
@@ -337,7 +331,7 @@ passed all leakage gates: exact
 {corpus_validation['character_ngram_conflicts']}. Document overlap:
 {corpus_validation['document_overlap']}.
 
-See `eval/metrics.json` for sacreBLEU signatures, per-language, source,
+See `eval/metrics.json` for sacreBLEU signatures, per-language, source-corpus,
 dialect, and length diagnostics. `publication.json` records the corpus,
 profile, run, and checkpoint hashes used for this release.
 
@@ -350,7 +344,7 @@ generation contract shown above.
 ## Limitations
 
 Outputs require knowledgeable speaker review. Aggregate metrics hide large
-differences among languages and domains. This model is not suitable for
+differences among languages and source corpora. This model is not suitable for
 authoritative, medical, legal, or safety-critical translation.
 """
 

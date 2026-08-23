@@ -22,6 +22,10 @@ One build resolves large repository sets with paginated GraphQL, then downloads,
 parses, and classifies each XML blob once for all requested Formosan languages.
 Per-language inventories retain independent exclusion and mismatch accounting.
 Raw bytes are cached by Git blob ID, never by path or modification time.
+The root `TEXT/@xml:lang` value is the only source-language authority. File
+names, directory names, repository names, and requested output filters never
+determine a file's language. Each `TRANSL/@xml:lang` value is likewise the only
+target-language authority for that translation.
 
 `--exclude-bible` excludes one exact repository/corpus root:
 `Formosan-Taiwan-Bible-Society-Bibles`. It is not a fuzzy path-name filter.
@@ -194,9 +198,8 @@ Document overlap is reported as a diagnostic because some source corpora
 serialize thousands of unrelated rows in one XML file; treating that file as an
 indivisible split unit would recreate the source imbalance this stage prevents.
 
-Eligibility is row-based. A repository or path classified as `dictionary`,
-`classroom`, or another provenance domain is not excluded automatically. A
-structurally typed sentence may enter evaluation when it passes MT
+Eligibility is row-based. Repository and path names do not classify row type or
+quality. A structurally typed sentence may enter evaluation when it passes MT
 standardization, language, escaping, delimiter, gloss, alignment, and
 compact-sentence gates.
 Each side must contain at least two information-bearing units. The pair must
@@ -215,9 +218,9 @@ quarantined because they are likely to exceed or be heavily truncated by the
 current model input contract.
 
 `source_corpus` records the exact public corpus root or private repository used
-for split allocation. It is never a model tag. `source_bucket` is restricted to
-the fixed domains `dictionary`, `classroom`, `narrative`, `linguistic`,
-`education`, `media`, `culture`, `religious`, and `unknown`.
+to keep human evaluation reasonably representative of real source corpora. It
+is audit metadata only. It is never a model tag and never changes training-row
+sampling probability.
 
 ### 8. Independent Validation
 
@@ -238,7 +241,8 @@ zero; 0.70 and 0.85 remain diagnostics. Exposure is evidence of similarity
 risk, not proof of memorization.
 
 The splitter also writes a checksum-bound Parquet companion containing its
-normalized keys, skeletons, token counts, source buckets, and document keys.
+normalized keys, skeletons, token counts, exact source corpora, and document
+keys.
 Validation and TAME-MT verify the canonical CSV hash before using it. Release
 and training files remain CSV, and validation still recomputes leakage keys.
 
@@ -261,18 +265,20 @@ weakening any QC, split, validation, or exposure gate.
 8k SPM from V3 MT-standard Formosan training text only. They load a pinned
 NLLB-200 revision, realign every shared embedding by token identity after the
 SentencePiece ID shift, initialize new pieces from old subpieces, seed new
-Formosan language IDs, add fixed domain and train-derived dialect tags, and hash
-every setup artifact.
+Formosan language IDs, add direction/language and train-derived dialect tags,
+and hash every setup artifact.
 
 `train_directional.py` verifies the corpus, independent validation, setup,
 profile, and file hashes before training. It trains one direction per
-checkpoint with source-bucket weighting and language-temperature sampling,
-applies independent 25% domain and dialect metadata dropout, performs fixed
-human per-language generation validation, selects best by chrF2, supports early
-stopping, and binds every resume/checkpoint to an immutable run contract.
+checkpoint with language-temperature sampling (`p(language)` proportional to
+`training_rows^0.5`) and uniform row sampling inside each selected language.
+It applies 25% dialect-tag dropout, performs fixed human per-language generation
+validation, selects best by chrF2, supports early stopping, and binds every
+resume/checkpoint to an immutable run contract. Source paths and repository
+names do not affect model inputs or sampling weights.
 
 `evaluate_directional.py` evaluates the entire human test split. Default
-metadata tags are the headline score; oracle source/dialect tags are a separate
+dialect tags are the headline score; oracle dialect tags are a separate
 diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures, stratified
 bootstrap confidence intervals, exact/empty/length diagnostics, and
 language/source/dialect/length slices.

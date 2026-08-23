@@ -29,7 +29,6 @@ from mt_common import (
     mt_standard_contract,
     normalize_target_language,
     read_parallel_csv,
-    source_bucket,
     source_corpus,
     target_col_for,
     weighted_apportioned_counts,
@@ -637,20 +636,20 @@ def validate_splits(
         if report_sources:
             all_distribution = Counter(
                 {
-                    str(bucket): int(
+                    str(source): int(
                         values.get("human_input_rows", values["input_rows"])
                     )
-                    for bucket, values in report_sources.items()
+                    for source, values in report_sources.items()
                 }
             )
             evaluation_targets = {
-                str(bucket): int(values["target_test_rows"])
+                str(source): int(values["target_test_rows"])
                 + int(values["target_validate_rows"])
-                for bucket, values in report_sources.items()
+                for source, values in report_sources.items()
             }
             validate_targets = {
-                str(bucket): int(values["target_validate_rows"])
-                for bucket, values in report_sources.items()
+                str(source): int(values["target_validate_rows"])
+                for source, values in report_sources.items()
             }
         else:
             all_distribution = Counter(human_language["_source_corpus"])
@@ -686,35 +685,35 @@ def validate_splits(
             all_total = sum(all_distribution.values())
             source_distribution_tvd[language_key][split_name] = 0.5 * sum(
                 abs(
-                    all_distribution[bucket] / max(all_total, 1)
-                    - distribution[bucket] / max(total, 1)
+                    all_distribution[source] / max(all_total, 1)
+                    - distribution[source] / max(total, 1)
                 )
-                for bucket in set(all_distribution) | set(distribution)
+                for source in set(all_distribution) | set(distribution)
             )
         output_sources = {
-            str(bucket): source_frame
-            for bucket, source_frame in language_frame.groupby(
+            str(source): source_frame
+            for source, source_frame in language_frame.groupby(
                 "_source_corpus", sort=True
             )
         }
-        for bucket in sorted(set(output_sources) | set(all_distribution)):
+        for source in sorted(set(output_sources) | set(all_distribution)):
             source_frame = output_sources.get(
-                bucket,
+                source,
                 language_frame.iloc[0:0],
             )
-            bucket_key = str(bucket)
+            source_key = str(source)
             source_split = source_frame["split"].astype(str).str.lower()
-            total = int(all_distribution.get(bucket_key, len(source_frame)))
+            total = int(all_distribution.get(source_key, len(source_frame)))
             source_human = ~pivot_origin.loc[source_frame.index].eq("synthetic")
             eligible_rows = int(
                 (candidate.loc[source_frame.index] & source_human).sum()
             )
             test_rows = int(source_split.eq("test").sum())
             validate_rows = int(source_split.eq("validate").sum())
-            target_validate = validate_targets.get(bucket_key, 0)
-            target_test = evaluation_targets.get(bucket_key, 0) - target_validate
+            target_validate = validate_targets.get(source_key, 0)
+            target_test = evaluation_targets.get(source_key, 0) - target_validate
             row_tolerance = int(
-                report_sources.get(bucket_key, {}).get(
+                report_sources.get(source_key, {}).get(
                     "assignment_tolerance_rows",
                     max(1, math.ceil(total * source_ratio_tolerance)),
                 )
@@ -736,12 +735,12 @@ def validate_splits(
                 "test_bounds": [required_test, allowed_test],
                 "validate_bounds": [required_validate, allowed_validate],
             }
-            source_ratios[language_key][bucket_key] = values
+            source_ratios[language_key][source_key] = values
             if not (
                 required_test <= test_rows <= allowed_test
                 and required_validate <= validate_rows <= allowed_validate
             ):
-                source_ratio_failures[language_key][bucket_key] = values
+                source_ratio_failures[language_key][source_key] = values
         if not source_ratio_failures[language_key]:
             source_ratio_failures.pop(language_key)
 
@@ -847,10 +846,8 @@ def validate_tags(
     target_lang: str,
 ) -> dict[str, object]:
     tokenizer = nllb.load_tokenizer(tokenizer_dir)
-    work = frame.copy()
-    work["source_bucket"] = work["source"].map(source_bucket)
     tags: set[str] = set()
-    for _, row in work.iterrows():
+    for _, row in frame.iterrows():
         tags.update(
             nllb.source_prefix(
                 row,

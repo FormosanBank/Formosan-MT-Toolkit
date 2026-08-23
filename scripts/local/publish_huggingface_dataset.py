@@ -41,7 +41,6 @@ PROVENANCE_COLUMNS = [
     "pivot_origin",
     "pivot_provider",
     "pivot_direction",
-    "source_bucket",
     "row_type",
     "eval_tier",
     "document_id",
@@ -221,9 +220,6 @@ def package_config(
         "by_language_and_split": {
             key: {split: int(value) for split, value in values.items()}
             for key, values in by_language_split.items()
-        },
-        "source_buckets": {
-            key: int(value) for key, value in frame["source_bucket"].value_counts().sort_index().items()
         },
         "dialects": {
             key: int(value) for key, value in frame["dialect"].fillna("unknown").value_counts().sort_index().items()

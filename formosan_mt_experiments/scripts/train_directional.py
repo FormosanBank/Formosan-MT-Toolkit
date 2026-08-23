@@ -30,7 +30,6 @@ from experiment_config import (
     stable_hash,
 )
 from mt_common import (
-    EASY_BUCKETS,
     FORMOSAN_CODES,
     bool_series,
     direction_choices,
@@ -38,7 +37,6 @@ from mt_common import (
     language_sampling_probs,
     normalize_target_language,
     read_parallel_csv,
-    source_bucket,
     target_col_for,
     target_language_from_direction,
     write_json,
@@ -75,7 +73,6 @@ def prepare_data(
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
     df["split"] = df["split"].astype(str).str.lower()
-    df["source_bucket"] = df["source"].map(source_bucket)
     if "kindOf" not in df or not df["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit("Training CSV must contain only kindOf=standard rows")
     if "row_id" not in df or df["row_id"].astype(str).duplicated().any():
@@ -97,14 +94,8 @@ def prepare_data(
     if not val_mt_eligible.all() or val["mt_normalization_confidence"].astype(str).eq("ambiguous").any():
         raise SystemExit("Validation contains MT-ineligible or ambiguous-normalization rows")
 
-    validation_metadata_fallback = {
-        "domain_fallback_rows": 0,
-        "dialect_fallback_rows": 0,
-    }
-    training_metadata_fallback = {
-        "domain_fallback_rows": 0,
-        "dialect_fallback_rows": 0,
-    }
+    validation_metadata_fallback = {"dialect_fallback_rows": 0}
+    training_metadata_fallback = {"dialect_fallback_rows": 0}
     if args.use_tags:
         train, training_metadata_fallback = runtime.normalize_control_metadata(
             train,
@@ -200,7 +191,6 @@ def prepare_data(
             "validation_metadata_fallback": validation_metadata_fallback,
             "validation_metadata_mode": args.validation_metadata_mode,
             "training_metadata_fallback": training_metadata_fallback,
-            "domain_tag_dropout": float(args.domain_tag_dropout),
             "dialect_tag_dropout": float(args.dialect_tag_dropout),
             "synthetic_train_rows": int(
                 train.get(
@@ -238,34 +228,21 @@ def encode_batch(
     )
 
 
-def row_probabilities(df: pd.DataFrame, easy_source_weight: float) -> np.ndarray:
-    weights = np.ones(len(df), dtype=np.float64)
-    if "source_bucket" in df.columns:
-        easy = df["source_bucket"].isin(EASY_BUCKETS).to_numpy()
-        weights[easy] = easy_source_weight
-    weights = np.maximum(weights, 1e-8)
-    return weights / weights.sum()
-
-
 def training_source_texts(
     batch: pd.DataFrame,
     *,
     args,
     runtime=nllb,
 ) -> tuple[list[str], dict[str, int]]:
-    """Build training inputs with independent, reproducible metadata dropout."""
+    """Build training inputs with reproducible dialect-tag dropout."""
     if args.use_tags:
-        domain_mask = np.random.random(len(batch)) < args.domain_tag_dropout
         dialect_mask = np.random.random(len(batch)) < args.dialect_tag_dropout
     else:
-        domain_mask = np.zeros(len(batch), dtype=bool)
         dialect_mask = np.zeros(len(batch), dtype=bool)
 
     source_column = "formosan_sentence" if is_formosan_to_target(args.direction) else args.target_col
     texts: list[str] = []
     for index, row in enumerate(batch.to_dict(orient="records")):
-        if domain_mask[index]:
-            row["source_bucket"] = "unknown"
         if dialect_mask[index]:
             row["dialect"] = "default"
         texts.append(
@@ -277,10 +254,7 @@ def training_source_texts(
                 use_tags=args.use_tags,
             )
         )
-    return texts, {
-        "domain": int(domain_mask.sum()),
-        "dialect": int(dialect_mask.sum()),
-    }
+    return texts, {"dialect": int(dialect_mask.sum())}
 
 
 @torch.no_grad()
@@ -696,13 +670,10 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=defaults["weight_decay"])
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument(
-        "--alpha", type=float, default=defaults["alpha"], help="Language sampling exponent p(lang) ∝ n^alpha."
-    )
-    parser.add_argument("--easy-source-weight", type=float, default=None)
-    parser.add_argument(
-        "--domain-tag-dropout",
+        "--language-sampling-alpha",
         type=float,
-        default=defaults["domain_tag_dropout"],
+        default=defaults["language_sampling_alpha"],
+        help="Language sampling exponent p(lang) proportional to row_count^alpha.",
     )
     parser.add_argument(
         "--dialect-tag-dropout",
@@ -774,17 +745,16 @@ def main() -> None:
             f"--direction {args.direction!r} targets {direction_target}, but --target-lang is {args.target_lang!r}."
         )
 
-    if args.easy_source_weight is None:
-        args.easy_source_weight = float(defaults[f"{args.direction}_easy_source_weight"])
     if args.eval_interval <= 0:
         raise SystemExit("--eval-interval must be positive because best-model selection requires validation.")
     if args.eval_samples <= 0:
         raise SystemExit("--eval-samples must be positive; use a bounded, fixed validation sample per language.")
     if args.early_stopping_patience < 0:
         raise SystemExit("--early-stopping-patience cannot be negative.")
-    for name in ("domain_tag_dropout", "dialect_tag_dropout"):
-        if not 0.0 <= getattr(args, name) <= 1.0:
-            raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 1.")
+    if not 0.0 <= args.language_sampling_alpha <= 1.0:
+        raise SystemExit("--language-sampling-alpha must be between 0 and 1.")
+    if not 0.0 <= args.dialect_tag_dropout <= 1.0:
+        raise SystemExit("--dialect-tag-dropout must be between 0 and 1.")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -881,10 +851,12 @@ def main() -> None:
     scaler = GradScaler("cuda", enabled=(args.precision == "fp16" and device.type == "cuda"))
 
     lang_counts = {lang: len(info["df"]) for lang, info in train_by_lang.items()}
-    lang_probs = language_sampling_probs(lang_counts, args.alpha)
+    lang_probs = language_sampling_probs(
+        lang_counts,
+        args.language_sampling_alpha,
+    )
     langs = list(lang_probs)
     probs = np.array([lang_probs[lang] for lang in langs], dtype=np.float64)
-    row_probs = {lang: row_probabilities(info["df"], args.easy_source_weight) for lang, info in train_by_lang.items()}
 
     train_log = (args.output_dir / "train_log.jsonl").open("a", encoding="utf-8")
     eval_log = (args.output_dir / "eval_log.jsonl").open("a", encoding="utf-8")
@@ -903,7 +875,7 @@ def main() -> None:
         print(f"[resume] checkpoint={resume_path} next_step={start_step}")
     running_loss = []
     interval_tokens = 0
-    interval_metadata_dropout = {"domain": 0, "dialect": 0}
+    interval_metadata_dropout = {"dialect": 0}
     interval_started = time.monotonic()
     actual_step = start_step - 1
     stopped_early = False
@@ -925,7 +897,11 @@ def main() -> None:
             last_lang = lang
             info = train_by_lang[lang]
             df = info["df"]
-            sampled = np.random.choice(len(df), size=args.batch_size, replace=True, p=row_probs[lang])
+            sampled = np.random.choice(
+                len(df),
+                size=args.batch_size,
+                replace=True,
+            )
             batch = df.iloc[sampled]
             source_texts, dropout_counts = training_source_texts(
                 batch,
@@ -1001,7 +977,7 @@ def main() -> None:
             print(json.dumps({"event": "train", **record}), flush=True)
             running_loss.clear()
             interval_tokens = 0
-            interval_metadata_dropout = {"domain": 0, "dialect": 0}
+            interval_metadata_dropout = {"dialect": 0}
             interval_started = time.monotonic()
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats()

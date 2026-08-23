@@ -12,16 +12,25 @@ a completed corpus pipeline v3 bundle.
 | `f2zh` | Formosan | Traditional Chinese |
 | `zh2f` | Traditional Chinese | Formosan |
 
-NLLB inputs use target, source-language, domain, and dialect controls:
+NLLB inputs use target, source-language, and dialect controls:
 
 ```text
-<to_eng> <src_ami> <dom_ntu> <dialect_coastal> Pa'araw cingra.
+<to_eng> <src_ami> <dialect_coastal> Pa'araw cingra.
 ```
+
+Training selects languages with probability proportional to
+`training_rows^0.5`, then samples rows uniformly within the selected language.
+Repository names and source paths do not affect training probability or model
+inputs.
 
 ## Required Corpus Contract
 
 Use only `big_corpus_<en|zh>_in_domain_hard.csv` from a completed v3 provenance
 bundle. Before model setup, `scripts/validate_experiment.py` verifies:
+
+`in_domain_hard` is a retained artifact name. It does not indicate inferred
+domain labels; the corpus and model contracts contain no domain classifier or
+domain tags.
 
 - the corpus, profile, standardization namespace, and artifact hashes;
 - 5/10 validation/test proportions from all deduplicated pairs in
@@ -51,6 +60,7 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 | Microbatch / accumulation | 8 / 8 |
 | Maximum length | 384 |
 | Learning rate | `2e-5` |
+| Language sampling exponent | `0.5` |
 | Precision | bf16 |
 | Selection metric | chrF2 |
 
@@ -89,10 +99,11 @@ checkpoint metric, early-stopping window, and final generation controls.
 Profile loading fails if a declared matched field drifts.
 
 Architecture-specific settings remain native. NLLB uses its Formosan SPM8k
-tokenizer, metadata tokens, Adafactor, label smoothing, and encoder-decoder
-loss. MiLMMT uses its unchanged Gemma tokenizer, Xiaomi language-name prompt,
-AdamW with inverse-square-root decay, response-only causal loss, and gradient
-checkpointing. Its 512-token limit is shared by prompt, source, and response;
+tokenizer, language/dialect control tokens, Adafactor, label smoothing, and
+encoder-decoder loss. MiLMMT uses its unchanged Gemma tokenizer, Xiaomi
+language-name prompt plus a dialect line, AdamW with inverse-square-root decay,
+response-only causal loss, and gradient checkpointing. Its 512-token limit is
+shared by prompt, source, and response;
 NLLB applies its 384-token limit independently to source and target.
 
 This is a matched-data-exposure comparison, not a parameter- or FLOP-matched

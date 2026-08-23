@@ -70,18 +70,6 @@ TARGET_CONFIGS = {
     "chinese": {"short": "zh", "tag": "zh", "col": "chinese_sentence", "lid": "zho_Hant"},
 }
 
-DOMAIN_BUCKETS = (
-    "dictionary",
-    "classroom",
-    "narrative",
-    "linguistic",
-    "education",
-    "media",
-    "culture",
-    "religious",
-    "unknown",
-)
-EASY_BUCKETS = ("dictionary", "classroom")
 MT_STANDARD_NAMESPACE = "formosan-mt"
 MT_STANDARD_REQUIRED_COLUMNS = (
     "kindOf",
@@ -195,48 +183,6 @@ def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -
     return text[:max_len].strip("_") or default
 
 
-def source_bucket(source: object) -> str:
-    """Map provenance paths to a fixed, repository-independent domain."""
-    lowered = "" if pd.isna(source) else str(source).casefold()
-    if re.search(
-        r"dict(?:ionary|ionaries)?|lexic(?:on|ons|al)?|glossar|glosbe|"
-        r"word.?list|vocab",
-        lowered,
-    ):
-        return "dictionary"
-    if re.search(r"contextual|classroom|qing_jing|conversation|dialogue", lowered):
-        return "classroom"
-    if re.search(r"bible|hymn|church|religio", lowered):
-        return "religious"
-    if re.search(r"youtube|video|audio|wilang.yutas", lowered):
-        return "media"
-    if re.search(r"cultur|custom|apolog|president|ceremon|ritual", lowered):
-        return "culture"
-    if re.search(
-        r"story|stories|(?:^|[/_.-])texts?(?:[/_.-]|$)|picture.?book|"
-        r"myth|blog|narrat|tale|"
-        r"legend|folklore|literary|ode.to|raodong|wakelin|montgomery",
-        lowered,
-    ):
-        return "narrative"
-    if re.search(
-        r"learning|epark|gitbook|essay|reading|writing|nine.level|教材|"
-        r"material|textbook|course|tousvusvutu",
-        lowered,
-    ):
-        return "education"
-    if re.search(
-        r"grammar|grammatical|syntax|linguist|seals|zheng|acl|elicitat|"
-        r"construction|sentence|word.order|negation|relative|causative|voice|"
-        r"phonolog|corpus|dissertation|thesis|descriptive.study|dialect|"
-        r"relationship|classification|topic.focus|complement|comparative|"
-        r"demonstrative|affix|time.reference|social.structure|conjunction",
-        lowered,
-    ):
-        return "linguistic"
-    return "unknown"
-
-
 def source_corpus(source: object) -> str:
     """Return the exact public corpus root or private repository name."""
     value = "" if pd.isna(source) else str(source)
@@ -250,7 +196,7 @@ def source_corpus(source: object) -> str:
         return parts[0]
     if parts and parts[0].casefold().startswith("formosan-"):
         return parts[0]
-    return source_bucket(value)
+    return parts[0] if parts else "unknown"
 
 
 def add_normalized_columns(
@@ -264,7 +210,6 @@ def add_normalized_columns(
         out["row_type"] = "unknown"
     out["row_type"] = out["row_type"].fillna("unknown").astype(str).str.strip().str.lower()
     out["_source_key"] = out["source"].fillna("").astype(str) if "source" in out else ""
-    out["_source_bucket"] = out["_source_key"].map(source_bucket)
     out["_source_corpus"] = out["_source_key"].map(source_corpus)
     out["_formosan_key"] = out["formosan_sentence"].map(normalize_text)
     out["_target_key"] = out[target_col].map(normalize_text)
@@ -294,9 +239,9 @@ def evaluation_candidate_mask(
 ) -> pd.Series:
     """Return sentence-quality rows that may be used in dev or test.
 
-    Provenance domains do not determine row quality. Structurally typed
-    sentences are eligible regardless of source when they pass QC and the
-    configured length requirements.
+    Provenance paths do not determine row quality. Structurally typed sentences
+    are eligible regardless of source when they pass QC and the configured
+    length requirements.
     """
     required = {
         "row_type",
@@ -513,16 +458,6 @@ def split_counts_by_language(df: pd.DataFrame) -> dict:
     }
 
 
-def bucket_counts(df: pd.DataFrame) -> dict:
-    if "source_bucket" in df.columns:
-        s = df["source_bucket"]
-    elif "_source_bucket" in df.columns:
-        s = df["_source_bucket"]
-    else:
-        return {}
-    return {str(k): int(v) for k, v in s.value_counts(dropna=False).items()}
-
-
 def overlap_stats(train: pd.DataFrame, eval_df: pd.DataFrame) -> dict:
     stats = {}
     for name, col in (
@@ -557,8 +492,6 @@ def base_special_tokens() -> list[str]:
         tokens.extend([f"<to_{config['tag']}>", f"<src_{config['tag']}>"])
     for code in FORMOSAN_CODES:
         tokens.extend([f"<to_{code}>", f"<src_{code}>"])
-    for bucket in DOMAIN_BUCKETS:
-        tokens.append(f"<dom_{safe_tag_value(bucket)}>")
     tokens.append("<dialect_default>")
     return sorted(set(tokens))
 
@@ -579,19 +512,14 @@ def special_tokens_from_corpus(
 
 def build_prefix(row: Mapping, direction: str, target_lang: str | None = None) -> str:
     code = str(row.get("lang_code", "")).strip().lower()
-    bucket = row.get("source_bucket", row.get("_source_bucket", source_bucket(row.get("source", ""))))
-    bucket = safe_tag_value(bucket, "unknown")
-    if bucket not in DOMAIN_BUCKETS:
-        bucket = "unknown"
     dialect = row.get("dialect", "default")
-    domain_tag = f"<dom_{bucket}>"
     dialect_tag = f"<dialect_{safe_tag_value(dialect)}>"
     if is_formosan_to_target(direction):
         target_tag = target_tag_for(target_language_from_direction(direction, target_lang))
-        return f"<to_{target_tag}> <src_{code}> {domain_tag} {dialect_tag}"
+        return f"<to_{target_tag}> <src_{code}> {dialect_tag}"
     if is_target_to_formosan(direction):
         source_tag = target_tag_for(target_language_from_direction(direction, target_lang))
-        return f"<to_{code}> <src_{source_tag}> {domain_tag} {dialect_tag}"
+        return f"<to_{code}> <src_{source_tag}> {dialect_tag}"
     raise ValueError(f"Unsupported direction: {direction}")
 
 
@@ -606,8 +534,6 @@ def with_tagged_columns(
     out = df.copy()
     if not use_tags and prefix_builder is None:
         return out
-    if "source_bucket" not in out.columns:
-        out["source_bucket"] = out["source"].map(source_bucket)
     if prefix_builder is None:
         prefixes = out.apply(
             lambda row: build_prefix(

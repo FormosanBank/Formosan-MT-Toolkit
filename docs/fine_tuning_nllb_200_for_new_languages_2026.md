@@ -25,7 +25,7 @@ This tutorial shows how to:
 - Check for exact train/eval leakage.
 - Extend NLLB's SentencePiece tokenizer with corpus-specific pieces.
 - Add a new NLLB-style language code such as `tay_Latn`.
-- Add optional control tags for direction, source language, domain, and dialect.
+- Add optional control tags for direction, source language, and dialect.
 - Fine-tune `facebook/nllb-200-distilled-600M` directionally.
 - Evaluate with BLEU and chrF2.
 - Generate correctly with current `transformers`.
@@ -277,27 +277,24 @@ Do not rely on old `lang_code_to_id` internals. Use `convert_tokens_to_ids`.
 
 ## 5. Optional control tags
 
-Control tags make the training task explicit. They are especially useful for multilingual or multi-domain corpora.
+Control tags make the training task explicit. They are especially useful for multilingual corpora.
 
 Example source prefix:
 
 ```text
-<to_eng> <src_tay> <dom_unknown> <dialect_default>
+<to_eng> <src_tay> <dialect_default>
 ```
 
 The tags mean:
 
 - `<to_eng>`: target side is English.
 - `<src_tay>`: source language is Atayal.
-- `<dom_unknown>`: broad source/domain label is unknown.
 - `<dialect_default>`: dialect label is unknown or default.
 
-Direction and language are the primary controls. Keep domain values coarse and
-fixed; never turn repository names into model tokens. The toolkit uses
-`dictionary`, `classroom`, `narrative`, `linguistic`, `education`, `media`,
-`culture`, `religious`, and `unknown`. During training, replace domain and
-dialect independently with `unknown` and `default` some of the time so default
-inference is a learned condition rather than an unseen prompt.
+Direction and language are the primary controls. Dialect is included when it
+is known. During training, replace the dialect with `default` some of the time
+so inference without dialect metadata is a learned condition. Repository,
+directory, and filename values must never become model tags or sampling labels.
 
 ```python
 def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -> str:
@@ -308,24 +305,11 @@ def safe_tag_value(value: object, default: str = "default", max_len: int = 48) -
         text = default
     return text[:max_len].strip("_") or default
 
-def source_bucket(source: object) -> str:
-    source = "" if pd.isna(source) else str(source).lower()
-    if "dictionary" in source or "dict" in source:
-        return "dictionary"
-    if "story" in source or "picture_book" in source:
-        return "narrative"
-    if "reading" in source or "writing" in source:
-        return "education"
-    if "culture" in source:
-        return "culture"
-    return "unknown"
-
 def build_prefix(row, direction: str) -> str:
     src_short = SOURCE_LANG if direction == "src2tgt" else TARGET_LANG
     tgt_short = TARGET_LANG if direction == "src2tgt" else SOURCE_LANG
-    domain_tag = f"<dom_{safe_tag_value(source_bucket(row.get('source', '')))}>"
     dialect_tag = f"<dialect_{safe_tag_value(row.get('dialect', 'default'))}>"
-    return f"<to_{tgt_short}> <src_{src_short}> {domain_tag} {dialect_tag}"
+    return f"<to_{tgt_short}> <src_{src_short}> {dialect_tag}"
 ```
 
 ## 6. Train a SentencePiece extension
@@ -792,7 +776,7 @@ The FormosanBank experiments used this same general pattern across multiple Form
 - Better data mattered more than any single modeling trick.
 - Directional models were easier to control than one mixed bidirectional checkpoint.
 - A SentencePiece extension reduced tokenizer fragmentation.
-- Metadata tags helped keep multilingual and multi-domain data explicit.
+- Language and dialect tags kept multilingual tasks explicit.
 - Leakage-controlled splits made scores lower but more honest.
 - English or Chinese -> Formosan remained harder than Formosan -> English or Chinese.
 

@@ -22,9 +22,6 @@ TRANSFORMATION_RE = re.compile(
 
 RULE_LABELS = {
     "complete_missing_dialect": "complete missing dialect",
-    "infer_hundred_paiwan_gloss_language_eng": (
-        "tag Hundred Paiwan gloss as English"
-    ),
     "mark_alternate_translation": (
         "mark repeated translation as alternate"
     ),

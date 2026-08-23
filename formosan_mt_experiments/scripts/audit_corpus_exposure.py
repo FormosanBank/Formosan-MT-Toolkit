@@ -13,7 +13,6 @@ from columnar_cache import read_csv_or_columnar
 from experiment_config import sha256_file
 from mt_common import (
     normalize_target_language,
-    source_bucket,
     source_corpus,
     target_col_for,
     write_json,
@@ -158,10 +157,6 @@ def audit_direction(
     config: ScoreConfig,
 ) -> dict[str, object]:
     frame = frame.copy()
-    frame["source_bucket"] = frame.get(
-        "source",
-        pd.Series("unknown", index=frame.index),
-    ).map(source_bucket)
     if "source_corpus" not in frame:
         frame["source_corpus"] = frame.get(
             "source",
@@ -263,9 +258,6 @@ def audit_direction(
             "exposure": exposure_summary(segments, config),
             "by_language": per_group_summary(
                 split_frame, segments, config, "lang_code"
-            ),
-            "by_source_bucket": per_group_summary(
-                split_frame, segments, config, "source_bucket"
             ),
             "by_source_corpus": per_group_summary(
                 split_frame, segments, config, "source_corpus"

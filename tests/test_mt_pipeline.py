@@ -49,7 +49,7 @@ from formosan_mt_inference import normalize_formosan  # noqa: E402
 from mt_common import (  # noqa: E402
     add_normalized_columns,
     evaluation_candidate_mask,
-    source_bucket,
+    language_sampling_probs,
     source_corpus,
     special_tokens_from_corpus,
     weighted_apportioned_counts,
@@ -234,24 +234,23 @@ class NllbRuntimeTests(unittest.TestCase):
     def test_nllb_controls_cover_all_directions(self) -> None:
         row = {
             "lang_code": "ami",
-            "source_bucket": "narrative",
             "dialect": "Coastal",
         }
         expected = {
             ("f2en", "english"): (
-                "<to_eng> <src_ami> <dom_narrative> <dialect_coastal>",
+                "<to_eng> <src_ami> <dialect_coastal>",
                 ("ami_Latn", "eng_Latn"),
             ),
             ("en2f", "english"): (
-                "<to_ami> <src_eng> <dom_narrative> <dialect_coastal>",
+                "<to_ami> <src_eng> <dialect_coastal>",
                 ("eng_Latn", "ami_Latn"),
             ),
             ("f2zh", "chinese"): (
-                "<to_zh> <src_ami> <dom_narrative> <dialect_coastal>",
+                "<to_zh> <src_ami> <dialect_coastal>",
                 ("ami_Latn", "zho_Hant"),
             ),
             ("zh2f", "chinese"): (
-                "<to_ami> <src_zh> <dom_narrative> <dialect_coastal>",
+                "<to_ami> <src_zh> <dialect_coastal>",
                 ("zho_Hant", "ami_Latn"),
             ),
         }
@@ -299,15 +298,12 @@ class NllbRuntimeTests(unittest.TestCase):
         tokenizer = FakeTokenizer()
         tokenizer.vocab.update(
             {
-                "<dom_unknown>": len(tokenizer.vocab),
-                "<dom_narrative>": len(tokenizer.vocab) + 1,
-                "<dialect_default>": len(tokenizer.vocab) + 2,
-                "<dialect_coastal>": len(tokenizer.vocab) + 3,
+                "<dialect_default>": len(tokenizer.vocab),
+                "<dialect_coastal>": len(tokenizer.vocab) + 1,
             }
         )
         frame = pd.DataFrame(
             {
-                "source_bucket": ["narrative", "held_out_source", None],
                 "dialect": ["Coastal", "Held Out", ""],
             }
         )
@@ -316,26 +312,18 @@ class NllbRuntimeTests(unittest.TestCase):
             tokenizer,
         )
         self.assertEqual(
-            normalized["source_bucket"].tolist(),
-            ["narrative", "unknown", "unknown"],
-        )
-        self.assertEqual(
             normalized["dialect"].tolist(),
             ["Coastal", "default", "default"],
         )
         self.assertEqual(
             report,
-            {
-                "domain_fallback_rows": 1,
-                "dialect_fallback_rows": 1,
-            },
+            {"dialect_fallback_rows": 1},
         )
 
     def test_training_metadata_dropout_builds_default_control_paths(self) -> None:
         batch = pd.DataFrame(
             {
                 "lang_code": ["ami", "ami"],
-                "source_bucket": ["narrative", "culture"],
                 "dialect": ["Coastal", "Coastal"],
                 "formosan_sentence": ["mako ko loma niyam.", "mako ko loma nira."],
                 "english_sentence": ["This is our house.", "This is their house."],
@@ -343,7 +331,6 @@ class NllbRuntimeTests(unittest.TestCase):
         )
         args = SimpleNamespace(
             use_tags=True,
-            domain_tag_dropout=0.5,
             dialect_tag_dropout=0.5,
             direction="f2en",
             target_col="english_sentence",
@@ -351,7 +338,7 @@ class NllbRuntimeTests(unittest.TestCase):
         )
         with mock.patch(
             "train_directional.np.random.random",
-            side_effect=[np.array([0.1, 0.9]), np.array([0.9, 0.1])],
+            return_value=np.array([0.9, 0.1]),
         ):
             texts, counts = training_source_texts(
                 batch,
@@ -360,11 +347,11 @@ class NllbRuntimeTests(unittest.TestCase):
         self.assertEqual(
             texts,
             [
-                "<to_eng> <src_ami> <dom_unknown> <dialect_coastal> mako ko loma niyam.",
-                "<to_eng> <src_ami> <dom_culture> <dialect_default> mako ko loma nira.",
+                "<to_eng> <src_ami> <dialect_coastal> mako ko loma niyam.",
+                "<to_eng> <src_ami> <dialect_default> mako ko loma nira.",
             ],
         )
-        self.assertEqual(counts, {"domain": 1, "dialect": 1})
+        self.assertEqual(counts, {"dialect": 1})
 
 
 class MilmmtRuntimeTests(unittest.TestCase):
@@ -392,7 +379,6 @@ class MilmmtRuntimeTests(unittest.TestCase):
     def test_official_prompt_covers_all_directions(self) -> None:
         row = {
             "lang_code": "ami",
-            "source_bucket": "narrative",
             "dialect": "Coastal",
         }
         expected = {
@@ -423,6 +409,17 @@ class MilmmtRuntimeTests(unittest.TestCase):
             milmmt.task_spec("trv", "f2en", target_lang="english").source_name,
             "Seediq",
         )
+
+    def test_metadata_prompt_contains_dialect_but_no_domain(self) -> None:
+        prompt = milmmt.format_source(
+            {"lang_code": "ami", "dialect": "Coastal"},
+            "sample",
+            "f2en",
+            target_lang="english",
+            use_tags=True,
+        )
+        self.assertIn("Dialect: coastal", prompt)
+        self.assertNotIn("domain", prompt.casefold())
 
     def test_causal_labels_mask_the_prompt(self) -> None:
         class Tokenizer:
@@ -530,22 +527,19 @@ class TokenizerAuditTests(unittest.TestCase):
 
 
 class LeakageTests(unittest.TestCase):
-    def test_source_bucket_uses_only_coarse_domains(self) -> None:
-        self.assertEqual(
-            source_bucket("FormosanBank/Corpora/NTUFormosanCorpus/XML/Stories/Amis/a.xml"),
-            "narrative",
+    def test_control_tokens_include_languages_and_dialects_only(self) -> None:
+        tokens = special_tokens_from_corpus(
+            pd.DataFrame({"dialect": ["Coastal", "Coastal", "Coastal"]})
         )
-        self.assertEqual(
-            source_bucket("Formosan-Zheng-ACL-2024/Final_XML/Atayal/parallel.xml"),
-            "linguistic",
-        )
-        self.assertEqual(
-            source_bucket("Formosan-Glosbe/Final_XML/Amis/entries.xml"),
-            "dictionary",
-        )
-        tokens = special_tokens_from_corpus(pd.DataFrame({"source_bucket": ["Formosan-Zheng-ACL-2024"]}))
-        self.assertNotIn("<dom_formosan_zheng_acl_2024>", tokens)
-        self.assertIn("<dom_unknown>", tokens)
+        self.assertIn("<src_ami>", tokens)
+        self.assertIn("<to_eng>", tokens)
+        self.assertIn("<dialect_coastal>", tokens)
+        self.assertFalse(any(token.startswith("<dom_") for token in tokens))
+
+    def test_language_temperature_sampling_uses_only_language_counts(self) -> None:
+        probabilities = language_sampling_probs({"ami": 100, "ssf": 25}, 0.5)
+        self.assertAlmostEqual(probabilities["ami"], 2 / 3)
+        self.assertAlmostEqual(probabilities["ssf"], 1 / 3)
 
     def test_source_corpus_preserves_exact_public_and_private_identity(self) -> None:
         self.assertEqual(
@@ -754,14 +748,14 @@ class LeakageTests(unittest.TestCase):
     def test_weighted_apportionment_redistributes_capacity_shortfall(self) -> None:
         self.assertEqual(
             weighted_apportioned_counts(
-                {"lexical": 900, "narrative": 100},
-                {"lexical": 20, "narrative": 100},
+                {"source_a": 900, "source_b": 100},
+                {"source_a": 20, "source_b": 100},
                 100,
             ),
-            {"lexical": 20, "narrative": 80},
+            {"source_a": 20, "source_b": 80},
         )
 
-    def test_source_domain_does_not_override_row_eligibility(self) -> None:
+    def test_source_path_does_not_override_row_eligibility(self) -> None:
         row = self.hard_split_fixture().iloc[[0]].copy()
         row["source"] = "Formosan-ILRDF-42-Language-Practice-Word-Lists/Final_XML/Atayal/word-list.xml"
         row["formosan_sentence"] = "one two three four"
@@ -1705,7 +1699,7 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["training_defaults"]["optimizer"], "adamw")
         self.assertEqual(profile["training_defaults"]["lr_scheduler"], "inverse_sqrt")
         self.assertEqual(profile["training_defaults"]["best_metric"], "chrF2")
-        self.assertFalse(profile["training_defaults"]["use_tags"])
+        self.assertTrue(profile["training_defaults"]["use_tags"])
         self.assertEqual(profile["generation_defaults"]["beam"], 4)
         comparison = profile["comparison"]
         self.assertEqual(
@@ -2089,6 +2083,8 @@ class ExperimentManifestTests(unittest.TestCase):
             "text = normalize_formosan(text, lang_code)",
             formosan_source,
         )
+        self.assertNotIn("source_bucket", formosan_source)
+        self.assertNotIn("<dom_", formosan_source)
         self.assertNotIn("normalize_formosan", major_source)
 
     def test_publication_card_records_release_and_hard_test_contract(self) -> None:

@@ -849,8 +849,6 @@ def fetch_languages(
         cmd.append("--clean-output")
     if args.public:
         cmd.append("--public")
-    if args.no_public_language_path_prefilter:
-        cmd.append("--no-public-language-path-prefilter")
     if args.force_branch:
         cmd.extend(["--branch", args.force_branch])
     if args.exclude_bible:
@@ -1421,7 +1419,6 @@ def write_manifest(
             "fetch_retry_base_sleep": args.fetch_retry_base_sleep,
             "fetch_retry_max_sleep": args.fetch_retry_max_sleep,
             "allow_download_failures": args.allow_download_failures,
-            "public_language_path_prefilter": not args.no_public_language_path_prefilter,
             "exclude_bible": args.exclude_bible,
             "exclude_bible_exact_repos": list(EXACT_BIBLE_REPOS) if args.exclude_bible else [],
             "exclude_repo_patterns": args.exclude_repo_pattern,
@@ -1491,11 +1488,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--public", action="store_true", help="Fetch from public FormosanBank/Corpora XML only")
-    parser.add_argument(
-        "--no-public-language-path-prefilter",
-        action="store_true",
-        help=("Disable the conservative public-mode path-language prefilter before raw XML downloads."),
-    )
     parser.add_argument("--force-branch", default=None, help="Force GitHub branch for fetch_xml.py")
     parser.add_argument(
         "--exclude-bible",

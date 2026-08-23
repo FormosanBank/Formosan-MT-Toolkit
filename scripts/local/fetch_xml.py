@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import random
-import re
 import shutil
 import tempfile
 import time
@@ -58,25 +57,6 @@ LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     "en": {"en", "eng"},
     "eng": {"en", "eng"},
 }
-LANGUAGE_PATH_HINTS: dict[str, set[str]] = {
-    "ami": {"ami", "amis"},
-    "bnn": {"bnn", "bunun"},
-    "ckv": {"ckv", "kavalan"},
-    "dru": {"dru", "rukai"},
-    "pwn": {"pwn", "paiwan"},
-    "pyu": {"pyu", "puyuma"},
-    "ssf": {"ssf", "thao"},
-    "sxr": {"sxr", "saaroa"},
-    "szy": {"szy", "sakizaya"},
-    "tao": {"tao", "yami"},
-    "tay": {"tay", "atayal"},
-    "trv": {"trv", "seediq", "sedik"},
-    "tsu": {"tsu", "tsou"},
-    "xnb": {"xnb", "kanakanavu"},
-    "xsy": {"xsy", "saisiyat"},
-}
-PATH_HINT_TO_LANGUAGE_CODES = {hint: code for code, hints in LANGUAGE_PATH_HINTS.items() for hint in hints}
-
 SESSION = requests.Session()
 if GITHUB_TOKEN:
     SESSION.headers.update({"Authorization": f"Bearer {GITHUB_TOKEN}"})
@@ -129,20 +109,6 @@ class RepositoryRef:
 
 def get_equivalent_lang_codes(lang_code: str) -> set[str]:
     return LANGUAGE_EQUIVALENTS.get(lang_code, {lang_code})
-
-
-def path_language_hint_codes(path: str) -> set[str]:
-    tokens: set[str] = set()
-    for component in path.split("/"):
-        lowered = component.lower().removesuffix(".xml")
-        tokens.add(lowered)
-        tokens.update(part for part in re.split(r"[^a-z0-9]+", lowered) if part)
-    return {PATH_HINT_TO_LANGUAGE_CODES[token] for token in tokens if token in PATH_HINT_TO_LANGUAGE_CODES}
-
-
-def public_path_may_match_src_lang(path: str, src_lang: str) -> bool:
-    hints = path_language_hint_codes(path)
-    return not hints or src_lang.strip().lower() in hints
 
 
 def parse_exclude_patterns(values: Iterable[str] | None) -> list[str]:
@@ -857,7 +823,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Refresh org/default-branch metadata when creating a repository snapshot.",
     )
-    parser.add_argument("--no-public-language-path-prefilter", action="store_true")
     parser.add_argument("--exclude-bible", action="store_true")
     parser.add_argument("--exclude-repo", action="append", default=[])
     parser.add_argument("--exclude-repo-pattern", action="append", default=[])
@@ -1031,13 +996,6 @@ def main() -> None:
                 interested: list[str] = []
                 for lang in src_langs:
                     reason = common_reason
-                    if (
-                        not reason
-                        and args.public
-                        and not args.no_public_language_path_prefilter
-                        and not public_path_may_match_src_lang(path, lang)
-                    ):
-                        reason = "path_language_prefilter"
                     if reason:
                         results[lang].append(
                             DownloadResult(

@@ -20,10 +20,23 @@ from corpus_quality import (
 )
 from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
 
-PAIRWISE_RE = re.compile(r"^(?P<lang>[a-z]{3})_(?P<target>en|zh)_processed$")
 PIVOT_QUARANTINE_RE = re.compile(
     r"^pivot_rejections_(?:en2zh|zh2en)\.csv$"
 )
+TARGET_SPECS = {
+    "en": {
+        "xml_langs": {"en", "eng"},
+        "columns": ("english", "english_sentence"),
+        "output_column": "english_sentence",
+        "quality_language": "english",
+    },
+    "zh": {
+        "xml_langs": {"zh", "zho", "chi", "cmn"},
+        "columns": ("chinese", "chinese_sentence"),
+        "output_column": "chinese_sentence",
+        "quality_language": "chinese",
+    },
+}
 OUTPUT_NAMES = {
     "big_corpus_en.csv",
     "big_corpus_zh.csv",
@@ -225,16 +238,16 @@ def require_clean_pairs(
         )
 
 
-def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]:
-    language = match.group("lang")
-    target = match.group("target")
-    frame = read_csv(path)
-    raw_target = "english" if target == "en" else "chinese"
-    target_column = "english_sentence" if target == "en" else "chinese_sentence"
+def corpus_frame(path: Path) -> tuple[str, pd.DataFrame, str]:
+    """Read one corpus using row metadata, never its filename, as authority."""
+    frame = read_csv(path).drop(
+        columns=["source_bucket", "_source_bucket"],
+        errors="ignore",
+    )
     required = {
         "lang_code",
         "formosan_sentence",
-        raw_target,
+        "target_lang",
         "row_id",
         "source_record_id",
         "kindOf",
@@ -250,63 +263,52 @@ def pairwise_frame(path: Path, match: re.Match[str]) -> tuple[str, pd.DataFrame]
     missing = sorted(required - set(frame.columns))
     if missing:
         raise SystemExit(f"{path} is missing required cleaned columns: {missing}")
+
+    target_values = frame["target_lang"].astype(str).str.strip().str.lower()
+    if target_values.eq("").any():
+        raise SystemExit(f"{path} contains rows without TRANSL/@xml:lang metadata")
+    declared_targets = set(target_values)
+    target_matches = {
+        target
+        for target, spec in TARGET_SPECS.items()
+        if declared_targets and declared_targets <= spec["xml_langs"]
+    }
+    if len(target_matches) != 1:
+        raise SystemExit(
+            f"{path} has unsupported or mixed target_lang values: "
+            f"{sorted(declared_targets)}"
+        )
+    target = target_matches.pop()
+    spec = TARGET_SPECS[target]
+    text_columns = [column for column in spec["columns"] if column in frame]
+    if len(text_columns) != 1:
+        raise SystemExit(
+            f"{path} must have exactly one text column for declared target "
+            f"{target}: found {text_columns}"
+        )
+    raw_target = text_columns[0]
+    target_column = str(spec["output_column"])
     if not frame["kindOf"].astype(str).str.lower().eq("standard").all():
         raise SystemExit(f"{path} contains non-standard Formosan rows")
     if not frame["standard_namespace"].astype(str).eq("formosan-mt").all():
         raise SystemExit(f"{path} contains rows outside the Formosan MT standard namespace")
-    if not frame["formosan_sentence"].astype(str).eq(frame["formosan_mt_standard"].astype(str)).all():
-        raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
-    languages = set(frame["lang_code"].astype(str).str.lower())
-    if languages != {language}:
-        raise SystemExit(
-            f"{path} language mismatch: filename={language}, rows={sorted(languages)}"
-        )
-    frame = frame.rename(columns={raw_target: target_column})
-    require_clean_pairs(
-        frame,
-        target_column=target_column,
-        target_language="english" if target == "en" else "chinese",
-        path=path,
-    )
-    return target, ensure_metadata(frame)
-
-
-def aggregate_frame(path: Path) -> tuple[str, pd.DataFrame]:
-    frame = read_csv(path)
-    required = {
-        "lang_code",
-        "formosan_sentence",
-        "formosan_mt_standard",
-        "standard_namespace",
-        "mt_normalization_status",
-        "mt_standard_profile",
-        "mt_standard_profile_sha256",
-    }
-    missing = sorted(required - set(frame.columns))
-    if missing:
-        raise SystemExit(f"{path} is not a supported aggregate corpus: missing {missing}")
-    has_english = "english_sentence" in frame.columns
-    has_chinese = "chinese_sentence" in frame.columns
-    if has_english == has_chinese:
-        raise SystemExit(
-            f"{path} must contain exactly one target column, not English={has_english}, Chinese={has_chinese}"
-        )
-    if not frame["standard_namespace"].astype(str).eq("formosan-mt").all():
-        raise SystemExit(f"{path} contains rows outside the Formosan MT standard namespace")
     if not frame["mt_normalization_status"].astype(str).eq("accepted").all():
         raise SystemExit(f"{path} contains non-accepted MT-standard rows")
-    if not frame["formosan_sentence"].astype(str).eq(
-        frame["formosan_mt_standard"].astype(str)
-    ).all():
+    if not frame["formosan_sentence"].astype(str).eq(frame["formosan_mt_standard"].astype(str)).all():
         raise SystemExit(f"{path} has a broken formosan_sentence MT-standard alias")
-    target_column = "english_sentence" if has_english else "chinese_sentence"
+    source_languages = frame["lang_code"].astype(str).str.strip().str.lower()
+    if source_languages.eq("").any():
+        raise SystemExit(f"{path} contains rows without TEXT/@xml:lang metadata")
+    if raw_target != target_column:
+        frame = frame.rename(columns={raw_target: target_column})
     require_clean_pairs(
         frame,
         target_column=target_column,
-        target_language="english" if has_english else "chinese",
+        target_language=str(spec["quality_language"]),
         path=path,
     )
-    return ("en" if has_english else "zh"), ensure_metadata(frame)
+    input_type = "pairwise" if raw_target != target_column else "aggregate"
+    return target, ensure_metadata(frame), input_type
 
 
 def discover_inputs(directory: Path, output_names: set[str]) -> list[Path]:
@@ -358,15 +360,7 @@ def load_inputs(directory: Path, output_names: set[str]) -> tuple[list[pd.DataFr
     chinese: list[pd.DataFrame] = []
     inventory: list[dict] = []
     for path in discover_inputs(directory, output_names):
-        pair_match = PAIRWISE_RE.match(path.stem)
-        if pair_match:
-            target, frame = pairwise_frame(path, pair_match)
-            input_type = "pairwise"
-        elif path.stem in {"big_corpus_en_pivot", "big_corpus_zh_pivot"}:
-            target, frame = aggregate_frame(path)
-            input_type = "pivot"
-        else:
-            raise SystemExit(f"Unsupported CSV in aggregate input directory: {path.name}")
+        target, frame, input_type = corpus_frame(path)
         (english if target == "en" else chinese).append(frame)
         inventory.append(
             {

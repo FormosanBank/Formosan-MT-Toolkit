@@ -9,11 +9,7 @@ from typing import Mapping
 
 import pandas as pd
 import torch
-from mt_common import (
-    DOMAIN_BUCKETS,
-    is_formosan_to_target,
-    safe_tag_value,
-)
+from mt_common import is_formosan_to_target, safe_tag_value
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_FAMILY = "milmmt"
@@ -103,29 +99,16 @@ def normalize_control_metadata(
         raise ValueError(f"Unsupported metadata mode: {mode}")
     output = frame.copy()
     if mode == "default":
-        output["source_bucket"] = "unknown"
         output["dialect"] = "default"
-        return output, {
-            "domain_fallback_rows": len(output),
-            "dialect_fallback_rows": len(output),
-        }
+        return output, {"dialect_fallback_rows": len(output)}
 
-    buckets = output.get(
-        "source_bucket",
-        pd.Series("unknown", index=output.index),
-    ).map(lambda value: safe_tag_value(value, "unknown"))
-    invalid_buckets = ~buckets.isin(DOMAIN_BUCKETS)
-    output["source_bucket"] = buckets.mask(invalid_buckets, "unknown")
     dialects = output.get(
         "dialect",
         pd.Series("default", index=output.index),
     ).map(lambda value: safe_tag_value(value, "default"))
     invalid_dialects = dialects.eq("")
     output["dialect"] = dialects.mask(invalid_dialects, "default")
-    return output, {
-        "domain_fallback_rows": int(invalid_buckets.sum()),
-        "dialect_fallback_rows": int(invalid_dialects.sum()),
-    }
+    return output, {"dialect_fallback_rows": int(invalid_dialects.sum())}
 
 
 def ensure_source_prefix_tokens(*args, **kwargs) -> None:
@@ -163,11 +146,8 @@ def format_source(
     )
     lines = [f"Translate this from {task.source_name} to {task.target_name}:"]
     if use_tags:
-        domain = safe_tag_value(row.get("source_bucket"), "unknown")
-        if domain not in DOMAIN_BUCKETS:
-            domain = "unknown"
         dialect = safe_tag_value(row.get("dialect"), "default")
-        lines.append(f"Context: domain={domain}; dialect={dialect}")
+        lines.append(f"Dialect: {dialect}")
     lines.extend(
         [
             f"{task.source_name}: {source_text}",

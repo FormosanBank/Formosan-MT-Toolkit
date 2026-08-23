@@ -10,12 +10,10 @@ from typing import Mapping
 import pandas as pd
 import torch
 from mt_common import (
-    DOMAIN_BUCKETS,
     build_prefix,
     get_lid,
     is_formosan_to_target,
     safe_tag_value,
-    source_bucket,
     target_lid_for,
 )
 from transformers import AutoModelForSeq2SeqLM, NllbTokenizer
@@ -64,12 +62,8 @@ def normalize_control_metadata(
         raise ValueError(f"Unsupported metadata mode: {mode}")
     output = frame.copy()
     if mode == "default":
-        output["source_bucket"] = "unknown"
         output["dialect"] = "default"
-        return output, {
-            "domain_fallback_rows": len(output),
-            "dialect_fallback_rows": len(output),
-        }
+        return output, {"dialect_fallback_rows": len(output)}
 
     def values(column: str, default: str) -> pd.Series:
         if column not in output:
@@ -82,29 +76,14 @@ def normalize_control_metadata(
             )
         )
 
-    raw_buckets = values("source_bucket", "unknown")
-    canonical_buckets = raw_buckets.map(
-        lambda value: safe_tag_value(value, "unknown")
-    )
-    domain_invalid = ~canonical_buckets.isin(DOMAIN_BUCKETS)
-    buckets = canonical_buckets.mask(domain_invalid, "unknown")
     dialects = values("dialect", "default")
-    domain_available = {
-        value: token_exists(tokenizer, f"<dom_{safe_tag_value(value, 'unknown')}>")
-        for value in buckets.unique()
-    }
     dialect_available = {
         value: token_exists(tokenizer, f"<dialect_{safe_tag_value(value)}>")
         for value in dialects.unique()
     }
-    domain_missing = domain_invalid | ~buckets.map(domain_available)
     dialect_missing = ~dialects.map(dialect_available)
-    output["source_bucket"] = buckets.mask(domain_missing, "unknown")
     output["dialect"] = dialects.mask(dialect_missing, "default")
-    return output, {
-        "domain_fallback_rows": int(domain_missing.sum()),
-        "dialect_fallback_rows": int(dialect_missing.sum()),
-    }
+    return output, {"dialect_fallback_rows": int(dialect_missing.sum())}
 
 
 def load_tokenizer(path: Path):
@@ -178,11 +157,6 @@ def ensure_source_prefix_tokens(
 ) -> None:
     metadata = pd.DataFrame(index=frame.index)
     metadata["lang_code"] = frame["lang_code"].astype(str)
-    metadata["source_bucket"] = (
-        frame["source_bucket"].astype(str)
-        if "source_bucket" in frame
-        else frame["source"].map(source_bucket)
-    )
     metadata["dialect"] = (
         frame["dialect"].astype(str)
         if "dialect" in frame

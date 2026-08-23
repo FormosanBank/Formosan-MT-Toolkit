@@ -120,7 +120,7 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         if prompt.get("format") != "xiaomi_translation_v1":
             raise SystemExit("MiLMMT requires the Xiaomi translation prompt")
     training = profile.get("training_defaults", {})
-    for name in ("domain_tag_dropout", "dialect_tag_dropout"):
+    for name in ("language_sampling_alpha", "dialect_tag_dropout"):
         value = training.get(name)
         if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 1.0:
             raise SystemExit(f"Experiment profile has invalid {name}")
@@ -129,6 +129,10 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
     if training.get("effective_batch_size") != (training.get("batch_size", 0) * training.get("grad_accum_steps", 0)):
         raise SystemExit("Experiment profile effective batch size is inconsistent")
     if model_family == "milmmt":
+        if bool(profile.get("prompt", {}).get("use_metadata")) != bool(
+            training.get("use_tags")
+        ):
+            raise SystemExit("MiLMMT prompt metadata and use_tags must agree")
         if training.get("optimizer") != "adamw":
             raise SystemExit("MiLMMT requires AdamW")
         if training.get("lr_scheduler") != "inverse_sqrt":

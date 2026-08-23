@@ -17,7 +17,6 @@ from experiment_config import load_corpus_pipeline_config
 from mt_common import (
     add_normalized_columns,
     bool_series,
-    bucket_counts,
     evaluation_candidate_mask,
     mt_standard_contract,
     normalize_target_language,
@@ -870,12 +869,12 @@ def source_stratum_targets(
         )
         human_frame = language_frame[~synthetic]
         source_rows = {
-            str(bucket): len(group)
-            for bucket, group in human_frame.groupby("_source_corpus", sort=True)
+            str(source): len(group)
+            for source, group in human_frame.groupby("_source_corpus", sort=True)
         }
         eligible_capacities = {
-            str(bucket): len(group)
-            for bucket, group in eligible.groupby("_source_corpus", sort=True)
+            str(source): len(group)
+            for source, group in eligible.groupby("_source_corpus", sort=True)
         }
         try:
             test_total, validate_total = split_targets(
@@ -899,9 +898,9 @@ def source_stratum_targets(
             evaluation_by_source,
             validate_total,
         )
-        for bucket, evaluation_rows in evaluation_by_source.items():
-            validate_rows = validate_by_source.get(bucket, 0)
-            targets[(language_key, bucket)] = (
+        for source, evaluation_rows in evaluation_by_source.items():
+            validate_rows = validate_by_source.get(source, 0)
+            targets[(language_key, source)] = (
                 evaluation_rows - validate_rows,
                 validate_rows,
             )
@@ -934,12 +933,12 @@ def fill_assignments(
             stratum,
         ),
     )
-    for offset, (language, bucket) in enumerate(stratum_order):
-        indexes = stratum_indexes.get((language, bucket), pd.Index([]))
+    for offset, (language, source) in enumerate(stratum_order):
+        indexes = stratum_indexes.get((language, source), pd.Index([]))
         indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
         stratum_group_ids = group_ids.loc[indexes]
         current = stratum_group_ids.map(assignments)
-        target_test, target_validate = targets[(language, bucket)]
+        target_test, target_validate = targets[(language, source)]
         for split_name, target, reserve_target, seed_offset in (
             ("validate", target_validate, target_test, 17),
             ("test", target_test, target_validate, 0),
@@ -1282,6 +1281,10 @@ def build_hard_split(
     preserve_internal: bool = False,
     max_eval_units_per_side: int = SPLIT_DEFAULTS["max_eval_units_per_side"],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+    frame = frame.drop(
+        columns=["source_bucket", "_source_bucket"],
+        errors="ignore",
+    )
     if "row_id" not in frame.columns or frame["row_id"].astype(str).duplicated().any():
         raise SystemExit("Input must contain unique stable row_id values")
     if "kindOf" not in frame.columns or not frame["kindOf"].astype(str).str.lower().eq("standard").all():
@@ -1498,7 +1501,6 @@ def build_hard_split(
     heldout_group_non_eval = split.eq("excluded")
     frame["split"] = split
     frame["eval_tier"] = TIER
-    frame["source_bucket"] = frame["_source_bucket"]
     frame["source_corpus"] = frame["_source_corpus"]
     frame["formosan_tokens"] = frame["_formosan_tokens"].astype(int)
     frame["target_tokens"] = frame["_target_tokens"].astype(int)
@@ -1644,16 +1646,16 @@ def build_hard_split(
                 0.5
                 * sum(
                     abs(
-                        all_distribution[bucket] / max(all_total, 1)
-                        - distribution[bucket] / max(total, 1)
+                        all_distribution[source] / max(all_total, 1)
+                        - distribution[source] / max(total, 1)
                     )
-                    for bucket in set(all_distribution) | set(distribution)
+                    for source in set(all_distribution) | set(distribution)
                 )
             )
-        for bucket, source_frame in language_frame.groupby(
+        for source, source_frame in language_frame.groupby(
             "_source_corpus", sort=True
         ):
-            bucket_key = str(bucket)
+            source_key = str(source)
             eligible_source = source_frame[
                 candidate_mask.loc[source_frame.index]
             ]
@@ -1661,7 +1663,7 @@ def build_hard_split(
                 effective_candidate_mask.loc[source_frame.index]
             ]
             target_test, target_validate = source_targets.get(
-                (language_key, bucket_key),
+                (language_key, source_key),
                 (0, 0),
             )
             counts = Counter(source_frame["split"])
@@ -1677,7 +1679,7 @@ def build_hard_split(
                 group_ids,
                 effective_candidate_mask,
             )
-            source_reports[language_key][bucket_key] = {
+            source_reports[language_key][source_key] = {
                 "input_rows": len(source_frame),
                 "human_input_rows": human_source_rows,
                 "synthetic_input_rows": int(synthetic_source.sum()),
@@ -1721,7 +1723,7 @@ def build_hard_split(
                 or abs(counts["validate"] - target_validate)
                 > assignment_tolerance
             ):
-                source_shortfalls[language_key][bucket_key] = {
+                source_shortfalls[language_key][source_key] = {
                     "test": counts["test"],
                     "target_test": target_test,
                     "validate": counts["validate"],
@@ -1845,7 +1847,6 @@ def build_hard_split(
         "overlap": overlaps,
         "split_counts": split_counts(output),
         "split_counts_by_language": split_counts_by_language(output),
-        "bucket_counts": bucket_counts(output),
         "mt_standardization": mt_profile,
         "languages": language_reports,
         "source_strata": source_reports,

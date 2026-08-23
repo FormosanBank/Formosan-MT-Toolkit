@@ -155,9 +155,6 @@ def classify_cleaner_field_changes(
                 ("zh", "zho"): (
                     "normalize_translation_language_zh_to_zho"
                 ),
-                ("", "eng"): (
-                    "infer_hundred_paiwan_gloss_language_eng"
-                ),
             }.get((before_language, after_language))
             if language_rule:
                 counts[language_rule] += 1

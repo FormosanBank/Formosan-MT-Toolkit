@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "milmmt46-1b-v1-directional-v2",
+  "recipe_id": "milmmt46-1b-v1-directional-v3",
   "model_family": "milmmt",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -39,10 +39,10 @@
   },
   "prompt": {
     "format": "xiaomi_translation_v1",
-    "use_metadata": false
+    "use_metadata": true
   },
   "comparison": {
-    "baseline_recipe_id": "nllb200-spm8k-directional-v5",
+    "baseline_recipe_id": "nllb200-spm8k-directional-v6",
     "budget_basis": "sample_presentations",
     "sample_presentations": 19200000,
     "claim_scope": "matched_data_exposure_not_parameter_or_flop_matched",
@@ -51,7 +51,9 @@
       "effective_batch_size",
       "learning_rate",
       "warmup_steps",
-      "alpha",
+      "language_sampling_alpha",
+      "use_tags",
+      "dialect_tag_dropout",
       "precision",
       "log_interval",
       "generation_eval_interval",
@@ -61,11 +63,7 @@
       "best_metric",
       "early_stopping_patience",
       "early_stopping_min_delta",
-      "early_stopping_start_step",
-      "f2en_easy_source_weight",
-      "en2f_easy_source_weight",
-      "f2zh_easy_source_weight",
-      "zh2f_easy_source_weight"
+      "early_stopping_start_step"
     ],
     "matched_generation_fields": [
       "beam",
@@ -90,10 +88,9 @@
     "weight_decay": 0.01,
     "optimizer": "adamw",
     "lr_scheduler": "inverse_sqrt",
-    "alpha": 0.5,
-    "use_tags": false,
-    "domain_tag_dropout": 0.0,
-    "dialect_tag_dropout": 0.0,
+    "language_sampling_alpha": 0.5,
+    "use_tags": true,
+    "dialect_tag_dropout": 0.25,
     "precision": "bf16",
     "load_dtype": "bf16",
     "gradient_checkpointing": true,
@@ -108,11 +105,7 @@
     "best_metric": "chrF2",
     "early_stopping_patience": 5,
     "early_stopping_min_delta": 0.05,
-    "early_stopping_start_step": 30000,
-    "f2en_easy_source_weight": 0.05,
-    "en2f_easy_source_weight": 0.15,
-    "f2zh_easy_source_weight": 0.05,
-    "zh2f_easy_source_weight": 0.15
+    "early_stopping_start_step": 30000
   },
   "generation_defaults": {
     "beam": 4,

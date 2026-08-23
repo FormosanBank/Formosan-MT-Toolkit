@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
 from build_big_corpus import (  # noqa: E402
+    corpus_frame,
     discover_inputs,
     estimated_output_bytes,
     require_clean_pairs,
@@ -134,7 +135,6 @@ class HuggingFaceDatasetPublisherTests(unittest.TestCase):
                         "standard_origin",
                         "pivot_provider",
                         "pivot_direction",
-                        "source_bucket",
                         "eval_tier",
                         "document_id",
                     )
@@ -1026,7 +1026,7 @@ class AcquisitionTests(unittest.TestCase):
                 result = download_blob_for_languages(
                     "FormosanBank",
                     "FixtureRepo",
-                    {"path": "Final_XML/Amis/sample.xml", "sha": blob},
+                    {"path": "Final_XML/Atayal/misleading-name.xml", "sha": blob},
                     ("ami", "tay"),
                     None,
                     "a" * 40,
@@ -1040,6 +1040,43 @@ class AcquisitionTests(unittest.TestCase):
             self.assertEqual(result["tay"].status, "source_language_mismatch")
             self.assertTrue((out_dirs["ami"] / result["ami"].destination).is_file())
             self.assertFalse(list(out_dirs["tay"].rglob("*.xml")))
+
+    def test_aggregation_uses_xml_language_metadata_not_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "tay_zh_processed.csv"
+            frame = pd.DataFrame(
+                [
+                    {
+                        **mt_contract_fields("O maan ko faloco'?"),
+                        "lang_code": "ami",
+                        "formosan_sentence": "O maan ko faloco'?",
+                        "english": "What are you thinking?",
+                        "target_lang": "eng",
+                        "row_id": "row-1",
+                        "source_record_id": "record-1",
+                        "source": "Repo/XML/misleading-path.xml",
+                        "row_type": "sentence",
+                        "source_bucket": "narrative",
+                    }
+                ]
+            )
+            frame.to_csv(path, index=False)
+
+            target, loaded, input_type = corpus_frame(path)
+
+            frame.loc[0, "target_lang"] = ""
+            frame.to_csv(path, index=False)
+            with self.assertRaisesRegex(SystemExit, "TRANSL/@xml:lang"):
+                corpus_frame(path)
+
+        self.assertEqual(target, "en")
+        self.assertEqual(input_type, "pairwise")
+        self.assertEqual(loaded.loc[0, "lang_code"], "ami")
+        self.assertNotIn("source_bucket", loaded.columns)
+        self.assertEqual(
+            loaded.loc[0, "english_sentence"],
+            "What are you thinking?",
+        )
 
     def test_graphql_repository_resolution_preserves_selection_order(self) -> None:
         response = mock.Mock()

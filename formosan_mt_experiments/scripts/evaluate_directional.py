@@ -28,7 +28,6 @@ from mt_common import (
     is_formosan_to_target,
     normalize_target_language,
     read_parallel_csv,
-    source_bucket,
     source_corpus,
     target_col_for,
     target_language_from_direction,
@@ -462,7 +461,6 @@ def main() -> None:
     contract = validate_evaluation_contract(args, profile)
 
     full = read_parallel_csv(args.input, target_col=args.target_col)
-    full["source_bucket"] = full["source"].map(source_bucket)
     if "source_corpus" not in full:
         full["source_corpus"] = full["source"].map(source_corpus)
     if "kindOf" not in full or not full["kindOf"].astype(str).str.lower().eq("standard").all():
@@ -542,7 +540,6 @@ def main() -> None:
             "lang_code": evaluation["lang_code"].astype(str),
             "direction": args.direction,
             "eval_tier": evaluation.get("eval_tier", ""),
-            "source_bucket": evaluation["source_bucket"].astype(str),
             "source_corpus": evaluation["source_corpus"].astype(str),
             "source": evaluation["source"].astype(str),
             "dialect": evaluation["dialect"].astype(str),
@@ -621,13 +618,6 @@ def main() -> None:
         "by_language": group_scores(
             predictions,
             "lang_code",
-            hypothesis_column="hyp_default",
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
-        ),
-        "by_source_bucket": group_scores(
-            predictions,
-            "source_bucket",
             hypothesis_column="hyp_default",
             lowercase=args.lowercase_bleu,
             bleu_tokenize=bleu_tokenize,
