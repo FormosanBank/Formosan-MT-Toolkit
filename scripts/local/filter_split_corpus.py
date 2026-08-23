@@ -285,17 +285,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Diagnostic only. Production builds always leave this disabled.",
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Compatibility option; conservative cleaning is deterministic and single-process.",
-    )
-    parser.add_argument(
-        "--no-split",
-        action="store_true",
-        help="Compatibility option. This stage never splits, regardless of the flag.",
-    )
     return parser.parse_args()
 
 

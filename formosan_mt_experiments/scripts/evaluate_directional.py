@@ -460,7 +460,11 @@ def main() -> None:
         raise SystemExit("Headline evaluation requires default metadata mode")
     contract = validate_evaluation_contract(args, profile)
 
-    full = read_parallel_csv(args.input, target_col=args.target_col)
+    full = read_parallel_csv(
+        args.input,
+        target_col=args.target_col,
+        columns=["split", "row_id", "row_type", "pivot_origin", "eval_tier"],
+    )
     if "source_corpus" not in full:
         full["source_corpus"] = full["source"].map(source_corpus)
     if "kindOf" not in full or not full["kindOf"].astype(str).str.lower().eq("standard").all():

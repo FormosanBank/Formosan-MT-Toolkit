@@ -111,11 +111,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip FormosanBank hard validators. Intended only for local diagnosis.",
     )
-    parser.add_argument(
-        "--validate",
-        action="store_true",
-        help="Deprecated compatibility flag; validation is now enabled by default.",
-    )
     return parser.parse_args()
 
 

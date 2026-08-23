@@ -43,7 +43,11 @@ def load_training_rows(
     *,
     target_col: str,
 ) -> pd.DataFrame:
-    frame = read_parallel_csv(path, target_col=target_col)
+    frame = read_parallel_csv(
+        path,
+        target_col=target_col,
+        columns=["split", "row_id"],
+    )
     required = {"split", "kindOf", "row_id"}
     missing = sorted(required - set(frame.columns))
     if missing:

@@ -62,7 +62,11 @@ def audit_tokenizer(
         tokenizer_dir,
         use_fast=model_family == "milmmt",
     )
-    df = read_parallel_csv(input_csv, target_col=target_col)
+    df = read_parallel_csv(
+        input_csv,
+        target_col=target_col,
+        columns=["row_id", "split"],
+    )
     if split is not None:
         if "split" not in df:
             raise SystemExit(f"Tokenizer audit input has no split column: {input_csv}")

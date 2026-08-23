@@ -70,7 +70,11 @@ def prepare_data(
     tokenizer,
     runtime=nllb,
 ) -> tuple[dict, dict, dict]:
-    df = read_parallel_csv(args.input, target_col=args.target_col)
+    df = read_parallel_csv(
+        args.input,
+        target_col=args.target_col,
+        columns=["split", "row_id", "row_type", "pivot_origin"],
+    )
     if "split" not in df.columns:
         raise SystemExit("Training CSV must have split values train/validate/test.")
     df["split"] = df["split"].astype(str).str.lower()

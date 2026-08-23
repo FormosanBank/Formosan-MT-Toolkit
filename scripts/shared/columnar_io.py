@@ -109,9 +109,16 @@ def upgrade_manifest(
     return upgraded
 
 
-def read_csv_or_columnar(csv_path: Path, **csv_options) -> pd.DataFrame:
+def read_csv_or_columnar(
+    csv_path: Path,
+    *,
+    columns: list[str] | tuple[str, ...] | None = None,
+    **csv_options,
+) -> pd.DataFrame:
     parquet_path, manifest_path = cache_paths(csv_path)
     if not parquet_path.exists() and not manifest_path.exists():
+        if columns is not None:
+            csv_options["usecols"] = list(columns)
         return pd.read_csv(csv_path, **csv_options)
     if not parquet_path.is_file() or not manifest_path.is_file():
         raise SystemExit(f"Incomplete columnar cache beside {csv_path}")
@@ -134,9 +141,16 @@ def read_csv_or_columnar(csv_path: Path, **csv_options) -> pd.DataFrame:
         manifest["parquet"] = parquet_record
         atomic_write_json(manifest_path, manifest)
     try:
-        frame = pd.read_parquet(parquet_path)
+        if columns is not None:
+            missing = sorted(set(columns) - set(manifest.get("columns", [])))
+            if missing:
+                raise SystemExit(
+                    f"Columnar cache beside {csv_path} is missing requested columns: {missing}"
+                )
+        frame = pd.read_parquet(parquet_path, columns=columns)
     except ImportError as exc:
         raise SystemExit("Reading the columnar corpus cache requires pyarrow") from exc
-    if len(frame) != manifest.get("rows") or list(frame.columns) != manifest.get("columns"):
+    expected_columns = list(columns) if columns is not None else manifest.get("columns")
+    if len(frame) != manifest.get("rows") or list(frame.columns) != expected_columns:
         raise SystemExit(f"Columnar cache schema mismatch beside {csv_path}")
     return frame

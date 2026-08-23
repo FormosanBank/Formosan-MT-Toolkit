@@ -34,6 +34,17 @@ EVAL_SPLITS = ("test", "validate")
 def read_corpus(path: Path, *, target_col: str) -> pd.DataFrame:
     frame = read_csv_or_columnar(
         path,
+        columns=[
+            "row_id",
+            "lang_code",
+            "formosan_sentence",
+            target_col,
+            "source",
+            "split",
+            "kindOf",
+            "row_type",
+            "pivot_origin",
+        ],
         dtype=str,
         keep_default_na=False,
         encoding="utf-8-sig",

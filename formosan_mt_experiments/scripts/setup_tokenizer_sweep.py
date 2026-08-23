@@ -42,7 +42,11 @@ def artifact_inventory(directory: Path) -> list[dict[str, object]]:
 
 
 def training_rows(path: Path, *, target_col: str) -> pd.DataFrame:
-    frame = read_parallel_csv(path, target_col=target_col)
+    frame = read_parallel_csv(
+        path,
+        target_col=target_col,
+        columns=["split"],
+    )
     if "split" not in frame:
         raise SystemExit("Tokenizer input must contain split assignments")
     train = frame[

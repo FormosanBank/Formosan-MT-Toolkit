@@ -154,6 +154,25 @@ class ColumnarCacheTests(unittest.TestCase):
                 current["canonical_csv"]["sha256"],
             )
 
+    def test_column_projection_reads_only_requested_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "corpus.csv"
+            frame = pd.DataFrame(
+                {
+                    "row_id": ["a", "b"],
+                    "value": ["x", "y"],
+                    "unused": ["large", "payload"],
+                }
+            )
+            frame.to_csv(csv_path, index=False)
+            write_columnar_cache(frame, csv_path)
+            projected = read_csv_or_columnar(
+                csv_path,
+                columns=["row_id", "value"],
+            )
+            self.assertEqual(list(projected.columns), ["row_id", "value"])
+            pd.testing.assert_frame_equal(projected, frame[["row_id", "value"]])
+
 
 def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:
     output = frame.copy()

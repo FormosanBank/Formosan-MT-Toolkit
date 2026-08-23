@@ -3077,7 +3077,6 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                     raw_path,
                     "--output",
                     processed_path,
-                    "--no-split",
                 )
             self.run_script(
                 aggregate,

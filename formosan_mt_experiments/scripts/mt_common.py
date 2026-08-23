@@ -82,6 +82,13 @@ MT_STANDARD_REQUIRED_COLUMNS = (
     "mt_standard_profile",
     "mt_standard_profile_sha256",
 )
+PARALLEL_CORE_COLUMNS = (
+    "lang_code",
+    "formosan_sentence",
+    "source",
+    "dialect",
+    *MT_STANDARD_REQUIRED_COLUMNS,
+)
 
 def normalize_text(value: object) -> str:
     """NFKC + casefold + whitespace collapse for leakage checks."""
@@ -407,11 +414,22 @@ def mt_standard_contract(df: pd.DataFrame, *, context: str) -> dict[str, str]:
     return {"id": next(iter(profile_ids)), "sha256": profile_hash}
 
 
-def read_parallel_csv(path: Path, target_col: str = "english_sentence") -> pd.DataFrame:
+def read_parallel_csv(
+    path: Path,
+    target_col: str = "english_sentence",
+    *,
+    columns: Iterable[str] | None = None,
+) -> pd.DataFrame:
     # Provenance columns mix empty values and strings. Infer against the whole
     # file so chunk boundaries cannot change dtypes or emit noisy warnings.
+    selected_columns = None
+    if columns is not None:
+        selected_columns = list(
+            dict.fromkeys([*PARALLEL_CORE_COLUMNS, target_col, *columns])
+        )
     df = read_csv_or_columnar(
         path,
+        columns=selected_columns,
         low_memory=False,
         keep_default_na=False,
         na_filter=False,

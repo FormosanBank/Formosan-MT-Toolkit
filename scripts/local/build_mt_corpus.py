@@ -730,9 +730,6 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
         filter_base = [
             PYTHON,
             str(script("scripts/local/filter_split_corpus.py")),
-            "--workers",
-            str(args.workers),
-            "--no-split",
         ]
         if args.keep_redactions:
             filter_base.append("--keep-redactions")
@@ -1406,7 +1403,6 @@ def write_manifest(
             "public": args.public,
             "qc_revision": args.qc_revision,
             "units": args.units,
-            "workers": args.workers,
             "language_workers": args.language_workers,
             "incremental_stage_cache": not args.no_stage_cache,
             "hard_split_ratios": {
@@ -1580,13 +1576,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Diagnostic only; production builds run hard FormosanBank validators.",
     )
-    parser.add_argument(
-        "--validate-qc",
-        action="store_true",
-        help="Deprecated compatibility flag; QC validation is now enabled by default.",
-    )
     parser.add_argument("--units", default="sentences,words")
-    parser.add_argument("--workers", type=int, default=min(32, os.cpu_count() or 1))
     parser.add_argument(
         "--language-workers",
         type=int,

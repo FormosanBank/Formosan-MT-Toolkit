@@ -984,7 +984,14 @@ def main() -> None:
         args.target_col,
     )
     target_col = args.target_col or target_col_for(target_lang)
-    frame = read_parallel_csv(args.input, target_col=target_col)
+    frame = read_parallel_csv(
+        args.input,
+        target_col=target_col,
+        columns=sorted(
+            REQUIRED_PROVENANCE
+            | {"split", "pivot_origin", "translation_kind"}
+        ),
+    )
     if "split" not in frame:
         raise SystemExit("Input must have a split column")
 
