@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
 
+import columnar_cache  # noqa: E402
 import milmmt_runtime as milmmt  # noqa: E402
 import nllb_runtime as nllb  # noqa: E402
 import tokenizer_audit  # noqa: E402
@@ -98,14 +99,56 @@ class ColumnarCacheTests(unittest.TestCase):
             release = pd.DataFrame({"row_id": ["a", "b"], "value": ["x", "y"]})
             cached = release.assign(_normalized=["x", "y"])
             release.to_csv(csv_path, index=False)
-            write_columnar_cache(cached, csv_path)
+            with mock.patch.object(
+                columnar_cache,
+                "sha256_file",
+                wraps=columnar_cache.sha256_file,
+            ) as hasher:
+                write_columnar_cache(cached, csv_path)
+                hashed_calls = hasher.call_count
+                pd.testing.assert_frame_equal(
+                    read_csv_or_columnar(csv_path, keep_default_na=False),
+                    cached,
+                )
+                self.assertEqual(hasher.call_count, hashed_calls)
+
+                csv_path.write_text("row_id,value\na,changed\n", encoding="utf-8")
+                with self.assertRaises(SystemExit):
+                    read_csv_or_columnar(csv_path, keep_default_na=False)
+                self.assertGreater(hasher.call_count, hashed_calls)
+
+    def test_v1_manifest_is_verified_and_upgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            csv_path = Path(temporary) / "corpus.csv"
+            frame = pd.DataFrame({"row_id": ["a"], "value": ["x"]})
+            frame.to_csv(csv_path, index=False)
+            write_columnar_cache(frame, csv_path)
+            manifest_path = csv_path.with_suffix(".parquet.json")
+            current = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "complete": True,
+                        "canonical_csv_sha256": current["canonical_csv"]["sha256"],
+                        "parquet_sha256": current["parquet"]["sha256"],
+                        "rows": current["rows"],
+                        "columns": current["columns"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
             pd.testing.assert_frame_equal(
                 read_csv_or_columnar(csv_path, keep_default_na=False),
-                cached,
+                frame,
             )
-            csv_path.write_text("row_id,value\na,changed\n", encoding="utf-8")
-            with self.assertRaises(SystemExit):
-                read_csv_or_columnar(csv_path, keep_default_na=False)
+            upgraded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertEqual(
+                upgraded["canonical_csv"]["sha256"],
+                current["canonical_csv"]["sha256"],
+            )
 
 
 def add_mt_contract(frame: pd.DataFrame) -> pd.DataFrame:
