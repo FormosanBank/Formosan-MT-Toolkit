@@ -25,7 +25,24 @@ def _file_stat(path: Path) -> dict[str, int]:
         "bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "inode": stat.st_ino,
+        "device": stat.st_dev,
     }
+
+
+def _same_file_identity(
+    record: object,
+    identity: dict[str, int],
+    *,
+    require_device: bool,
+) -> bool:
+    if not isinstance(record, dict):
+        return False
+    fields = ("bytes", "mtime_ns", "inode")
+    if any(record.get(name) != identity[name] for name in fields):
+        return False
+    if require_device:
+        return record.get("device") == identity["device"]
+    return record.get("device", identity["device"]) == identity["device"]
 
 
 def _hash_index_path(root: Path) -> Path:
@@ -90,9 +107,18 @@ def cached_sha256(path: Path, root: Path) -> str:
         assert isinstance(files, dict)
         before = _file_stat(path)
         record = files.get(key)
-        if isinstance(record, dict) and all(record.get(name) == value for name, value in before.items()):
+        if _same_file_identity(record, before, require_device=False):
             digest = record.get("sha256")
             if isinstance(digest, str) and len(digest) == 64:
+                return digest
+
+        for candidate in files.values():
+            if not _same_file_identity(candidate, before, require_device=True):
+                continue
+            digest = candidate.get("sha256")
+            if isinstance(digest, str) and len(digest) == 64:
+                files[key] = {**before, "sha256": digest}
+                atomic_write_json(index_path, index)
                 return digest
 
         digest = sha256_file(path)
@@ -158,8 +184,7 @@ def cached_stage_valid(
         if not isinstance(expected_hash, str) or len(expected_hash) != 64:
             return False
         current = _file_stat(path)
-        expected_stat = {name: expected.get(name) for name in ("bytes", "mtime_ns", "inode")}
-        if current == expected_stat:
+        if _same_file_identity(expected, current, require_device=False):
             continue
         if cached_sha256(path, root) != expected_hash:
             return False

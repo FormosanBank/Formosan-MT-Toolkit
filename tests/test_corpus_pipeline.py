@@ -29,7 +29,7 @@ from build_big_corpus import (  # noqa: E402
     write_csv_atomic,
 )
 from build_context import BuildPaths, replace_with_hardlink  # noqa: E402
-from build_mt_corpus import package_training_provenance  # noqa: E402
+from build_release import package_training_provenance  # noqa: E402
 from clean_xml import (  # noqa: E402
     SYNC_FILES,
     audit_standard_tiers,
@@ -2762,6 +2762,25 @@ class PivotContractTests(unittest.TestCase):
                     cached_stage_valid(paths.root, cache, "qc", "stage-key")
                 )
                 self.assertGreater(hasher.call_count, hashed_calls)
+
+    def test_hash_cache_reuses_digest_for_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "split.csv"
+            linked = root / "final.csv"
+            source.write_text("row_id\nfixture\n", encoding="utf-8")
+            linked.hardlink_to(source)
+
+            with mock.patch.object(
+                stage_cache,
+                "sha256_file",
+                wraps=stage_cache.sha256_file,
+            ) as hasher:
+                source_hash = stage_cache.cached_sha256(source, root)
+                linked_hash = stage_cache.cached_sha256(linked, root)
+
+            self.assertEqual(source_hash, linked_hash)
+            self.assertEqual(hasher.call_count, 1)
 
     def test_stage_cache_upgrades_verified_v1_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

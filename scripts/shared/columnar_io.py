@@ -24,6 +24,7 @@ def artifact_record(path: Path, digest: str | None = None) -> dict[str, object]:
         "bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "inode": stat.st_ino,
+        "device": stat.st_dev,
     }
 
 
@@ -38,8 +39,12 @@ def verified_artifact(path: Path, record: object) -> dict[str, object] | None:
         "bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "inode": stat.st_ino,
+        "device": stat.st_dev,
     }
-    if identity == {name: record.get(name) for name in identity}:
+    if all(
+        record.get(name, value) == value
+        for name, value in identity.items()
+    ):
         return record
     if sha256_file(path) != expected_hash:
         return None
