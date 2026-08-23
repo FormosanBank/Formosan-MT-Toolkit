@@ -38,6 +38,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "scripts/training_code_inventory.py",
     "scripts/training_data.py",
     "scripts/training_state.py",
+    "scripts/validation_policy.py",
     "scripts/validation_similarity.py",
     "scripts/validate_experiment.py",
     "scripts/write_submission_manifest.py",
