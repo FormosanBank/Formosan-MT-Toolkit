@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/local"))
 
 import fetch_xml  # noqa: E402
+import github_snapshot  # noqa: E402
 import stage_cache  # noqa: E402
 from build_big_corpus import (  # noqa: E402
     corpus_frame,
@@ -1108,7 +1109,11 @@ class AcquisitionTests(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(fetch_xml, "api_post", return_value=response):
+        with mock.patch.object(
+            github_snapshot,
+            "api_post",
+            return_value=response,
+        ):
             refs = resolve_default_repository_refs(
                 "FormosanBank",
                 ["RepoB", "RepoA"],
@@ -1194,9 +1199,13 @@ class AcquisitionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             with (
-                mock.patch.object(fetch_xml, "CACHE_DIR", Path(temporary)),
                 mock.patch.object(
-                    fetch_xml,
+                    github_snapshot,
+                    "CACHE_DIR",
+                    Path(temporary),
+                ),
+                mock.patch.object(
+                    github_snapshot,
                     "api_get",
                     side_effect=api_get,
                 ) as get,
@@ -1241,12 +1250,12 @@ class AcquisitionTests(unittest.TestCase):
             snapshot = Path(temporary) / "source_repository_snapshot.json"
             with (
                 mock.patch.object(
-                    fetch_xml,
+                    github_snapshot,
                     "get_default_branch",
                     return_value="main",
                 ) as branch,
                 mock.patch.object(
-                    fetch_xml,
+                    github_snapshot,
                     "resolve_commit",
                     side_effect=["a" * 40, "b" * 40],
                 ) as resolve,
@@ -1261,12 +1270,12 @@ class AcquisitionTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    fetch_xml,
+                    github_snapshot,
                     "get_default_branch",
                     side_effect=AssertionError("snapshot should be reused"),
                 ),
                 mock.patch.object(
-                    fetch_xml,
+                    github_snapshot,
                     "resolve_commit",
                     side_effect=AssertionError("snapshot should be reused"),
                 ),
