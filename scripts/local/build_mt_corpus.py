@@ -282,6 +282,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
             },
             [
                 script("scripts/local/make_corpus.py"),
+                script("scripts/local/extraction_inventory.py"),
                 script("scripts/local/pipeline_common.py"),
             ],
         )
