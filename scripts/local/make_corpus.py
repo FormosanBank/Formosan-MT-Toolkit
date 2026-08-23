@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -685,54 +686,99 @@ def main() -> None:
     all_stats = {target: Counter() for target in outputs}
     file_reports = {target: [] for target in outputs}
     errors: list[str] = []
-    extracted = {target: [] for target in outputs}
+    temporary_outputs = {
+        target: output.with_name(f".{output.name}.extracting")
+        for target, output in outputs.items()
+    }
+    handles = {}
+    writers = {}
+    row_counts = Counter()
+    source_languages: dict[str, str] = {}
+    committed = False
+    try:
+        for target, output in outputs.items():
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = temporary_outputs[target]
+            temporary.unlink(missing_ok=True)
+            handle = temporary.open("w", newline="", encoding="utf-8")
+            handles[target] = handle
+            output_columns = [
+                column.replace("target_text", target)
+                for column in OUTPUT_COLUMNS
+            ]
+            writer = csv.DictWriter(handle, fieldnames=output_columns)
+            writer.writeheader()
+            writers[target] = writer
 
-    for xml_path in tqdm(xml_files, desc="Extract XML", unit="file"):
-        relative = str(xml_path.relative_to(xml_dir))
-        provenance = fetch_inventory.get(relative)
-        if provenance is None:
-            errors.append(f"{relative}: no kept record in fetch inventory")
-            continue
-        try:
-            pairs, stats = extract_file_targets(
-                xml_path,
-                xml_dir=xml_dir,
-                provenance=provenance,
-                targets=targets,
-                tags=tags,
-                qc_records=qc_inventory,
-                mt_records=mt_inventory,
-                qc_revision=qc_revision,
-            )
-        except (ET.ParseError, ValueError) as exc:
-            errors.append(f"{relative}: {exc}")
-            continue
-        post_qc_hash = sha256_file(xml_path)
-        for target in outputs:
-            extracted[target].extend(pairs[target])
-            all_stats[target].update(stats[target])
-            all_stats[target]["files_parsed"] += 1
-            all_stats[target][
-                "files_with_pairs" if pairs[target] else "files_without_pairs"
-            ] += 1
-            file_reports[target].append(
-                {
-                    "path": relative,
-                    "post_qc_sha256": post_qc_hash,
-                    "pairs": len(pairs[target]),
-                    **dict(stats[target]),
-                }
-            )
+        for xml_path in tqdm(xml_files, desc="Extract XML", unit="file"):
+            relative = str(xml_path.relative_to(xml_dir))
+            provenance = fetch_inventory.get(relative)
+            if provenance is None:
+                errors.append(f"{relative}: no kept record in fetch inventory")
+                continue
+            try:
+                pairs, stats = extract_file_targets(
+                    xml_path,
+                    xml_dir=xml_dir,
+                    provenance=provenance,
+                    targets=targets,
+                    tags=tags,
+                    qc_records=qc_inventory,
+                    mt_records=mt_inventory,
+                    qc_revision=qc_revision,
+                )
+            except (ET.ParseError, ValueError) as exc:
+                errors.append(f"{relative}: {exc}")
+                continue
+            post_qc_hash = sha256_file(xml_path)
+            for target in outputs:
+                for pair in pairs[target]:
+                    row = pair.to_csv_row()
+                    row[target] = row.pop("target_text")
+                    writers[target].writerow(row)
+                    row_counts[target] += 1
+                    source_languages.setdefault(target, pair.lang_code)
+                all_stats[target].update(stats[target])
+                all_stats[target]["files_parsed"] += 1
+                all_stats[target][
+                    "files_with_pairs" if pairs[target] else "files_without_pairs"
+                ] += 1
+                file_reports[target].append(
+                    {
+                        "path": relative,
+                        "post_qc_sha256": post_qc_hash,
+                        "pairs": len(pairs[target]),
+                        **dict(stats[target]),
+                    }
+                )
 
-    if errors:
-        preview = "\n".join(f"  - {error}" for error in errors[:25])
-        suffix = f"\n  ... and {len(errors) - 25} more" if len(errors) > 25 else ""
-        raise SystemExit(f"Extraction failed:\n{preview}{suffix}")
-    empty_targets = [target for target, pairs in extracted.items() if not pairs]
-    if empty_targets:
-        raise SystemExit(
-            f"No translation pairs found for {', '.join(empty_targets)} under {xml_dir}"
-        )
+        for handle in handles.values():
+            handle.close()
+        handles.clear()
+
+        if errors:
+            preview = "\n".join(f"  - {error}" for error in errors[:25])
+            suffix = (
+                f"\n  ... and {len(errors) - 25} more"
+                if len(errors) > 25
+                else ""
+            )
+            raise SystemExit(f"Extraction failed:\n{preview}{suffix}")
+        empty_targets = [target for target in outputs if not row_counts[target]]
+        if empty_targets:
+            raise SystemExit(
+                "No translation pairs found for "
+                f"{', '.join(empty_targets)} under {xml_dir}"
+            )
+        for target, output in outputs.items():
+            os.replace(temporary_outputs[target], output)
+        committed = True
+    finally:
+        for handle in handles.values():
+            handle.close()
+        if not committed:
+            for temporary in temporary_outputs.values():
+                temporary.unlink(missing_ok=True)
 
     shared_report = {
         "schema_version": 3,
@@ -750,31 +796,19 @@ def main() -> None:
         "complete": True,
     }
     for target, output in outputs.items():
-        output_columns = [
-            column.replace("target_text", target) for column in OUTPUT_COLUMNS
-        ]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=output_columns)
-            writer.writeheader()
-            for pair in extracted[target]:
-                row = pair.to_csv_row()
-                row[target] = row.pop("target_text")
-                writer.writerow(row)
-
         report = {
             **shared_report,
             "output": str(output),
-            "source_language": extracted[target][0].lang_code,
+            "source_language": source_languages[target],
             "target": target,
             "target_codes": sorted(targets[target]),
-            "rows": len(extracted[target]),
+            "rows": row_counts[target],
             "counts": dict(sorted(all_stats[target].items())),
             "file_inventory_sha256": stable_json_hash(file_reports[target]),
         }
         report_path = output.with_suffix(".extraction.json")
         atomic_write_json(report_path, report)
-        print(f"Wrote {len(extracted[target]):,} MT-standard pairs -> {output}")
+        print(f"Wrote {row_counts[target]:,} MT-standard pairs -> {output}")
         print(f"Extraction report: {report_path}")
 
 
