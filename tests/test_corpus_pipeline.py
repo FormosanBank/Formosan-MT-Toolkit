@@ -28,11 +28,8 @@ from build_big_corpus import (  # noqa: E402
     require_clean_pairs,
     write_csv_atomic,
 )
-from build_mt_corpus import (  # noqa: E402
-    BuildPaths,
-    package_training_provenance,
-    replace_with_hardlink,
-)
+from build_context import BuildPaths, replace_with_hardlink  # noqa: E402
+from build_mt_corpus import package_training_provenance  # noqa: E402
 from clean_xml import (  # noqa: E402
     SYNC_FILES,
     audit_standard_tiers,

@@ -14,15 +14,31 @@ import copy
 import csv
 import importlib.metadata
 import json
-import os
-import re
 import shutil
 import sys
-import time
-from dataclasses import dataclass
 from pathlib import Path
 
+from build_analysis import build_hard_splits
 from build_cli import parse_args
+from build_context import (
+    EXACT_BIBLE_REPOS,
+    BuildPaths,
+    Language,
+    build_cache_path,
+    clean_generated_outputs,
+    language_cache_path,
+    parse_languages,
+    pivot_cache_dir,
+    pivot_read_cache_dirs,
+    prune_unselected_language_outputs,
+    remove_path,
+    require_json_manifest,
+    resolve_build_paths,
+    script,
+    should_clean_generated_outputs,
+    stage_log,
+    variant_name,
+)
 from build_output import (
     CommandExecutionError,
     format_aggregate_summary,
@@ -30,7 +46,6 @@ from build_output import (
     format_language_summary,
     format_pivot_summary,
     format_rule_summary,
-    format_split_summary,
     run_logged,
 )
 from pipeline_common import (
@@ -53,61 +68,6 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYTHON = sys.executable
 PIPELINE_CONFIG = load_pipeline_config()
-EXACT_BIBLE_REPOS = ("Formosan-Taiwan-Bible-Society-Bibles",)
-
-
-@dataclass(frozen=True)
-class Language:
-    name: str
-    code: str
-
-
-@dataclass(frozen=True)
-class BuildPaths:
-    root: Path
-    raw_dir: Path
-    processed_dir: Path
-    final_dir: Path
-    split_root: Path
-    manifest_path: Path
-    source_snapshot_path: Path
-
-    def source_xml_dir(self, lang: Language) -> Path:
-        return self.root / f"downloaded_{lang.code}"
-
-    def prepared_xml_dir(self, lang: Language) -> Path:
-        return self.root / f"prepared_{lang.code}"
-
-
-@dataclass(frozen=True)
-class AnalysisJob:
-    target_lang: str
-    target_col: str
-    short: str
-    input_csv: Path
-
-
-LANGUAGES = (
-    Language("Amis", "ami"),
-    Language("Atayal", "tay"),
-    Language("Bunun", "bnn"),
-    Language("Kanakanavu", "xnb"),
-    Language("Kavalan", "ckv"),
-    Language("Paiwan", "pwn"),
-    Language("Puyuma", "pyu"),
-    Language("Rukai", "dru"),
-    Language("Saaroa", "sxr"),
-    Language("Saisiyat", "xsy"),
-    Language("Sakizaya", "szy"),
-    Language("Seediq", "trv"),
-    Language("Thao", "ssf"),
-    Language("Tsou", "tsu"),
-    Language("Yami/Tao", "tao"),
-)
-
-
-def script(path: str) -> Path:
-    return PROJECT_ROOT / path
 
 
 def run(
@@ -134,142 +94,6 @@ def run(
     )
 
 
-def stage_log(paths: BuildPaths, name: str) -> Path:
-    return paths.root / "logs" / f"{name}.log"
-
-
-def parse_languages(raw: str) -> list[Language]:
-    if raw.strip().lower() == "all":
-        return list(LANGUAGES)
-    by_code = {lang.code: lang for lang in LANGUAGES}
-    selected: list[Language] = []
-    for part in raw.split(","):
-        code = part.strip().lower()
-        if not code:
-            continue
-        if code not in by_code:
-            raise SystemExit(f"Unknown language code {code!r}; valid codes: {', '.join(by_code)}")
-        selected.append(by_code[code])
-    if not selected:
-        raise SystemExit("No languages selected.")
-    return selected
-
-
-def safe_corpus_name(value: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip()).strip("._-")
-    if not name:
-        raise SystemExit("--corpus-name must contain at least one alphanumeric character")
-    if name in {".", ".."}:
-        raise SystemExit(f"Invalid --corpus-name: {value!r}")
-    return name
-
-
-def variant_name(public: bool, exclude_bible: bool) -> str:
-    base = "public" if public else "private"
-    return f"{base}_no_bible" if exclude_bible else base
-
-
-def resolve_build_paths(args: argparse.Namespace) -> BuildPaths:
-    if args.corpus_name:
-        name = safe_corpus_name(args.corpus_name)
-        root = (args.build_root or (PROJECT_ROOT / "corpus_builds")) / name
-    elif args.build_root:
-        root = args.build_root
-    else:
-        raise SystemExit("Choose an isolated output with --corpus-name or --build-root, or use --build-public-private.")
-
-    root = root.expanduser().resolve()
-    raw_dir = root / "raw_corpora"
-    processed_dir = root / "processed_corpora"
-    final_dir = root / "pivot_corpora_final"
-    split_root = root / "formosan_mt_experiments" / "data"
-    manifest_path = root / "mt_build_manifest.json"
-    source_snapshot_path = root / "source_repository_snapshot.json"
-
-    return BuildPaths(
-        root=root,
-        raw_dir=raw_dir,
-        processed_dir=processed_dir,
-        final_dir=final_dir,
-        split_root=split_root,
-        manifest_path=manifest_path,
-        source_snapshot_path=source_snapshot_path,
-    )
-
-
-def pivot_cache_dir(paths: BuildPaths) -> Path:
-    return paths.processed_dir / "pivot" / "cache"
-
-
-def pivot_read_cache_dirs(args: argparse.Namespace, paths: BuildPaths) -> list[Path]:
-    seen: set[Path] = set()
-    dirs: list[Path] = []
-
-    def add(path: Path) -> None:
-        resolved = path.expanduser().resolve()
-        if resolved == pivot_cache_dir(paths).resolve() or resolved in seen:
-            return
-        seen.add(resolved)
-        dirs.append(resolved)
-
-    for path in getattr(args, "pivot_read_cache_dir", []):
-        add(path)
-    for path in getattr(args, "extra_pivot_read_cache_dirs", []):
-        add(path)
-    return dirs
-
-
-def remove_path(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path)
-    elif path.exists():
-        path.unlink()
-
-
-def replace_with_hardlink(source: Path, destination: Path) -> None:
-    """Avoid storing a second physical copy of a finalized split."""
-    remove_path(destination)
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
-
-
-def clean_generated_outputs(paths: BuildPaths) -> None:
-    """Remove abandoned temporary files while retaining verified stage outputs."""
-    pivot_dir = paths.processed_dir / "pivot"
-    if pivot_dir.exists():
-        for pattern in (
-            "big_corpus*.incomplete",
-            "*.tmp",
-        ):
-            for path in pivot_dir.glob(pattern):
-                remove_path(path)
-
-
-def should_clean_generated_outputs(args: argparse.Namespace, paths: BuildPaths) -> bool:
-    if args.dry_run or args.keep_build_output:
-        return False
-    # Incremental stage skips imply the caller expects existing intermediates.
-    return not (args.skip_raw or args.skip_filter or args.skip_aggregate)
-
-
-def prune_unselected_language_outputs(
-    paths: BuildPaths,
-    languages: list[Language],
-) -> None:
-    selected = {lang.code for lang in languages}
-    for lang in LANGUAGES:
-        if lang.code in selected:
-            continue
-        for suffix in ("zh", "en"):
-            remove_path(paths.raw_dir / f"{lang.code}_{suffix}.csv")
-            remove_path(paths.raw_dir / f"{lang.code}_{suffix}.extraction.json")
-            processed = paths.processed_dir / f"{lang.code}_{suffix}_processed.csv"
-            remove_path(processed)
-            remove_path(paths.processed_dir / "filter_reports" / processed.stem)
-
-
 def count_csv_rows(path: Path) -> int:
     if not path.exists():
         return 0
@@ -292,26 +116,6 @@ def artifact_record(path: Path, *, compute_hash: bool) -> dict:
     return record
 
 
-def require_json_manifest(
-    path: Path,
-    *,
-    stage: str,
-    expected: dict[str, object] | None = None,
-) -> dict:
-    if not path.is_file():
-        raise SystemExit(f"{stage} did not produce its required manifest: {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"{stage} manifest is malformed at {path}: {exc}") from exc
-    if payload.get("complete") is not True:
-        raise SystemExit(f"{stage} manifest is incomplete: {path}")
-    for key, value in (expected or {}).items():
-        if payload.get(key) != value:
-            raise SystemExit(f"{stage} manifest mismatch for {key}: expected {value!r}, found {payload.get(key)!r}")
-    return payload
-
-
 def stage_manifest_record(path: Path) -> dict:
     payload = require_json_manifest(path, stage=path.stem)
     return {
@@ -320,14 +124,6 @@ def stage_manifest_record(path: Path) -> dict:
         "schema_version": payload.get("schema_version"),
         "complete": True,
     }
-
-
-def language_cache_path(paths: BuildPaths, lang: Language) -> Path:
-    return paths.root / ".stage_cache" / f"{lang.code}.json"
-
-
-def build_cache_path(paths: BuildPaths) -> Path:
-    return paths.root / ".stage_cache" / "build.json"
 
 
 def count_bible_source_rows(path: Path) -> int:
@@ -1113,276 +909,6 @@ def run_pivot(
             "build",
         )
         print(format_pivot_summary(manifest_path))
-
-
-def run_analysis_job(
-    job: AnalysisJob,
-    args: argparse.Namespace,
-    corpus_dir: Path,
-    output_root: Path,
-    paths: BuildPaths,
-    *,
-    quiet: bool = False,
-) -> str:
-    if not job.input_csv.exists() and not args.dry_run:
-        raise SystemExit(
-            f"Cannot build {job.target_lang} hard splits; missing {job.input_csv}"
-        )
-    out_dir = output_root / f"splits_{job.short}_v1"
-    run(
-        [
-            PYTHON,
-            str(script("formosan_mt_experiments/scripts/build_experiment_splits.py")),
-            "--input",
-            str(job.input_csv),
-            "--target-lang",
-            job.target_lang,
-            "--target-col",
-            job.target_col,
-            "--output-prefix",
-            f"big_corpus_{job.short}",
-            "--output-dir",
-            str(out_dir),
-            "--train-ratio",
-            str(args.train_ratio),
-            "--val-ratio",
-            str(args.val_ratio),
-            "--test-ratio",
-            str(args.test_ratio),
-            "--min-formosan-tokens",
-            str(args.min_formosan_tokens),
-            "--min-target-tokens",
-            str(args.min_target_tokens),
-            "--min-combined-tokens",
-            str(args.min_combined_tokens),
-            "--min-punctuated-combined-tokens",
-            str(args.min_punctuated_combined_tokens),
-            "--max-eval-units-per-side",
-            str(args.max_eval_units_per_side),
-            "--min-test-rows",
-            str(args.min_test_rows),
-            "--min-validate-rows",
-            str(args.min_validate_rows),
-            "--ngram-jaccard-threshold",
-            str(args.ngram_jaccard_threshold),
-            "--tiers",
-            args.tiers,
-        ],
-        label=f"Build {job.target_lang} hard split",
-        log_path=stage_log(paths, f"split_{job.short}"),
-        dry_run=args.dry_run,
-        verbose=args.verbose,
-        quiet=quiet,
-    )
-    hard_file = out_dir / f"big_corpus_{job.short}_in_domain_hard.csv"
-    destination = corpus_dir / hard_file.name
-    if args.dry_run:
-        return ""
-    if not hard_file.exists():
-        raise SystemExit(f"Hard split builder did not produce {hard_file}")
-
-    replace_with_hardlink(hard_file, destination)
-    run(
-        [
-            PYTHON,
-            str(script("formosan_mt_experiments/scripts/validate_experiment.py")),
-            "--input",
-            str(hard_file),
-            "--target-col",
-            job.target_col,
-            "--target-lang",
-            job.target_lang,
-            "--min-test-ratio",
-            str(args.test_ratio),
-            "--min-validate-ratio",
-            str(args.val_ratio),
-            "--min-test-rows",
-            str(args.min_test_rows),
-            "--min-validate-rows",
-            str(args.min_validate_rows),
-            "--ngram-jaccard-threshold",
-            str(args.ngram_jaccard_threshold),
-            "--min-formosan-tokens",
-            str(args.min_formosan_tokens),
-            "--min-target-tokens",
-            str(args.min_target_tokens),
-            "--min-combined-tokens",
-            str(args.min_combined_tokens),
-            "--min-punctuated-combined-tokens",
-            str(args.min_punctuated_combined_tokens),
-            "--max-eval-units-per-side",
-            str(args.max_eval_units_per_side),
-            "--source-ratio-tolerance",
-            str(args.source_ratio_tolerance),
-            "--split-report",
-            str(out_dir / "report_in_domain_hard.json"),
-            "--report",
-            str(out_dir / "validation_in_domain_hard.json"),
-        ],
-        label=f"Validate {job.target_lang} hard split",
-        log_path=stage_log(paths, f"validate_{job.short}"),
-        verbose=args.verbose,
-        quiet=quiet,
-    )
-    require_json_manifest(
-        out_dir / "validation_in_domain_hard.json",
-        stage=f"{job.target_lang} hard-split validation",
-    )
-    exposure_config = PIPELINE_CONFIG["exposure_audit"]
-    run(
-        [
-            PYTHON,
-            str(
-                script(
-                    "formosan_mt_experiments/scripts/audit_corpus_exposure.py"
-                )
-            ),
-            "--input",
-            str(hard_file),
-            "--target-col",
-            job.target_col,
-            "--target-lang",
-            job.target_lang,
-            "--high-threshold",
-            str(exposure_config["high_threshold"]),
-            "--max-high-exposure-rate",
-            str(exposure_config["max_high_exposure_rate"]),
-            "--report",
-            str(out_dir / "exposure_in_domain_hard.json"),
-        ],
-        label=f"Audit {job.target_lang} train-test exposure",
-        log_path=stage_log(paths, f"exposure_{job.short}"),
-        verbose=args.verbose,
-        quiet=quiet,
-    )
-    require_json_manifest(
-        out_dir / "exposure_in_domain_hard.json",
-        stage=f"{job.target_lang} TAME-MT exposure audit",
-    )
-    return format_split_summary(out_dir, job.target_lang.title())
-
-
-def build_hard_splits(
-    args: argparse.Namespace,
-    corpus_dir: Path,
-    output_root: Path,
-    paths: BuildPaths,
-    cache: dict[str, object],
-) -> None:
-    key = stage_key(
-        "hard_splits",
-        {
-            "inputs": file_inventory(
-                [
-                    corpus_dir / "big_corpus_en.csv",
-                    corpus_dir / "big_corpus_zh.csv",
-                ],
-                paths.root,
-            ),
-            "train_ratio": args.train_ratio,
-            "validate_ratio": args.val_ratio,
-            "test_ratio": args.test_ratio,
-            "min_formosan_tokens": args.min_formosan_tokens,
-            "min_target_tokens": args.min_target_tokens,
-            "min_combined_tokens": args.min_combined_tokens,
-            "min_punctuated_combined_tokens": args.min_punctuated_combined_tokens,
-            "max_eval_units_per_side": args.max_eval_units_per_side,
-            "min_test_rows": args.min_test_rows,
-            "min_validate_rows": args.min_validate_rows,
-            "ngram_jaccard_threshold": args.ngram_jaccard_threshold,
-            "source_ratio_tolerance": args.source_ratio_tolerance,
-            "tiers": args.tiers,
-            "pipeline_config_sha256": sha256_file(PIPELINE_CONFIG_PATH),
-        },
-        [
-            script("formosan_mt_experiments/scripts/build_experiment_splits.py"),
-            script("formosan_mt_experiments/scripts/validate_experiment.py"),
-            script("formosan_mt_experiments/scripts/audit_corpus_exposure.py"),
-            script("formosan_mt_experiments/scripts/experiment_config.py"),
-            script("formosan_mt_experiments/scripts/mt_common.py"),
-            script("formosan_mt_experiments/scripts/split_allocation.py"),
-            script("formosan_mt_experiments/scripts/split_similarity.py"),
-            script("formosan_mt_experiments/scripts/validation_similarity.py"),
-            script("scripts/shared/columnar_io.py"),
-            script("scripts/shared/reproducibility.py"),
-            script("formosan_mt_experiments/configs/default_experiment.json"),
-        ],
-    )
-    cached = not args.dry_run and not args.no_stage_cache and cached_stage_valid(paths.root, cache, "hard_splits", key)
-    if cached:
-        print("[cache] Hard splits and audits")
-        for short, target in (("en", "English"), ("zh", "Chinese")):
-            print(format_split_summary(output_root / f"splits_{short}_v1", target))
-        return
-    if not args.dry_run:
-        remove_path(output_root)
-        remove_path(corpus_dir / "big_corpus_en_in_domain_hard.csv")
-        remove_path(corpus_dir / "big_corpus_zh_in_domain_hard.csv")
-    split_jobs = [
-        AnalysisJob(
-            "english",
-            "english_sentence",
-            "en",
-            corpus_dir / "big_corpus_en.csv",
-        ),
-        AnalysisJob(
-            "chinese",
-            "chinese_sentence",
-            "zh",
-            corpus_dir / "big_corpus_zh.csv",
-        ),
-    ]
-    analysis_workers = 1 if args.verbose or args.dry_run else min(args.analysis_workers, len(split_jobs))
-    if analysis_workers == 1:
-        for job in split_jobs:
-            summary = run_analysis_job(
-                job,
-                args,
-                corpus_dir,
-                output_root,
-                paths,
-            )
-            if summary:
-                print(summary)
-    else:
-        print(f"[stage] Build and audit {len(split_jobs)} target corpora ({analysis_workers} workers)")
-        started = time.monotonic()
-        summaries: dict[str, str] = {}
-        with futures.ThreadPoolExecutor(max_workers=analysis_workers) as executor:
-            pending = {
-                executor.submit(
-                    run_analysis_job,
-                    job,
-                    args,
-                    corpus_dir,
-                    output_root,
-                    paths,
-                    quiet=True,
-                ): job
-                for job in split_jobs
-            }
-            for completed in futures.as_completed(pending):
-                job = pending[completed]
-                summaries[job.short] = completed.result()
-                print(f"[done]  {job.target_lang.title()} split, validation, and exposure")
-        elapsed = time.monotonic() - started
-        print(f"[done]  Target corpus analysis ({elapsed / 60:.1f}m)")
-        for job in split_jobs:
-            print(summaries[job.short])
-    if not args.dry_run:
-        record_cached_stage(
-            paths.root,
-            build_cache_path(paths),
-            cache,
-            "hard_splits",
-            key,
-            [
-                *output_root.rglob("*"),
-                corpus_dir / "big_corpus_en_in_domain_hard.csv",
-                corpus_dir / "big_corpus_zh_in_domain_hard.csv",
-            ],
-            "build",
-        )
 
 
 def write_manifest(
