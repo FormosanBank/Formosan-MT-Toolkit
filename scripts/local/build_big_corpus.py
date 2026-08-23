@@ -40,8 +40,8 @@ TARGET_SPECS = {
 OUTPUT_NAMES = {
     "big_corpus_en.csv",
     "big_corpus_zh.csv",
-    "big_corpus_combined.csv",
 }
+LEGACY_OUTPUT_NAMES = {"big_corpus_combined.csv"}
 MIB = 1024**2
 GIB = 1024**3
 CANONICAL_PREFIX = [
@@ -416,49 +416,6 @@ def write_target(frames: list[pd.DataFrame], path: Path, target_column: str) -> 
     return output
 
 
-def source_join_key(frame: pd.DataFrame) -> pd.Series:
-    if "source_record_id" in frame.columns:
-        value = frame["source_record_id"].astype(str)
-        if value.str.strip().ne("").all():
-            return value
-    return (
-        frame["lang_code"].astype(str)
-        + "\u241f"
-        + frame["source"].astype(str)
-        + "\u241f"
-        + frame.get("xml_id", pd.Series([""] * len(frame))).astype(str)
-        + "\u241f"
-        + frame["formosan_sentence"].astype(str)
-    )
-
-
-def write_combined(chinese: pd.DataFrame, english: pd.DataFrame, path: Path) -> int:
-    if chinese.empty:
-        return 0
-    output = chinese.copy()
-    output["_source_join_key"] = source_join_key(output)
-    english_lookup: dict[str, str] = {}
-    if not english.empty:
-        english_work = english.copy()
-        english_work["_source_join_key"] = source_join_key(english_work)
-        for key, target in zip(
-            english_work["_source_join_key"],
-            english_work["english_sentence"],
-            strict=True,
-        ):
-            if str(target).strip():
-                english_lookup.setdefault(str(key), str(target))
-    output["english_sentence"] = [english_lookup.get(str(key), "") for key in output["_source_join_key"]]
-    output = output.drop(columns=["_source_join_key"])
-    order = canonical_order(output, "chinese_sentence")
-    insert_at = order.index("chinese_sentence") + 1
-    if "english_sentence" in order:
-        order.remove("english_sentence")
-    order.insert(insert_at, "english_sentence")
-    write_csv_atomic(output[order], path)
-    return len(output)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Aggregate cleaned pairwise or pivot corpora.",
@@ -468,7 +425,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-en-name", default="big_corpus_en.csv")
     parser.add_argument("--output-zh-name", default="big_corpus_zh.csv")
-    parser.add_argument("--output-combined-name", default="big_corpus_combined.csv")
     return parser.parse_args()
 
 
@@ -479,11 +435,7 @@ def main() -> None:
     if not input_dir.is_dir():
         raise SystemExit(f"Input directory does not exist: {input_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_names = {
-        args.output_en_name,
-        args.output_zh_name,
-        args.output_combined_name,
-    }
+    output_names = {args.output_en_name, args.output_zh_name, *LEGACY_OUTPUT_NAMES}
     input_paths = discover_inputs(input_dir, output_names)
     require_output_space(input_paths, output_dir)
     english_inputs, chinese_inputs, inventory = load_inputs(input_dir, output_names)
@@ -492,10 +444,10 @@ def main() -> None:
 
     english_path = output_dir / args.output_en_name
     chinese_path = output_dir / args.output_zh_name
-    combined_path = output_dir / args.output_combined_name
     english = write_target(english_inputs, english_path, "english_sentence")
     chinese = write_target(chinese_inputs, chinese_path, "chinese_sentence")
-    combined_rows = write_combined(chinese, english, combined_path)
+    for legacy_name in LEGACY_OUTPUT_NAMES:
+        (output_dir / legacy_name).unlink(missing_ok=True)
     report = {
         "schema_version": 3,
         "created_at": utc_now(),
@@ -527,16 +479,11 @@ def main() -> None:
                 "rows": len(chinese),
                 "sha256": sha256_file(chinese_path) if not chinese.empty else None,
             },
-            "combined": {
-                "path": str(combined_path),
-                "rows": combined_rows,
-                "sha256": sha256_file(combined_path) if combined_rows else None,
-            },
         },
         "complete": True,
     }
     atomic_write_json(output_dir / "aggregate_manifest.json", report)
-    print(f"Aggregated EN={len(english):,}, ZH={len(chinese):,}, combined={combined_rows:,} rows")
+    print(f"Aggregated EN={len(english):,}, ZH={len(chinese):,} rows")
 
 
 if __name__ == "__main__":

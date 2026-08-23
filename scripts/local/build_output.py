@@ -249,8 +249,7 @@ def format_aggregate_summary(manifest_path: Path, label: str) -> str:
     outputs = _load(manifest_path).get("outputs", {})
     return (
         f"{label}: en={_count(outputs.get('english', {}).get('rows'))}, "
-        f"zh={_count(outputs.get('chinese', {}).get('rows'))}, "
-        f"combined={_count(outputs.get('combined', {}).get('rows'))}"
+        f"zh={_count(outputs.get('chinese', {}).get('rows'))}"
     )
 
 

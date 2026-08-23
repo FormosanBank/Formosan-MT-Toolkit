@@ -358,7 +358,6 @@ def build_artifact_manifest(
     artifact_paths = {
         "big_corpus_en": final_corpus_dir / "big_corpus_en.csv",
         "big_corpus_zh": final_corpus_dir / "big_corpus_zh.csv",
-        "big_corpus_combined": final_corpus_dir / "big_corpus_combined.csv",
         "big_corpus_en_in_domain_hard": final_corpus_dir / "big_corpus_en_in_domain_hard.csv",
         "big_corpus_zh_in_domain_hard": final_corpus_dir / "big_corpus_zh_in_domain_hard.csv",
     }
@@ -976,7 +975,6 @@ def build_aggregates(
                     output_dir / "aggregate_manifest.json",
                     output_dir / "big_corpus_en.csv",
                     output_dir / "big_corpus_zh.csv",
-                    output_dir / "big_corpus_combined.csv",
                 ],
                 "build",
             )
@@ -1319,7 +1317,6 @@ def write_manifest(
     required_artifacts = {
         "big_corpus_en",
         "big_corpus_zh",
-        "big_corpus_combined",
         "big_corpus_en_in_domain_hard",
         "big_corpus_zh_in_domain_hard",
     }
