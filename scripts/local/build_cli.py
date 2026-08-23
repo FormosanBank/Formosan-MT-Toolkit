@@ -125,6 +125,15 @@ def parse_args() -> argparse.Namespace:
         help="Language preparation pipelines to run concurrently after acquisition.",
     )
     parser.add_argument(
+        "--analysis-workers",
+        type=int,
+        default=2,
+        help=(
+            "English/Chinese split, validation, and exposure pipelines to run "
+            "concurrently. Use 1 on machines with less than 24 GB RAM."
+        ),
+    )
+    parser.add_argument(
         "--no-stage-cache",
         action="store_true",
         help="Force language QC, standardization, extraction, and filtering to rerun.",
@@ -263,6 +272,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--fetch-workers must be >= 1")
     if args.language_workers < 1:
         raise SystemExit("--language-workers must be >= 1")
+    if args.analysis_workers < 1:
+        raise SystemExit("--analysis-workers must be >= 1")
     if args.fetch_download_retries < 1:
         raise SystemExit("--fetch-download-retries must be >= 1")
     if args.fetch_retry_base_sleep < 0:
