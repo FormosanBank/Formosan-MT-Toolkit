@@ -331,5 +331,3 @@ def classify_translation_version_repairs(
             }
         )
     return repairs
-
-

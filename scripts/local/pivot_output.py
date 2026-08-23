@@ -406,5 +406,3 @@ def write_manifest(
     args.out_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(manifest_path, manifest)
     return manifest_path
-
-

@@ -490,5 +490,3 @@ def load_or_create_repository_snapshot(
     if errors:
         raise SystemExit("Repository snapshot failed:\n  - " + "\n  - ".join(errors))
     return refs
-
-
