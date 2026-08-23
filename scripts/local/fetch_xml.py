@@ -268,8 +268,7 @@ def download_blob_for_languages(
     digest = sha256_bytes(xml_bytes)
     target_codes = get_equivalent_lang_codes(tgt_lang.lower()) if tgt_lang else set()
     has_target = not target_codes or any(
-        (translation.attrib.get(XML_LANG) or "").strip().lower() in target_codes
-        for translation in root.iter("TRANSL")
+        (translation.attrib.get(XML_LANG) or "").strip().lower() in target_codes for translation in root.iter("TRANSL")
     )
     routed: dict[str, DownloadResult] = {}
     for lang in src_langs:
@@ -301,35 +300,6 @@ def download_blob_for_languages(
             dialect=root_dialect,
         )
     return routed
-
-
-def download_blob(
-    org: str,
-    repo: str,
-    item: dict,
-    src_lang: str,
-    tgt_lang: str | None,
-    commit_sha: str,
-    out_dir: Path,
-    dialect: str | None,
-    *,
-    download_retries: int,
-    retry_base_sleep: float,
-    retry_max_sleep: float,
-) -> DownloadResult:
-    return download_blob_for_languages(
-        org,
-        repo,
-        item,
-        (src_lang,),
-        tgt_lang,
-        commit_sha,
-        {src_lang: out_dir},
-        dialect,
-        download_retries=download_retries,
-        retry_base_sleep=retry_base_sleep,
-        retry_max_sleep=retry_max_sleep,
-    )[src_lang]
 
 
 def write_inventory(path: Path, rows: list[DownloadResult]) -> tuple[str, str]:
@@ -403,11 +373,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     src_langs = tuple(
-        dict.fromkeys(
-            part.strip().lower()
-            for part in (args.src_langs or args.src_lang).split(",")
-            if part.strip()
-        )
+        dict.fromkeys(part.strip().lower() for part in (args.src_langs or args.src_lang).split(",") if part.strip())
     )
     if not src_langs:
         raise SystemExit("No source languages selected")
@@ -429,35 +395,20 @@ def main() -> None:
 
     if not GITHUB_TOKEN:
         print("GitHub token is not set; public API rate limits apply.")
-    snapshot_path = (
-        args.repository_snapshot.expanduser().resolve()
-        if args.repository_snapshot
-        else None
-    )
+    snapshot_path = args.repository_snapshot.expanduser().resolve() if args.repository_snapshot else None
     existing_snapshot: dict[str, object] | None = None
     if snapshot_path and snapshot_path.is_file():
         try:
             existing_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise SystemExit(
-                f"Repository snapshot is unreadable at {snapshot_path}: {exc}"
-            ) from exc
+            raise SystemExit(f"Repository snapshot is unreadable at {snapshot_path}: {exc}") from exc
     if existing_snapshot:
         snapshot_selection = existing_snapshot.get("selection")
         if not isinstance(snapshot_selection, dict):
-            raise SystemExit(
-                f"Repository snapshot has no selection record: {snapshot_path}"
-            )
-        repos = [
-            str(name)
-            for name in snapshot_selection.get("repositories_discovered", [])
-        ]
+            raise SystemExit(f"Repository snapshot has no selection record: {snapshot_path}")
+        repos = [str(name) for name in snapshot_selection.get("repositories_discovered", [])]
     else:
-        repos = (
-            ["FormosanBank"]
-            if args.public
-            else get_repos(args.org, refresh=args.refresh_repository_metadata)
-        )
+        repos = ["FormosanBank"] if args.public else get_repos(args.org, refresh=args.refresh_repository_metadata)
     selected_repos = [
         repo
         for repo in repos
@@ -540,10 +491,7 @@ def main() -> None:
                 candidates = [
                     item
                     for item in tree
-                    if item.get("type") == "blob"
-                    and is_private_release_xml_path(
-                        str(item.get("path") or "")
-                    )
+                    if item.get("type") == "blob" and is_private_release_xml_path(str(item.get("path") or ""))
                 ]
 
             queued_counts: Counter[str] = Counter()
@@ -621,16 +569,9 @@ def main() -> None:
             results[lang],
         )
         status_counts = Counter(row.status for row in results[lang])
-        hard_failures = sum(
-            status_counts[status]
-            for status in ("download_error", "checksum_error", "parse_error")
-        )
+        hard_failures = sum(status_counts[status] for status in ("download_error", "checksum_error", "parse_error"))
         language_failures[lang] = hard_failures
-        complete = (
-            not repository_errors
-            and hard_failures == 0
-            and status_counts["kept"] > 0
-        )
+        complete = not repository_errors and hard_failures == 0 and status_counts["kept"] > 0
         manifest = {
             "schema_version": 3,
             "created_at": utc_now(),
@@ -652,10 +593,7 @@ def main() -> None:
             "repositories_discovered": sorted(repos),
             "repositories_excluded": excluded_repo_names,
             "repositories": [
-                asdict(snapshot)
-                for snapshot in sorted(
-                    snapshots[lang], key=lambda row: row.name.lower()
-                )
+                asdict(snapshot) for snapshot in sorted(snapshots[lang], key=lambda row: row.name.lower())
             ],
             "repository_errors": repository_errors,
             "status_counts": dict(sorted(status_counts.items())),

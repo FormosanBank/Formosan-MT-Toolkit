@@ -147,13 +147,6 @@ def mixed_text(element: ET.Element) -> str:
     return "".join(element.itertext()).strip()
 
 
-def direct_form(element: ET.Element, kind_of: str) -> ET.Element | None:
-    matches = [form for form in element.findall("FORM") if (form.get("kindOf") or "").strip().lower() == kind_of]
-    if len(matches) > 1:
-        raise ValueError(f"{element.tag} id={element.get('id', '')!r} has {len(matches)} {kind_of!r} FORM tiers")
-    return matches[0] if matches else None
-
-
 def row_type_for_tag(tag: str) -> str:
     return {"S": "sentence", "W": "lexeme", "M": "morpheme"}[tag]
 
@@ -214,10 +207,7 @@ def load_fetch_inventory(xml_dir: Path) -> dict[str, dict[str, str]]:
     expected_hash = str(manifest.get("inventory_sha256") or "")
     actual_hash = sha256_file(inventory_path)
     if expected_hash != actual_hash:
-        raise SystemExit(
-            f"Fetch inventory hash mismatch: expected {expected_hash}, "
-            f"found {actual_hash}"
-        )
+        raise SystemExit(f"Fetch inventory hash mismatch: expected {expected_hash}, found {actual_hash}")
 
     inventory: dict[str, dict[str, str]] = {}
     with inventory_path.open(encoding="utf-8") as handle:
@@ -247,9 +237,7 @@ def load_qc_inventory(
 ) -> tuple[dict[tuple[str, str, int, str], dict[str, str]], dict]:
     manifest_path = xml_dir / "_qc_manifest.json"
     if not manifest_path.is_file():
-        raise SystemExit(
-            f"Missing pinned QC manifest under {xml_dir}; rerun clean_xml.py"
-        )
+        raise SystemExit(f"Missing pinned QC manifest under {xml_dir}; rerun clean_xml.py")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -263,10 +251,7 @@ def load_qc_inventory(
     actual_hash = sha256_file(inventory_path)
     expected_hash = str(inventory_meta.get("sha256") or "")
     if actual_hash != expected_hash:
-        raise SystemExit(
-            f"QC transform inventory hash mismatch: expected {expected_hash}, "
-            f"found {actual_hash}"
-        )
+        raise SystemExit(f"QC transform inventory hash mismatch: expected {expected_hash}, found {actual_hash}")
     records: dict[tuple[str, str, int, str], dict[str, str]] = {}
     with inventory_path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -275,10 +260,7 @@ def load_qc_inventory(
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise SystemExit(
-                    f"Malformed QC transform inventory "
-                    f"{inventory_path}:{line_number}: {exc}"
-                ) from exc
+                raise SystemExit(f"Malformed QC transform inventory {inventory_path}:{line_number}: {exc}") from exc
             if row.get("disposition") != "retained":
                 continue
             key = (
@@ -288,10 +270,7 @@ def load_qc_inventory(
                 str(row.get("final_xml_id") or row.get("xml_id") or ""),
             )
             if key in records:
-                raise SystemExit(
-                    f"Duplicate QC transform locator at "
-                    f"{inventory_path}:{line_number}: {key}"
-                )
+                raise SystemExit(f"Duplicate QC transform locator at {inventory_path}:{line_number}: {key}")
             records[key] = {
                 name: str(row.get(name) or "")
                 for name in (
@@ -303,9 +282,7 @@ def load_qc_inventory(
                     "standard_after_qc_sha256",
                 )
             }
-    qc_revision = str(
-        manifest.get("formosanbank_qc", {}).get("revision") or ""
-    )
+    qc_revision = str(manifest.get("formosanbank_qc", {}).get("revision") or "")
     if len(qc_revision) != 40:
         raise SystemExit(f"QC manifest has no pinned revision: {manifest_path}")
     return records, manifest
@@ -316,9 +293,7 @@ def load_mt_inventory(
 ) -> tuple[dict[tuple[str, str, int, str], dict[str, object]], dict]:
     manifest_path = xml_dir / "_mt_standard_manifest.json"
     if not manifest_path.is_file():
-        raise SystemExit(
-            f"Missing MT standard manifest under {xml_dir}; rerun standardize_mt_corpus.py"
-        )
+        raise SystemExit(f"Missing MT standard manifest under {xml_dir}; rerun standardize_mt_corpus.py")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -348,17 +323,12 @@ def load_mt_inventory(
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise SystemExit(
-                    f"Malformed MT standard inventory {inventory_path}:{line_number}: {exc}"
-                ) from exc
+                raise SystemExit(f"Malformed MT standard inventory {inventory_path}:{line_number}: {exc}") from exc
             if (
                 str(row.get("mt_standard_profile") or "") != profile_id
-                or str(row.get("mt_standard_profile_sha256") or "")
-                != profile_hash
+                or str(row.get("mt_standard_profile_sha256") or "") != profile_hash
             ):
-                raise SystemExit(
-                    f"MT standard profile mismatch at {inventory_path}:{line_number}"
-                )
+                raise SystemExit(f"MT standard profile mismatch at {inventory_path}:{line_number}")
             if row.get("source_disposition") != "retained":
                 continue
             final_index = row.get("final_element_index")
@@ -376,8 +346,7 @@ def load_mt_inventory(
     expected_records = int(inventory_meta.get("records", -1))
     if expected_records != inventory_rows:
         raise SystemExit(
-            "MT standard inventory count is inconsistent: "
-            f"manifest={expected_records}, inventory={inventory_rows}"
+            f"MT standard inventory count is inconsistent: manifest={expected_records}, inventory={inventory_rows}"
         )
     return records, manifest
 
@@ -402,11 +371,7 @@ def extract_file_targets(
     relative = str(xml_path.relative_to(xml_dir))
     source_path = f"{provenance['repository']}/{provenance['source_path']}"
     pairs = {target: [] for target in targets}
-    parents = {
-        child: parent
-        for parent in root.iter()
-        for child in parent
-    }
+    parents = {child: parent for parent in root.iter() for child in parent}
 
     unit_index = 0
     for element in root.iter():
@@ -425,17 +390,9 @@ def extract_file_targets(
             continue
         final_xml_id = (element.get("id") or "").strip()
         locator = (relative, element.tag, element_index, final_xml_id)
-        qc_record = (
-            qc_records.get(
-                locator
-            )
-            if qc_records is not None
-            else None
-        )
+        qc_record = qc_records.get(locator) if qc_records is not None else None
         if qc_records is not None and qc_record is None:
-            raise ValueError(
-                f"{relative}:{element.tag}:{final_xml_id} has no QC transform record"
-            )
+            raise ValueError(f"{relative}:{element.tag}:{final_xml_id} has no QC transform record")
         qc_record = qc_record or {
             "transform_id": "",
             "standard_origin": "unknown",
@@ -445,13 +402,9 @@ def extract_file_targets(
         }
         mt_record = mt_records.get(locator) if mt_records is not None else None
         if mt_records is not None and mt_record is None:
-            raise ValueError(
-                f"{relative}:{element.tag}:{final_xml_id} has no MT standard record"
-            )
+            raise ValueError(f"{relative}:{element.tag}:{final_xml_id} has no MT standard record")
         if mt_record is None:
-            raise ValueError(
-                "MT standard inventory is required for extraction; run standardize_mt_corpus.py"
-            )
+            raise ValueError("MT standard inventory is required for extraction; run standardize_mt_corpus.py")
         mt_status = str(mt_record.get("mt_normalization_status") or "")
         if mt_status == "ineligible":
             reason = str(mt_record.get("mt_normalization_reason") or "unspecified")
@@ -460,34 +413,22 @@ def extract_file_targets(
             continue
         standard_text = str(mt_record.get("formosan_mt_standard") or "")
         if not standard_text:
-            raise ValueError(
-                f"{relative}:{element.tag}:{final_xml_id} has empty model text with status {mt_status!r}"
-            )
+            raise ValueError(f"{relative}:{element.tag}:{final_xml_id} has empty model text with status {mt_status!r}")
         source_standard = str(mt_record.get("formosan_source_standard") or "")
         original_text = str(mt_record.get("formosan_original_raw") or "")
-        expected_source_hash = hashlib.sha256(
-            source_standard.encode("utf-8")
-        ).hexdigest()
+        expected_source_hash = hashlib.sha256(source_standard.encode("utf-8")).hexdigest()
         expected_mt_hash = hashlib.sha256(standard_text.encode("utf-8")).hexdigest()
         if str(mt_record.get("source_standard_sha256") or "") != expected_source_hash:
-            raise ValueError(
-                f"{relative}:{element.tag}:{final_xml_id} has a source-standard hash mismatch"
-            )
+            raise ValueError(f"{relative}:{element.tag}:{final_xml_id} has a source-standard hash mismatch")
         if str(mt_record.get("mt_standard_sha256") or "") != expected_mt_hash:
-            raise ValueError(
-                f"{relative}:{element.tag}:{final_xml_id} has an MT-standard hash mismatch"
-            )
+            raise ValueError(f"{relative}:{element.tag}:{final_xml_id} has an MT-standard hash mismatch")
         contains_unclear = bool(mt_record.get("contains_unclear_source"))
         source_xml_id = qc_record.get("xml_id") or final_xml_id
 
         target_indices: Counter[str] = Counter()
         for translation in element.findall("TRANSL"):
             target_language = xml_lang(translation)
-            matching_targets = [
-                target
-                for target, target_codes in targets.items()
-                if target_language in target_codes
-            ]
+            matching_targets = [target for target, target_codes in targets.items() if target_language in target_codes]
             if not matching_targets:
                 continue
             target_text = mixed_text(translation)
@@ -524,64 +465,56 @@ def extract_file_targets(
                         ]
                     ).encode("utf-8")
                 )
-                pairs[target].append(ExtractedPair(
-                    row_id=row_id,
-                    source_record_id=source_record_id,
-                    content_sha256=content_hash,
-                    lang_code=source_language,
-                    formosan_sentence=standard_text,
-                    target_text=target_text,
-                    source=source_path,
-                    repository=provenance["repository"],
-                    repository_commit=provenance["repository_commit"],
-                    xml_path=provenance["source_path"],
-                    corpus_id=corpus_id,
-                    xml_id=source_xml_id,
-                    qc_final_xml_id=final_xml_id,
-                    xml_element_index=element_index,
-                    kind_of="standard",
-                    standard_namespace="formosan-mt",
-                    standard_origin=str(mt_record.get("standard_origin") or "missing"),
-                    original_before_qc_sha256=qc_record[
-                        "original_before_qc_sha256"
-                    ],
-                    standard_before_qc_sha256=qc_record[
-                        "standard_before_qc_sha256"
-                    ],
-                    standard_after_qc_sha256=qc_record[
-                        "standard_after_qc_sha256"
-                    ],
-                    qc_transform_id=qc_record["transform_id"],
-                    qc_revision=qc_revision,
-                    dialect=dialect,
-                    row_type=row_type_for_tag(element.tag),
-                    xml_unit_context=unit_context,
-                    formosan_original=original_text,
-                    formosan_standard=source_standard,
-                    formosan_original_raw=original_text,
-                    formosan_source_standard=source_standard,
-                    formosan_mt_standard=standard_text,
-                    source_standard_sha256=str(mt_record.get("source_standard_sha256") or ""),
-                    mt_standard_sha256=str(mt_record.get("mt_standard_sha256") or ""),
-                    mt_normalization_status=mt_status,
-                    mt_normalization_confidence=str(
-                        mt_record.get("mt_normalization_confidence") or ""
-                    ),
-                    mt_eval_eligible=bool(mt_record.get("mt_eval_eligible")),
-                    mt_normalization_reason=str(mt_record.get("mt_normalization_reason") or ""),
-                    mt_transformations=str(mt_record.get("mt_transformations") or "[]"),
-                    mt_unresolved_markers=str(mt_record.get("mt_unresolved_markers") or ""),
-                    speaker_label=str(mt_record.get("speaker_label") or ""),
-                    mt_standard_profile=str(mt_record.get("mt_standard_profile") or ""),
-                    mt_standard_profile_sha256=str(
-                        mt_record.get("mt_standard_profile_sha256") or ""
-                    ),
-                    target_lang=target_language,
-                    translation_index=target_index,
-                    translation_kind=(translation.get("kindOf") or "").strip(),
-                    translation_version=(translation.get("ver") or "").strip(),
-                    contains_unclear=contains_unclear,
-                ))
+                pairs[target].append(
+                    ExtractedPair(
+                        row_id=row_id,
+                        source_record_id=source_record_id,
+                        content_sha256=content_hash,
+                        lang_code=source_language,
+                        formosan_sentence=standard_text,
+                        target_text=target_text,
+                        source=source_path,
+                        repository=provenance["repository"],
+                        repository_commit=provenance["repository_commit"],
+                        xml_path=provenance["source_path"],
+                        corpus_id=corpus_id,
+                        xml_id=source_xml_id,
+                        qc_final_xml_id=final_xml_id,
+                        xml_element_index=element_index,
+                        kind_of="standard",
+                        standard_namespace="formosan-mt",
+                        standard_origin=str(mt_record.get("standard_origin") or "missing"),
+                        original_before_qc_sha256=qc_record["original_before_qc_sha256"],
+                        standard_before_qc_sha256=qc_record["standard_before_qc_sha256"],
+                        standard_after_qc_sha256=qc_record["standard_after_qc_sha256"],
+                        qc_transform_id=qc_record["transform_id"],
+                        qc_revision=qc_revision,
+                        dialect=dialect,
+                        row_type=row_type_for_tag(element.tag),
+                        xml_unit_context=unit_context,
+                        formosan_original=original_text,
+                        formosan_standard=source_standard,
+                        formosan_original_raw=original_text,
+                        formosan_source_standard=source_standard,
+                        formosan_mt_standard=standard_text,
+                        source_standard_sha256=str(mt_record.get("source_standard_sha256") or ""),
+                        mt_standard_sha256=str(mt_record.get("mt_standard_sha256") or ""),
+                        mt_normalization_status=mt_status,
+                        mt_normalization_confidence=str(mt_record.get("mt_normalization_confidence") or ""),
+                        mt_eval_eligible=bool(mt_record.get("mt_eval_eligible")),
+                        mt_normalization_reason=str(mt_record.get("mt_normalization_reason") or ""),
+                        mt_transformations=str(mt_record.get("mt_transformations") or "[]"),
+                        mt_unresolved_markers=str(mt_record.get("mt_unresolved_markers") or ""),
+                        speaker_label=str(mt_record.get("speaker_label") or ""),
+                        mt_standard_profile=str(mt_record.get("mt_standard_profile") or ""),
+                        mt_standard_profile_sha256=str(mt_record.get("mt_standard_profile_sha256") or ""),
+                        target_lang=target_language,
+                        translation_index=target_index,
+                        translation_kind=(translation.get("kindOf") or "").strip(),
+                        translation_version=(translation.get("ver") or "").strip(),
+                        contains_unclear=contains_unclear,
+                    )
+                )
                 target_indices[target] += 1
                 stats[target]["pairs"] += 1
     return pairs, stats
@@ -645,10 +578,7 @@ def target_outputs(args: argparse.Namespace) -> dict[str, Path]:
         target, separator, raw_path = value.partition("=")
         target = target.strip().lower()
         if not separator or target not in TARGET_MAP or not raw_path.strip():
-            raise SystemExit(
-                f"Invalid --output {value!r}; expected one of "
-                f"{sorted(TARGET_MAP)} followed by =PATH"
-            )
+            raise SystemExit(f"Invalid --output {value!r}; expected one of {sorted(TARGET_MAP)} followed by =PATH")
         if target in outputs:
             raise SystemExit(f"Duplicate --output target: {target}")
         outputs[target] = Path(raw_path).expanduser()
@@ -666,10 +596,7 @@ def main() -> None:
     fetch_inventory = load_fetch_inventory(xml_dir)
     qc_inventory, qc_manifest = load_qc_inventory(xml_dir)
     mt_inventory, mt_manifest = load_mt_inventory(xml_dir)
-    actual_xml = {
-        str(path.relative_to(xml_dir))
-        for path in xml_files
-    }
+    actual_xml = {str(path.relative_to(xml_dir)) for path in xml_files}
     expected_xml = set(fetch_inventory)
     missing_xml = sorted(expected_xml - actual_xml)
     unexpected_xml = sorted(actual_xml - expected_xml)
@@ -678,18 +605,13 @@ def main() -> None:
             "Downloaded XML does not match the immutable fetch inventory: "
             f"missing={missing_xml[:10]}, unexpected={unexpected_xml[:10]}"
         )
-    qc_revision = str(
-        qc_manifest["formosanbank_qc"]["revision"]
-    )
+    qc_revision = str(qc_manifest["formosanbank_qc"]["revision"])
     targets = {target: TARGET_MAP[target] for target in outputs}
     tags = wanted_tags(parse_units(args.units))
     all_stats = {target: Counter() for target in outputs}
     file_reports = {target: [] for target in outputs}
     errors: list[str] = []
-    temporary_outputs = {
-        target: output.with_name(f".{output.name}.extracting")
-        for target, output in outputs.items()
-    }
+    temporary_outputs = {target: output.with_name(f".{output.name}.extracting") for target, output in outputs.items()}
     handles = {}
     writers = {}
     row_counts = Counter()
@@ -702,10 +624,7 @@ def main() -> None:
             temporary.unlink(missing_ok=True)
             handle = temporary.open("w", newline="", encoding="utf-8")
             handles[target] = handle
-            output_columns = [
-                column.replace("target_text", target)
-                for column in OUTPUT_COLUMNS
-            ]
+            output_columns = [column.replace("target_text", target) for column in OUTPUT_COLUMNS]
             writer = csv.DictWriter(handle, fieldnames=output_columns)
             writer.writeheader()
             writers[target] = writer
@@ -740,9 +659,7 @@ def main() -> None:
                     source_languages.setdefault(target, pair.lang_code)
                 all_stats[target].update(stats[target])
                 all_stats[target]["files_parsed"] += 1
-                all_stats[target][
-                    "files_with_pairs" if pairs[target] else "files_without_pairs"
-                ] += 1
+                all_stats[target]["files_with_pairs" if pairs[target] else "files_without_pairs"] += 1
                 file_reports[target].append(
                     {
                         "path": relative,
@@ -758,18 +675,11 @@ def main() -> None:
 
         if errors:
             preview = "\n".join(f"  - {error}" for error in errors[:25])
-            suffix = (
-                f"\n  ... and {len(errors) - 25} more"
-                if len(errors) > 25
-                else ""
-            )
+            suffix = f"\n  ... and {len(errors) - 25} more" if len(errors) > 25 else ""
             raise SystemExit(f"Extraction failed:\n{preview}{suffix}")
         empty_targets = [target for target in outputs if not row_counts[target]]
         if empty_targets:
-            raise SystemExit(
-                "No translation pairs found for "
-                f"{', '.join(empty_targets)} under {xml_dir}"
-            )
+            raise SystemExit(f"No translation pairs found for {', '.join(empty_targets)} under {xml_dir}")
         for target, output in outputs.items():
             os.replace(temporary_outputs[target], output)
         committed = True

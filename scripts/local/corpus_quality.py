@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import html
-import json
 import re
 import unicodedata
 from collections import Counter
@@ -56,31 +55,21 @@ GLOSS_TAGS = frozenset(
     RED REL RL RV SG STA STAT SUB TOP TR UV VBLZ VCL
     """.split()
 )
-LEXICAL_GLOSS_TAGS = GLOSS_TAGS | frozenset(
-    {"DEIC", "EN", "EN1", "EN2", "NEUT", "NM", "REFL", "SA", "STIM", "THM"}
-)
+LEXICAL_GLOSS_TAGS = GLOSS_TAGS | frozenset({"DEIC", "EN", "EN1", "EN2", "NEUT", "NM", "REFL", "SA", "STIM", "THM"})
 GLOSS_PART_RE = re.compile(r"[.=_-]+")
 GLOSS_CHAIN_RE = re.compile(r"[=_-]+")
 PERSON_NUMBER_GLOSS_RE = re.compile(r"^[123](?:SG|PL)(?:INCL|EXCL)?$")
 GENERIC_GLOSS_CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
-MIXED_CASE_GLOSS_CODE_RE = re.compile(
-    r"^(?=.{2,8}$)(?=.*[a-z])(?=(?:[^A-Z]*[A-Z]){2})[A-Za-z][A-Za-z0-9]*$"
-)
+MIXED_CASE_GLOSS_CODE_RE = re.compile(r"^(?=.{2,8}$)(?=.*[a-z])(?=(?:[^A-Z]*[A-Z]){2})[A-Za-z][A-Za-z0-9]*$")
 LEXICAL_STRONG_BOUNDARY_RE = re.compile(r"\S[=_]\S")
 LEXICAL_AMBIGUOUS_BOUNDARY_RE = re.compile(r"\S[-/]\S")
 GLOSS_TOKEN_EDGE_PUNCTUATION = "()[]{}<>,;:!?\"“”‘’'"
 TERMINAL_PUNCTUATION = ".!?。！？"
 TRAILING_CLOSERS = "\"'”’)]}》」』"
 ENGLISH_TITLE_WORD_RE = re.compile(r"^[A-Z][A-Za-z'’-]*$")
-CHINESE_LATIN_GLOSS_BOUNDARY_RE = re.compile(
-    r"(?:[\u3400-\u9FFF][=_-][A-Za-z]|[A-Za-z][=_-][\u3400-\u9FFF])"
-)
-CHINESE_STRONG_GLOSS_BOUNDARY_RE = re.compile(
-    r"[\u3400-\u9FFF]=[\u3400-\u9FFF]"
-)
-CHINESE_SHORT_GLOSS_BOUNDARY_RE = re.compile(
-    r"[\u3400-\u9FFF]-[\u3400-\u9FFF]"
-)
+CHINESE_LATIN_GLOSS_BOUNDARY_RE = re.compile(r"(?:[\u3400-\u9FFF][=_-][A-Za-z]|[A-Za-z][=_-][\u3400-\u9FFF])")
+CHINESE_STRONG_GLOSS_BOUNDARY_RE = re.compile(r"[\u3400-\u9FFF]=[\u3400-\u9FFF]")
+CHINESE_SHORT_GLOSS_BOUNDARY_RE = re.compile(r"[\u3400-\u9FFF]-[\u3400-\u9FFF]")
 ENGLISH_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 ENGLISH_ANCHOR_WORDS = frozenset(
     """
@@ -108,9 +97,7 @@ ENGLISH_ROOT_ANALYSIS_RE = re.compile(r"\bthe\s+root\s+is\b", re.IGNORECASE)
 ENGLISH_GLOSS_CODE_RE = re.compile(
     r"\b(?:" + "|".join(sorted(map(re.escape, GLOSS_TAGS), key=len, reverse=True)) + r")\b"
 )
-MORPHEME_ANALYSIS_RE = re.compile(
-    r"(?<!\w)[A-Za-z'’()]+(?:-[A-Za-z'’()]+)+\s*:"
-)
+MORPHEME_ANALYSIS_RE = re.compile(r"(?<!\w)[A-Za-z'’()]+(?:-[A-Za-z'’()]+)+\s*:")
 CHINESE_GRAMMAR_NOTE_RE = re.compile(
     r"[（(][^）)\n]{0,300}(?:"
     r"主事焦點|受事焦點|處所焦點|參考焦點|工具焦點|焦點句|"
@@ -168,9 +155,7 @@ FORMOSAN_INITIAL_CLUSTERS = (
     "tk",
     "tq",
 )
-COMMON_ENGLISH_INITIAL_CLUSTERS = frozenset(
-    {"chr", "phr", "sch", "scr", "shr", "spl", "spr", "squ", "str", "thr"}
-)
+COMMON_ENGLISH_INITIAL_CLUSTERS = frozenset({"chr", "phr", "sch", "scr", "shr", "spl", "spr", "squ", "str", "thr"})
 
 
 @dataclass(frozen=True)
@@ -232,8 +217,7 @@ def is_only_punctuation_or_symbols(value: str) -> bool:
 
 def token_count(value: str) -> int:
     return sum(
-        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token)
-        for token in value.split()
+        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token) for token in value.split()
     )
 
 
@@ -334,10 +318,7 @@ def target_gloss_reason(
 
 def has_numbered_sequence(value: object) -> bool:
     numbered = [int(item) for item in NUMBERED_REFERENCE_RE.findall(str(value))]
-    return any(
-        second == first + 1
-        for first, second in zip(numbered, numbered[1:], strict=False)
-    )
+    return any(second == first + 1 for first, second in zip(numbered, numbered[1:], strict=False))
 
 
 def target_metadata_reason(value: object, *, source: object = "") -> str:
@@ -349,11 +330,7 @@ def target_metadata_reason(value: object, *, source: object = "") -> str:
         return "target_provenance_note"
     if TARGET_TRANSLATION_COMMENTARY_RE.search(text):
         return "target_translation_commentary"
-    if (
-        has_numbered_sequence(text)
-        and not has_numbered_sequence(source)
-        and token_count(str(source)) <= 12
-    ):
+    if has_numbered_sequence(text) and not has_numbered_sequence(source) and token_count(str(source)) <= 12:
         return "target_numbered_multi_reference"
     return ""
 
@@ -362,9 +339,7 @@ def has_appended_linguistic_analysis(value: str, *, target_language: str) -> boo
     """Detect grammatical analysis appended to an otherwise free translation."""
     if target_language == "chinese":
         return bool(
-            CHINESE_GRAMMAR_NOTE_RE.search(value)
-            or CHINESE_DIRECT_GRAMMAR_NOTE_RE.search(value)
-            or "=" in value
+            CHINESE_GRAMMAR_NOTE_RE.search(value) or CHINESE_DIRECT_GRAMMAR_NOTE_RE.search(value) or "=" in value
         )
     if target_language != "english":
         return False
@@ -374,20 +349,14 @@ def has_appended_linguistic_analysis(value: str, *, target_language: str) -> boo
         ENGLISH_GRAMMAR_PHRASE_RE.search(value)
         or len(gloss_codes) >= 2
         or (gloss_codes and MORPHEME_ANALYSIS_RE.search(value))
-        or (
-            ENGLISH_ROOT_ANALYSIS_RE.search(value)
-            and (gloss_codes or MORPHEME_ANALYSIS_RE.search(value))
-        )
+        or (ENGLISH_ROOT_ANALYSIS_RE.search(value) and (gloss_codes or MORPHEME_ANALYSIS_RE.search(value)))
         or len(MORPHEME_ANALYSIS_RE.findall(value)) >= 2
     )
 
 
 def has_malformed_escaping(value: str) -> bool:
     """Detect literal escape debris and duplicated closing quotation marks."""
-    return bool(
-        MALFORMED_ESCAPE_RE.search(value)
-        or REPEATED_CLOSING_QUOTE_RE.search(value)
-    )
+    return bool(MALFORMED_ESCAPE_RE.search(value) or REPEATED_CLOSING_QUOTE_RE.search(value))
 
 
 def has_unbalanced_target_delimiters(value: str) -> bool:
@@ -412,17 +381,13 @@ def english_language_quality(value: str) -> tuple[str, tuple[str, ...]]:
         if word.startswith(FORMOSAN_INITIAL_CLUSTERS):
             orthography_score += 1
         initial_cluster = re.match(r"^[bcdfghjklmnpqrstvwxz]{3,}", word)
-        if (
-            initial_cluster
-            and initial_cluster.group(0)[:3] not in COMMON_ENGLISH_INITIAL_CLUSTERS
-        ):
+        if initial_cluster and initial_cluster.group(0)[:3] not in COMMON_ENGLISH_INITIAL_CLUSTERS:
             orthography_score += 1
         if "'" in word or "’" in word:
             if not re.search(r"(?:'s|'t|'re|'ve|'ll|'d|'m|’s|’t|’re|’ve|’ll|’d|’m)$", word):
                 orthography_score += 1
     if orthography_score >= 2 or (
-        FORMOSAN_SPECIFIC_TARGET_RE.search(value)
-        and has_unbalanced_target_delimiters(value)
+        FORMOSAN_SPECIFIC_TARGET_RE.search(value) and has_unbalanced_target_delimiters(value)
     ):
         return "english_target_language_mismatch", ()
     return "", ("english_language_uncertain",)
@@ -472,18 +437,12 @@ def is_annotation_gloss_code(
     return (
         value in LEXICAL_GLOSS_TAGS
         or PERSON_NUMBER_GLOSS_RE.fullmatch(value) is not None
-        or (
-            allow_mixed_case
-            and MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None
-        )
+        or (allow_mixed_case and MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None)
     )
 
 
 def is_gloss_code(value: str) -> bool:
-    return (
-        is_explicit_gloss_code(value)
-        or MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None
-    )
+    return is_explicit_gloss_code(value) or MIXED_CASE_GLOSS_CODE_RE.fullmatch(value) is not None
 
 
 def has_lexical_morphological_gloss(
@@ -577,9 +536,7 @@ def is_english_heading(value: str) -> bool:
         return False
     words = [word.strip("()[]{}<>,;:\"“”‘’'") for word in text.split()]
     words = [word for word in words if word]
-    return 2 <= len(words) <= 4 and all(
-        ENGLISH_TITLE_WORD_RE.fullmatch(word) is not None for word in words
-    )
+    return 2 <= len(words) <= 4 and all(ENGLISH_TITLE_WORD_RE.fullmatch(word) is not None for word in words)
 
 
 def alignment_quality(
@@ -601,11 +558,7 @@ def alignment_quality(
         or (source_units >= 18 and target_count <= 5)
     ):
         return "obvious_alignment_mismatch", ()
-    heading_like_target = (
-        target_language == "english"
-        and target_count <= 3
-        and is_english_heading(target)
-    )
+    heading_like_target = target_language == "english" and target_count <= 3 and is_english_heading(target)
     if source_units >= 7 and heading_like_target:
         return "target_heading_alignment_mismatch", ()
 
@@ -615,25 +568,14 @@ def alignment_quality(
     if source_units >= 4 and heading_like_target:
         flags.append("heading_like_target")
     target_is_punctuated = has_terminal_punctuation(target)
-    if (
-        target_language == "english"
-        and source_units >= 4
-        and target_count <= 3
-        and not target_is_punctuated
-    ):
+    if target_language == "english" and source_units >= 4 and target_count <= 3 and not target_is_punctuated:
         flags.append("target_fragment")
     first_target_letter = next(
-        (
-            character
-            for character in target
-            if unicodedata.category(character)[0] == "L"
-        ),
+        (character for character in target if unicodedata.category(character)[0] == "L"),
         "",
     )
     english_lexical_evidence = target_language == "english" and (
-        ";" in target
-        or target.lstrip().startswith("(")
-        or (first_target_letter and first_target_letter.islower())
+        ";" in target or target.lstrip().startswith("(") or (first_target_letter and first_target_letter.islower())
     )
     if source_units <= 4 and english_lexical_evidence:
         flags.append("lexical_content_sentence")
@@ -642,11 +584,7 @@ def alignment_quality(
     explanatory_markers = (
         (";" in target or "cf." in target.casefold() or target.count("(") >= 1)
         if target_language == "english"
-        else (
-            "；" in target
-            or ";" in target
-            or target.count("（") + target.count("(") >= 1
-        )
+        else ("；" in target or ";" in target or target.count("（") + target.count("(") >= 1)
     )
     if source_units <= 3 and target_count >= 8 and explanatory_markers:
         flags.append("definition_like_sentence")
@@ -700,11 +638,7 @@ def quality_decision(
         return QualityDecision("quarantine", gloss_reason)
     metadata_reason = target_metadata_reason(target, source=source)
     if metadata_reason:
-        disposition = (
-            "rejected"
-            if metadata_reason == "embedded_missing_translation_marker"
-            else "quarantine"
-        )
+        disposition = "rejected" if metadata_reason == "embedded_missing_translation_marker" else "quarantine"
         return QualityDecision(disposition, metadata_reason)
     if has_malformed_escaping(source):
         return QualityDecision("quarantine", "malformed_source_escaping")
@@ -809,8 +743,7 @@ def normalize_dataframe(
         output[column] = normalized
         output[ledger_column] = ledgers
     output["row_type"] = [
-        normalized_row_type(row_type)
-        for row_type in output.get("row_type", pd.Series([""] * len(output)))
+        normalized_row_type(row_type) for row_type in output.get("row_type", pd.Series([""] * len(output)))
     ]
     return output, transformations
 
@@ -915,21 +848,3 @@ def hashlib_sha256(value: str) -> str:
 
 def reason_counts(rows: Iterable[str]) -> dict[str, int]:
     return dict(sorted(Counter(str(value) for value in rows).items()))
-
-
-def compact_provenance(row: pd.Series) -> str:
-    fields = {
-        key: row.get(key, "")
-        for key in (
-            "row_id",
-            "source_record_id",
-            "repository",
-            "repository_commit",
-            "xml_path",
-            "xml_id",
-            "qc_final_xml_id",
-            "target_lang",
-            "translation_index",
-        )
-    }
-    return json.dumps(fields, ensure_ascii=False, sort_keys=True)

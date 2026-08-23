@@ -8,7 +8,7 @@ import math
 import re
 import unicodedata
 from pathlib import Path
-from typing import Callable, Iterable, Mapping
+from typing import Iterable, Mapping
 
 import pandas as pd
 from experiment_config import read_csv_or_columnar, write_columnar_cache  # noqa: F401
@@ -90,6 +90,7 @@ PARALLEL_CORE_COLUMNS = (
     *MT_STANDARD_REQUIRED_COLUMNS,
 )
 
+
 def normalize_text(value: object) -> str:
     """NFKC + casefold + whitespace collapse for leakage checks."""
     text = unicodedata.normalize("NFKC", "" if pd.isna(value) else str(value))
@@ -107,8 +108,7 @@ def token_count(value: object) -> int:
     """Count whitespace-delimited units that contain letters or numbers."""
     text = normalize_text(value)
     return sum(
-        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token)
-        for token in text.split()
+        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token) for token in text.split()
     )
 
 
@@ -231,7 +231,9 @@ def add_normalized_columns(
     out["_short_entry"] = (out["_formosan_tokens"] <= 2) & (out["_target_tokens"] <= 3)
     out["_is_lexeme"] = out["row_type"].isin({"lexeme", "morpheme"})
     out["_lang_source_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"]
-    out["_target_group_key"] = out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"] + PAIR_SEP + out["_target_key"]
+    out["_target_group_key"] = (
+        out["lang_code"].astype(str) + PAIR_SEP + out["_source_key"] + PAIR_SEP + out["_target_key"]
+    )
     return out
 
 
@@ -264,9 +266,7 @@ def evaluation_candidate_mask(
     flags = frame.get("quality_flags", pd.Series("", index=frame.index)).astype(str)
     combined_tokens = frame["_formosan_tokens"] + frame["_target_tokens"]
     compact_punctuated_sentence = (
-        combined_tokens.ge(min_punctuated_combined_tokens)
-        & frame["_formosan_terminal"]
-        & frame["_target_terminal"]
+        combined_tokens.ge(min_punctuated_combined_tokens) & frame["_formosan_terminal"] & frame["_target_terminal"]
     )
     sufficient_content = combined_tokens.ge(min_combined_tokens) | compact_punctuated_sentence
     return (
@@ -299,48 +299,23 @@ def weighted_apportioned_counts(
 ) -> dict[str, int]:
     """Apportion ``total`` by source weights without exceeding capacities."""
     keys = sorted(set(weights) | set(capacities))
-    normalized_weights = {
-        key: max(0, int(weights.get(key, 0)))
-        for key in keys
-    }
-    normalized_capacities = {
-        key: max(0, int(capacities.get(key, 0)))
-        for key in keys
-    }
+    normalized_weights = {key: max(0, int(weights.get(key, 0))) for key in keys}
+    normalized_capacities = {key: max(0, int(capacities.get(key, 0))) for key in keys}
     available = sum(normalized_capacities.values())
     if total < 0 or total > available:
-        raise ValueError(
-            f"Cannot apportion {total:,} rows from {available:,} eligible rows"
-        )
+        raise ValueError(f"Cannot apportion {total:,} rows from {available:,} eligible rows")
     allocated = {key: 0 for key in keys}
     remaining = total
-    active = {
-        key
-        for key in keys
-        if normalized_capacities[key] > 0
-    }
+    active = {key for key in keys if normalized_capacities[key] > 0}
     while remaining and active:
         weight_total = sum(normalized_weights[key] for key in active)
         if weight_total <= 0:
-            active_weights = {
-                key: normalized_capacities[key] - allocated[key]
-                for key in active
-            }
+            active_weights = {key: normalized_capacities[key] - allocated[key] for key in active}
             weight_total = sum(active_weights.values())
         else:
-            active_weights = {
-                key: normalized_weights[key]
-                for key in active
-            }
-        quotas = {
-            key: remaining * active_weights[key] / weight_total
-            for key in active
-        }
-        saturated = {
-            key
-            for key in active
-            if quotas[key] >= normalized_capacities[key] - allocated[key]
-        }
+            active_weights = {key: normalized_weights[key] for key in active}
+        quotas = {key: remaining * active_weights[key] / weight_total for key in active}
+        saturated = {key for key in active if quotas[key] >= normalized_capacities[key] - allocated[key]}
         if saturated:
             for key in saturated:
                 amount = normalized_capacities[key] - allocated[key]
@@ -349,10 +324,7 @@ def weighted_apportioned_counts(
             active -= saturated
             continue
 
-        floors = {
-            key: math.floor(quota)
-            for key, quota in quotas.items()
-        }
+        floors = {key: math.floor(quota) for key, quota in quotas.items()}
         for key, amount in floors.items():
             allocated[key] += amount
             remaining -= amount
@@ -399,9 +371,7 @@ def mt_standard_contract(df: pd.DataFrame, *, context: str) -> dict[str, str]:
         raise SystemExit(f"{context} contains rows outside the Formosan MT namespace")
     if not df["mt_normalization_status"].astype(str).eq("accepted").all():
         raise SystemExit(f"{context} contains non-accepted MT-standard rows")
-    if not df["formosan_sentence"].astype(str).eq(
-        df["formosan_mt_standard"].astype(str)
-    ).all():
+    if not df["formosan_sentence"].astype(str).eq(df["formosan_mt_standard"].astype(str)).all():
         raise SystemExit(f"{context} violates the formosan_sentence MT-standard alias")
     bool_series(df["mt_eval_eligible"], context=f"{context}:mt_eval_eligible")
     profile_ids = set(df["mt_standard_profile"].astype(str).str.strip())
@@ -424,9 +394,7 @@ def read_parallel_csv(
     # file so chunk boundaries cannot change dtypes or emit noisy warnings.
     selected_columns = None
     if columns is not None:
-        selected_columns = list(
-            dict.fromkeys([*PARALLEL_CORE_COLUMNS, target_col, *columns])
-        )
+        selected_columns = list(dict.fromkeys([*PARALLEL_CORE_COLUMNS, target_col, *columns]))
     df = read_csv_or_columnar(
         path,
         columns=selected_columns,
@@ -470,29 +438,7 @@ def split_counts_by_language(df: pd.DataFrame) -> dict:
     if "split" not in df:
         return {}
     table = pd.crosstab(df["lang_code"], df["split"])
-    return {
-        str(lang): {str(split): int(value) for split, value in row.items()}
-        for lang, row in table.iterrows()
-    }
-
-
-def overlap_stats(train: pd.DataFrame, eval_df: pd.DataFrame) -> dict:
-    stats = {}
-    for name, col in (
-        ("formosan", "_formosan_key"),
-        ("target", "_target_key"),
-        ("pair", "_pair_key"),
-        ("source", "_source_key"),
-    ):
-        train_values = set(train[col].dropna())
-        eval_values = set(eval_df[col].dropna())
-        overlap = train_values & eval_values
-        stats[name] = {
-            "train_unique": len(train_values),
-            "eval_unique": len(eval_values),
-            "overlap_unique": len(overlap),
-        }
-    return stats
+    return {str(lang): {str(split): int(value) for split, value in row.items()} for lang, row in table.iterrows()}
 
 
 def get_lid(code: str) -> str:
@@ -539,41 +485,6 @@ def build_prefix(row: Mapping, direction: str, target_lang: str | None = None) -
         source_tag = target_tag_for(target_language_from_direction(direction, target_lang))
         return f"<to_{code}> <src_{source_tag}> {dialect_tag}"
     raise ValueError(f"Unsupported direction: {direction}")
-
-
-def with_tagged_columns(
-    df: pd.DataFrame,
-    direction: str,
-    target_col: str = "english_sentence",
-    target_lang: str | None = None,
-    use_tags: bool = True,
-    prefix_builder: Callable[[Mapping], str] | None = None,
-) -> pd.DataFrame:
-    out = df.copy()
-    if not use_tags and prefix_builder is None:
-        return out
-    if prefix_builder is None:
-        prefixes = out.apply(
-            lambda row: build_prefix(
-                row,
-                direction,
-                target_lang=target_lang,
-            ),
-            axis=1,
-        )
-    else:
-        prefixes = out.apply(prefix_builder, axis=1)
-    if is_formosan_to_target(direction):
-        out["formosan_sentence"] = (
-            prefixes + " " + out["formosan_sentence"].fillna("").astype(str)
-        ).str.strip()
-    elif is_target_to_formosan(direction):
-        out[target_col] = (
-            prefixes + " " + out[target_col].fillna("").astype(str)
-        ).str.strip()
-    else:
-        raise ValueError(f"Unsupported direction: {direction}")
-    return out
 
 
 def language_sampling_probs(counts: Mapping[str, int], alpha: float) -> dict[str, float]:
