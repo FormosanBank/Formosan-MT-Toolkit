@@ -385,11 +385,9 @@ def write_manifest(
             "language_workers": args.language_workers,
             "analysis_workers": args.analysis_workers,
             "incremental_stage_cache": not args.no_stage_cache,
-            "hard_split_ratios": {
-                "train": args.train_ratio,
-                "validate": args.val_ratio,
-                "test": args.test_ratio,
-            },
+            "hard_split_ratios_by_target": PIPELINE_CONFIG["splits"][
+                "ratios_by_target"
+            ],
             "hard_split_minimum_eval_rows": {
                 "test": args.min_test_rows,
                 "validate": args.min_validate_rows,

@@ -36,6 +36,7 @@ from experiment_config import (  # noqa: E402
     SHARED_SPLIT_FIELDS,
     load_corpus_pipeline_config,
     load_profile,
+    target_split_ratios,
 )
 from formosan_mt_inference import normalize_formosan  # noqa: E402
 from mt_common import (  # noqa: E402
@@ -865,10 +866,10 @@ class LeakageTests(unittest.TestCase):
 
         self.assertEqual(index.conflicts(pd.Index([1, 3]), pd.Index([0, 2])), {0, 2})
 
-    def test_split_targets_use_all_pairs_as_denominator(self) -> None:
+    def test_split_targets_use_human_pairs_as_denominator(self) -> None:
         self.assertEqual(
             split_targets(
-                total_rows=1_000,
+                human_rows=1_000,
                 eligible_total=1_000,
                 test_ratio=0.10,
                 val_ratio=0.05,
@@ -879,7 +880,7 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertEqual(
             split_targets(
-                total_rows=20_000,
+                human_rows=20_000,
                 eligible_total=20_000,
                 test_ratio=0.10,
                 val_ratio=0.05,
@@ -890,7 +891,7 @@ class LeakageTests(unittest.TestCase):
         )
         self.assertEqual(
             split_targets(
-                total_rows=20_000,
+                human_rows=20_000,
                 eligible_total=5_000,
                 test_ratio=0.10,
                 val_ratio=0.05,
@@ -901,7 +902,7 @@ class LeakageTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "requires 3,000"):
             split_targets(
-                total_rows=20_000,
+                human_rows=20_000,
                 eligible_total=2_999,
                 test_ratio=0.10,
                 val_ratio=0.05,
@@ -1213,8 +1214,8 @@ class LeakageTests(unittest.TestCase):
         output, excluded, duplicates, report = build_hard_split(
             keyed,
             target_col="english_sentence",
-            test_ratio=0.10,
-            val_ratio=0.05,
+            test_ratio=0.20,
+            val_ratio=0.10,
             seed=42,
             min_formosan_tokens=1,
             min_target_tokens=1,
@@ -1236,20 +1237,22 @@ class LeakageTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         language = report["languages"]["ami"]
         self.assertEqual(language["rows_total"], 300)
-        self.assertEqual(language["test_rows"], 30)
-        self.assertEqual(language["validate_rows"], 15)
-        self.assertGreaterEqual(language["test_fraction_of_all_input_rows"], 0.10)
-        self.assertGreaterEqual(
-            language["validate_fraction_of_all_input_rows"],
-            0.05,
+        self.assertEqual(language["human_rows"], 240)
+        self.assertEqual(language["test_rows"], 48)
+        self.assertEqual(language["validate_rows"], 24)
+        self.assertEqual(language["human_test_fraction"], 0.20)
+        self.assertEqual(language["human_validate_fraction"], 0.10)
+        self.assertEqual(
+            report["required_human_ratios"],
+            {"train": 0.70, "test": 0.20, "validate": 0.10},
         )
 
         provenance = validate_provenance(output)
         validation = validate_splits(
             output,
             target_col="english_sentence",
-            min_test_ratio=0.10,
-            min_validate_ratio=0.05,
+            min_test_ratio=0.20,
+            min_validate_ratio=0.10,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -1435,7 +1438,7 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(
             source_b_report["target_test_rows"]
             + source_b_report["target_validate_rows"],
-            45,
+            36,
         )
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertTrue(evaluation["row_type"].eq("sentence").all())
@@ -1480,8 +1483,8 @@ class LeakageTests(unittest.TestCase):
             .eq("train")
             .all()
         )
-        self.assertEqual(report["split_counts"]["test"], 30)
-        self.assertEqual(report["split_counts"]["validate"], 15)
+        self.assertEqual(report["split_counts"]["test"], 24)
+        self.assertEqual(report["split_counts"]["validate"], 12)
         self.assertEqual(report["synthetic_eval_rows"], 0)
         validation = validate_splits(
             output,
@@ -1589,14 +1592,8 @@ class LeakageTests(unittest.TestCase):
             .all()
         )
         self.assertEqual(len(output), report["deduplicated_input_rows"])
-        self.assertGreaterEqual(
-            language["test_fraction_of_all_input_rows"],
-            0.10,
-        )
-        self.assertGreaterEqual(
-            language["validate_fraction_of_all_input_rows"],
-            0.05,
-        )
+        self.assertEqual(language["human_test_fraction"], 0.10)
+        self.assertEqual(language["human_validate_fraction"], 0.05)
 
     def test_validate_test_conflicts_are_reallocated_across_sources(self) -> None:
         raw = self.hard_split_fixture()
@@ -1829,10 +1826,18 @@ class TokenizerSetupTests(unittest.TestCase):
             {field: profile_splits[field] for field in SHARED_SPLIT_FIELDS},
             {field: pipeline_splits[field] for field in SHARED_SPLIT_FIELDS},
         )
+        self.assertEqual(
+            target_split_ratios(pipeline_splits, "english"),
+            {"train": 0.70, "validate": 0.10, "test": 0.20},
+        )
+        self.assertEqual(
+            target_split_ratios(pipeline_splits, "chinese"),
+            {"train": 0.85, "validate": 0.05, "test": 0.10},
+        )
 
     def test_experiment_profile_rejects_split_policy_drift(self) -> None:
         profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
-        profile["splits"]["test_ratio"] = 0.05
+        profile["splits"]["ratios_by_target"]["english"]["test"] = 0.05
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "profile.json"
             path.write_text(json.dumps(profile), encoding="utf-8")
@@ -2228,6 +2233,7 @@ class ExperimentManifestTests(unittest.TestCase):
             repository_paths,
         )
         self.assertIn("scripts/shared/reproducibility.py", repository_paths)
+        self.assertIn("scripts/shared/split_policy.py", repository_paths)
         self.assertIn(
             "formosan_mt_experiments/scripts/evaluate_directional.py",
             repository_paths,

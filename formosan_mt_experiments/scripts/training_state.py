@@ -17,6 +17,7 @@ from experiment_config import (
     profile_record,
     sha256_file,
     stable_hash,
+    target_split_ratios,
 )
 from mt_common import write_json
 
@@ -154,15 +155,23 @@ def build_run_contract(args, profile: dict) -> dict:
         raise SystemExit("Corpus validation report does not match the training CSV")
     split_validation = validation.get("split_validation", {})
     expected_split_policy = profile["splits"]
-    expected_minimums = {
-        "test": expected_split_policy["test_ratio"],
-        "validate": expected_split_policy["validate_ratio"],
+    target_language = validation.get("target_language")
+    try:
+        expected_ratios = target_split_ratios(
+            expected_split_policy,
+            str(target_language),
+        )
+    except ValueError as exc:
+        raise SystemExit("Corpus validation has an invalid target language") from exc
+    expected_minimum_rows = {
         "min_test_rows": expected_split_policy["min_test_rows"],
         "min_validate_rows": expected_split_policy["min_validate_rows"],
     }
     if (
         validation.get("profile", {}).get("sha256") != expected_profile["sha256"]
-        or split_validation.get("minimum_ratios") != expected_minimums
+        or split_validation.get("required_human_ratios") != expected_ratios
+        or split_validation.get("minimum_evaluation_rows")
+        != expected_minimum_rows
         or split_validation.get("ngram_jaccard_threshold")
         != expected_split_policy["character_ngram_jaccard_threshold"]
         or split_validation.get("source_ratio_tolerance")

@@ -2109,7 +2109,13 @@ class ExtractionAndCleaningTests(unittest.TestCase):
     def test_sentence_shaped_lexical_material_is_train_only(self) -> None:
         _, english_flags = alignment_quality(
             "mafu qani",
-            "Five only. (It is possible that the speaker intended a longer explanation.)",
+            "(figuratively) Five only.",
+            target_language="english",
+            row_type="sentence",
+        )
+        _, narrative_flags = alignment_quality(
+            "manu tjumaljan nua qaliqali.",
+            "and they told him.",
             target_language="english",
             row_type="sentence",
         )
@@ -2120,8 +2126,8 @@ class ExtractionAndCleaningTests(unittest.TestCase):
             row_type="sentence",
         )
 
-        self.assertIn("definition_like_sentence", english_flags)
-        self.assertIn("length_asymmetry", english_flags)
+        self.assertIn("lexical_content_sentence", english_flags)
+        self.assertNotIn("lexical_content_sentence", narrative_flags)
         self.assertIn("lexical_content_sentence", chinese_flags)
 
         long_source_reason, _ = alignment_quality(
@@ -2191,7 +2197,7 @@ class ExtractionAndCleaningTests(unittest.TestCase):
         )
         flags = dict(zip(accepted["row_id"], accepted["quality_flags"], strict=True))
         self.assertIn("definition_like_sentence", flags["definition"])
-        self.assertIn("lexical_content_sentence", flags["definition"])
+        self.assertNotIn("lexical_content_sentence", flags["definition"])
         self.assertIn("heading_like_target", flags["short-heading"])
         self.assertIn("target_fragment", flags["short-heading"])
         self.assertEqual(flags["compact-sentence"], "")
@@ -3296,7 +3302,7 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                 ).hexdigest()
                 expected_signatures = {
                     "en": "7fc0951c31639cef7ad16c1343d95640f51cbe4466dd778aad2108a18560afb5",
-                    "zh": "1c9d2ccc029d27ddc24c5bc6618be2bf50490bc73eff6111b7e152dadd9c5708",
+                    "zh": "44bcc8b1dc77b9ae355729dd1c7e654769510f9eceab29f9018d8497380456e6",
                 }
                 self.assertEqual(signature, expected_signatures[short])
 

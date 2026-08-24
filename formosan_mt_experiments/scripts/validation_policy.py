@@ -325,12 +325,23 @@ def validate_splits(
             split_report_errors.append("split report is incomplete")
         if split_report.get("ratio_basis") != SPLIT_DEFAULTS["ratio_basis"]:
             split_report_errors.append("split report ratio basis does not match policy")
+        if split_report.get("target_language") != target_language:
+            split_report_errors.append("split report target language does not match corpus")
         if (
             split_report.get("synthetic_eval_policy")
             != SPLIT_DEFAULTS["synthetic_eval_policy"]
         ):
             split_report_errors.append(
                 "split report synthetic evaluation policy does not match policy"
+            )
+        expected_human_ratios = {
+            "train": round(1.0 - min_test_ratio - min_validate_ratio, 12),
+            "test": min_test_ratio,
+            "validate": min_validate_ratio,
+        }
+        if split_report.get("required_human_ratios") != expected_human_ratios:
+            split_report_errors.append(
+                "split report human ratios do not match validation policy"
             )
         expected_length_policy = {
             "min_formosan_tokens": min_formosan_tokens,
@@ -348,36 +359,43 @@ def validate_splits(
         group_candidate = candidate.loc[group.index]
         eligible_group = group[group_candidate]
         group_split = group["split"].astype(str).str.lower()
+        group_synthetic = pivot_origin.loc[group.index].eq("synthetic")
+        human_rows = int((~group_synthetic).sum())
         report_language = report_languages.get(language_key, {})
-        total = int(report_language.get("rows_total", len(group)))
+        reported_human_rows = int(report_language.get("human_rows", human_rows))
         test_rows = int(group_split.eq("test").sum())
         validate_rows = int(group_split.eq("validate").sum())
         required_test = int(
             report_language.get(
                 "target_test_rows",
-                max(math.ceil(total * min_test_ratio), min_test_rows),
+                max(math.ceil(human_rows * min_test_ratio), min_test_rows),
             )
         )
         required_validate = int(
             report_language.get(
                 "target_validate_rows",
-                max(math.ceil(total * min_validate_ratio), min_validate_rows),
+                max(math.ceil(human_rows * min_validate_ratio), min_validate_rows),
             )
         )
         values = {
-            "rows": total,
+            "rows": len(group),
+            "human_rows": human_rows,
+            "synthetic_rows": int(group_synthetic.sum()),
+            "reported_human_rows": reported_human_rows,
             "output_rows": len(group),
             "eligible_sentence_rows": len(eligible_group),
             "train": int(group_split.eq("train").sum()),
             "test": test_rows,
             "validate": validate_rows,
-            "test_ratio": test_rows / max(total, 1),
-            "validate_ratio": validate_rows / max(total, 1),
+            "test_ratio": test_rows / max(human_rows, 1),
+            "validate_ratio": validate_rows / max(human_rows, 1),
+            "final_test_ratio": test_rows / max(len(group), 1),
+            "final_validate_ratio": validate_rows / max(len(group), 1),
             "required_test": required_test,
             "required_validate": required_validate,
         }
         ratios[language_key] = values
-        ratio_mismatch = (
+        ratio_mismatch = reported_human_rows != human_rows or (
             test_rows != required_test or validate_rows != required_validate
             if split_report is not None
             else test_rows < required_test or validate_rows < required_validate
@@ -428,11 +446,11 @@ def validate_splits(
             all_distribution = Counter(human_language["_source_corpus"])
             eligible_distribution = Counter(eligible_language["_source_corpus"])
             language_test = max(
-                math.ceil(len(language_frame) * min_test_ratio),
+                math.ceil(len(human_language) * min_test_ratio),
                 min_test_rows,
             )
             language_validate = max(
-                math.ceil(len(language_frame) * min_validate_ratio),
+                math.ceil(len(human_language) * min_validate_ratio),
                 min_validate_rows,
             )
             evaluation_targets = weighted_apportioned_counts(
@@ -594,9 +612,12 @@ def validate_splits(
         "validate_test_cross_language_diagnostic": (
             validate_test_cross_language_diagnostic
         ),
-        "minimum_ratios": {
+        "required_human_ratios": {
+            "train": round(1.0 - min_test_ratio - min_validate_ratio, 12),
             "test": min_test_ratio,
             "validate": min_validate_ratio,
+        },
+        "minimum_evaluation_rows": {
             "min_test_rows": min_test_rows,
             "min_validate_rows": min_validate_rows,
         },

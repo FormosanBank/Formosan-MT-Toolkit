@@ -26,23 +26,23 @@ class GroupCandidate:
 
 
 def split_targets(
-    total_rows: int,
+    human_rows: int,
     eligible_total: int,
     test_ratio: float,
     val_ratio: float,
     min_test_rows: int,
     min_validate_rows: int,
 ) -> tuple[int, int]:
-    """Size evaluation from all pairs and fail when quality capacity is short."""
-    if total_rows <= 0:
+    """Size evaluation from human pairs and fail when quality capacity is short."""
+    if human_rows <= 0:
         return 0, 0
-    desired_test = max(math.ceil(total_rows * test_ratio), min_test_rows)
-    desired_validate = max(math.ceil(total_rows * val_ratio), min_validate_rows)
+    desired_test = max(math.ceil(human_rows * test_ratio), min_test_rows)
+    desired_validate = max(math.ceil(human_rows * val_ratio), min_validate_rows)
     required = desired_test + desired_validate
     if required > eligible_total:
         raise ValueError(
-            f"All-pair split requires {required:,} evaluation rows from "
-            f"{eligible_total:,} eligible sentences across {total_rows:,} pairs"
+            f"Human-corpus split requires {required:,} evaluation rows from "
+            f"{eligible_total:,} eligible sentences across {human_rows:,} human pairs"
         )
     return desired_test, desired_validate
 
@@ -308,7 +308,7 @@ def source_stratum_targets(
         }
         try:
             test_total, validate_total = split_targets(
-                len(language_frame),
+                len(human_frame),
                 len(eligible),
                 test_ratio,
                 val_ratio,

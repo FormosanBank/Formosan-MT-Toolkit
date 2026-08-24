@@ -570,12 +570,11 @@ def alignment_quality(
     target_is_punctuated = has_terminal_punctuation(target)
     if target_language == "english" and source_units >= 4 and target_count <= 3 and not target_is_punctuated:
         flags.append("target_fragment")
-    first_target_letter = next(
-        (character for character in target if unicodedata.category(character)[0] == "L"),
-        "",
-    )
-    english_lexical_evidence = target_language == "english" and (
-        ";" in target or target.lstrip().startswith("(") or (first_target_letter and first_target_letter.islower())
+    # Lowercase continuations and semicolons are common in aligned narrative
+    # transcripts. A leading parenthetical is the reliable compact-entry signal;
+    # longer explanations are handled by definition_like_sentence below.
+    english_lexical_evidence = (
+        target_language == "english" and target.lstrip().startswith("(")
     )
     if source_units <= 4 and english_lexical_evidence:
         flags.append("lexical_content_sentence")

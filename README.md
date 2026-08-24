@@ -109,10 +109,11 @@ Production builds fail unless all of these conditions hold:
 - only structurally standalone `<W>` entries with natural target text may enter
   as train-only lexemes; ambiguous lexical structures and translations are
   quarantined; source provenance never determines row eligibility;
-- each language reserves 10% of all deduplicated pairs for test and 5% for
-  validation, using only eligible human sentence rows; human source-corpus
-  representation is balanced where group capacity permits;
-- synthetic pivot rows are always train-only;
+- each language splits its deduplicated human pairs 70/10/20
+  train/validation/test for English and 85/5/10 for Chinese, using only eligible
+  human sentence rows in evaluation; human source-corpus representation is
+  balanced where group capacity permits;
+- synthetic pivot rows are appended to training after the human split;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;
 - exact TAME-MT source, target, and pair exposure at 0.95 is zero;

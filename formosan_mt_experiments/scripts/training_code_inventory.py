@@ -59,6 +59,7 @@ ACTIVE_REPOSITORY_FILES = (
     "scripts/local/standardize_mt_corpus.py",
     "scripts/shared/columnar_io.py",
     "scripts/shared/reproducibility.py",
+    "scripts/shared/split_policy.py",
 )
 
 

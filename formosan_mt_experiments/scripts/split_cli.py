@@ -5,8 +5,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from experiment_config import DEFAULT_PROFILE, load_corpus_pipeline_config, load_profile
-from mt_common import direction_choices
+from experiment_config import (
+    DEFAULT_PROFILE,
+    load_corpus_pipeline_config,
+    load_profile,
+    target_split_ratios,
+)
+from mt_common import direction_choices, normalize_target_language
 
 SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 TIER = SPLIT_DEFAULTS["headline_tier"]
@@ -19,12 +24,12 @@ def parse_split_args() -> argparse.Namespace:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--target-lang", choices=["english", "chinese"], default="english")
+    parser.add_argument("--target-lang", choices=["english", "chinese"], default=None)
     parser.add_argument("--target-col")
     parser.add_argument("--output-prefix")
-    parser.add_argument("--train-ratio", type=float, default=SPLIT_DEFAULTS["train_ratio"])
-    parser.add_argument("--val-ratio", type=float, default=SPLIT_DEFAULTS["validate_ratio"])
-    parser.add_argument("--test-ratio", type=float, default=SPLIT_DEFAULTS["test_ratio"])
+    parser.add_argument("--train-ratio", type=float)
+    parser.add_argument("--val-ratio", type=float)
+    parser.add_argument("--test-ratio", type=float)
     parser.add_argument("--seed", type=int, default=SPLIT_DEFAULTS["seed"])
     parser.add_argument(
         "--min-formosan-tokens",
@@ -69,7 +74,21 @@ def parse_split_args() -> argparse.Namespace:
         default=TIER,
         help="Compatibility option; only in_domain_hard is supported.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    ratios = target_split_ratios(
+        SPLIT_DEFAULTS,
+        normalize_target_language(args.target_lang, args.target_col),
+    )
+    supplied = [args.train_ratio, args.val_ratio, args.test_ratio]
+    if any(value is not None for value in supplied) and not all(
+        value is not None for value in supplied
+    ):
+        raise SystemExit("Provide all three split ratios or none of them")
+    if all(value is None for value in supplied):
+        args.train_ratio = ratios["train"]
+        args.val_ratio = ratios["validate"]
+        args.test_ratio = ratios["test"]
+    return args
 
 
 def parse_validation_args() -> argparse.Namespace:
@@ -89,15 +108,14 @@ def parse_validation_args() -> argparse.Namespace:
     parser.add_argument(
         "--split-report",
         type=Path,
-        help="Original hard-split report used to validate all-pair targets.",
+        help="Original hard-split report used to validate human-corpus targets.",
     )
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--direction", choices=direction_choices())
-    parser.add_argument("--min-test-ratio", type=float, default=SPLIT_DEFAULTS["test_ratio"])
+    parser.add_argument("--min-test-ratio", type=float)
     parser.add_argument(
         "--min-validate-ratio",
         type=float,
-        default=SPLIT_DEFAULTS["validate_ratio"],
     )
     parser.add_argument("--min-test-rows", type=int, default=SPLIT_DEFAULTS["min_test_rows"])
     parser.add_argument(
@@ -155,4 +173,12 @@ def parse_validation_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     args.profile = known.profile
+    ratios = target_split_ratios(
+        SPLIT_DEFAULTS,
+        normalize_target_language(args.target_lang, args.target_col),
+    )
+    if args.min_test_ratio is None:
+        args.min_test_ratio = ratios["test"]
+    if args.min_validate_ratio is None:
+        args.min_validate_ratio = ratios["validate"]
     return args

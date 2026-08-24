@@ -204,21 +204,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=PIPELINE_CONFIG["splits"]["train_ratio"],
-    )
-    parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=PIPELINE_CONFIG["splits"]["validate_ratio"],
-    )
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=PIPELINE_CONFIG["splits"]["test_ratio"],
-    )
-    parser.add_argument(
         "--min-formosan-tokens",
         type=int,
         default=PIPELINE_CONFIG["splits"]["min_formosan_tokens"],
@@ -304,9 +289,6 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(
             f"MT standardization profile does not exist: {args.mt_standard_profile}"
         )
-    split_total = args.train_ratio + args.val_ratio + args.test_ratio
-    if abs(split_total - 1.0) > 1e-9:
-        raise SystemExit(f"Hard split ratios must sum to 1.0, found {split_total:.12f}")
     if args.with_pivot and args.pivot_splits.strip().lower() not in {"all", "*"}:
         raise SystemExit("Pivoting now occurs before the single hard split and must use --pivot-splits all")
     if args.skip_artifact_checksums and not args.dry_run:

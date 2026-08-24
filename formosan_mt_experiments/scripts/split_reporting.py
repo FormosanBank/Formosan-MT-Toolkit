@@ -45,6 +45,7 @@ class SplitReportContext:
     ngram_threshold: float
     test_ratio: float
     val_ratio: float
+    target_language: str
     min_formosan_tokens: int
     min_target_tokens: int
     min_combined_tokens: int
@@ -67,6 +68,13 @@ def build_split_report(context: SplitReportContext) -> dict:
     for language, language_frame in output.groupby("lang_code", sort=True):
         language_key = str(language)
         counts = Counter(language_frame["split"])
+        synthetic = language_frame.get(
+            "pivot_origin",
+            pd.Series("original", index=language_frame.index),
+        ).astype(str).eq("synthetic")
+        human_frame = language_frame[~synthetic]
+        human_counts = Counter(human_frame["split"])
+        human_rows = len(human_frame)
         target_test, target_validate = context.targets[language_key]
         context.language_reports[language_key].update(
             {
@@ -74,6 +82,14 @@ def build_split_report(context: SplitReportContext) -> dict:
                 "train_rows": counts["train"],
                 "test_rows": counts["test"],
                 "validate_rows": counts["validate"],
+                "human_train_rows": human_counts["train"],
+                "human_test_rows": human_counts["test"],
+                "human_validate_rows": human_counts["validate"],
+                "human_train_fraction": human_counts["train"] / max(human_rows, 1),
+                "human_test_fraction": human_counts["test"] / max(human_rows, 1),
+                "human_validate_fraction": (
+                    human_counts["validate"] / max(human_rows, 1)
+                ),
                 "test_fraction_of_eligible_sentences": (
                     counts["test"]
                     / max(context.language_reports[language_key]["eligible_sentence_rows"], 1)
@@ -237,6 +253,7 @@ def build_split_report(context: SplitReportContext) -> dict:
         "schema_version": 3,
         "complete": output_complete and not ratio_shortfalls and not source_shortfalls,
         "tier": TIER,
+        "target_language": context.target_language,
         "evaluation_length_policy": {
             "min_formosan_tokens": context.min_formosan_tokens,
             "min_target_tokens": context.min_target_tokens,
@@ -317,7 +334,11 @@ def build_split_report(context: SplitReportContext) -> dict:
         "source_strata": source_reports,
         "source_distribution_total_variation": source_distribution_tvd,
         "ratio_basis": SPLIT_DEFAULTS["ratio_basis"],
-        "required_ratios": {"test": context.test_ratio, "validate": context.val_ratio},
+        "required_human_ratios": {
+            "train": round(1.0 - context.test_ratio - context.val_ratio, 12),
+            "test": context.test_ratio,
+            "validate": context.val_ratio,
+        },
         "ratio_shortfalls": ratio_shortfalls,
         "source_ratio_shortfalls": source_shortfalls,
         "benchmark_registry_input": str(context.registry_in) if context.registry_in else None,

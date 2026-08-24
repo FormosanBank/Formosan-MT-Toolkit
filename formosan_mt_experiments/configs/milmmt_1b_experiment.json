@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "milmmt46-1b-v1-directional-v4",
+  "recipe_id": "milmmt46-1b-v1-directional-v5",
   "model_family": "milmmt",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -17,9 +17,18 @@
     "revision": "9bffa89ca7f6fa44072144171992dd82d52a8e9c"
   },
   "splits": {
-    "train_ratio": 0.85,
-    "validate_ratio": 0.05,
-    "test_ratio": 0.10,
+    "ratios_by_target": {
+      "english": {
+        "train": 0.70,
+        "validate": 0.10,
+        "test": 0.20
+      },
+      "chinese": {
+        "train": 0.85,
+        "validate": 0.05,
+        "test": 0.10
+      }
+    },
     "min_test_rows": 0,
     "min_validate_rows": 0,
     "min_formosan_tokens": 2,
@@ -28,8 +37,8 @@
     "min_punctuated_combined_tokens": 5,
     "max_eval_units_per_side": 384,
     "source_ratio_tolerance": 0.02,
-    "ratio_basis": "all_pairs_by_language_human_rows_by_source",
-    "synthetic_eval_policy": "human_only_source_stratified",
+    "ratio_basis": "deduplicated_human_pairs_by_language_and_source",
+    "synthetic_eval_policy": "train_only_after_human_split",
     "character_ngram_jaccard_threshold": 0.95,
     "tiers": ["in_domain_hard"],
     "headline_tier": "in_domain_hard"
@@ -42,7 +51,7 @@
     "use_metadata": true
   },
   "comparison": {
-    "baseline_recipe_id": "nllb200-spm8k-directional-v7",
+    "baseline_recipe_id": "nllb200-spm8k-directional-v8",
     "budget_basis": "sample_presentations",
     "sample_presentations": 19200000,
     "claim_scope": "matched_data_exposure_not_parameter_or_flop_matched",

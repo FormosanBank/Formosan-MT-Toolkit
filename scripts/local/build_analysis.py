@@ -20,7 +20,12 @@ from build_context import (
     stage_log,
 )
 from build_output import format_split_summary, run_logged
-from pipeline_common import PIPELINE_CONFIG_PATH, load_pipeline_config, sha256_file
+from pipeline_common import (
+    PIPELINE_CONFIG_PATH,
+    load_pipeline_config,
+    sha256_file,
+    target_split_ratios,
+)
 from stage_cache import (
     cached_stage_valid,
     file_inventory,
@@ -74,6 +79,7 @@ def run_analysis_job(
             f"Cannot build {job.target_lang} hard splits; missing {job.input_csv}"
         )
     out_dir = output_root / f"splits_{job.short}_v1"
+    ratios = target_split_ratios(PIPELINE_CONFIG["splits"], job.target_lang)
     run_stage(
         [
             PYTHON,
@@ -89,11 +95,11 @@ def run_analysis_job(
             "--output-dir",
             str(out_dir),
             "--train-ratio",
-            str(args.train_ratio),
+            str(ratios["train"]),
             "--val-ratio",
-            str(args.val_ratio),
+            str(ratios["validate"]),
             "--test-ratio",
-            str(args.test_ratio),
+            str(ratios["test"]),
             "--min-formosan-tokens",
             str(args.min_formosan_tokens),
             "--min-target-tokens",
@@ -137,9 +143,9 @@ def run_analysis_job(
             "--target-lang",
             job.target_lang,
             "--min-test-ratio",
-            str(args.test_ratio),
+            str(ratios["test"]),
             "--min-validate-ratio",
-            str(args.val_ratio),
+            str(ratios["validate"]),
             "--min-test-rows",
             str(args.min_test_rows),
             "--min-validate-rows",
@@ -218,9 +224,7 @@ def analysis_stage_key(
                 ],
                 paths.root,
             ),
-            "train_ratio": args.train_ratio,
-            "validate_ratio": args.val_ratio,
-            "test_ratio": args.test_ratio,
+            "ratios_by_target": PIPELINE_CONFIG["splits"]["ratios_by_target"],
             "min_formosan_tokens": args.min_formosan_tokens,
             "min_target_tokens": args.min_target_tokens,
             "min_combined_tokens": args.min_combined_tokens,
@@ -245,6 +249,7 @@ def analysis_stage_key(
             script("formosan_mt_experiments/scripts/validation_similarity.py"),
             script("scripts/shared/columnar_io.py"),
             script("scripts/shared/reproducibility.py"),
+            script("scripts/shared/split_policy.py"),
             script("formosan_mt_experiments/configs/default_experiment.json"),
         ],
     )

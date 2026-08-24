@@ -40,9 +40,18 @@
   },
   "splits": {
     "seed": 42,
-    "train_ratio": 0.85,
-    "validate_ratio": 0.05,
-    "test_ratio": 0.10,
+    "ratios_by_target": {
+      "english": {
+        "train": 0.70,
+        "validate": 0.10,
+        "test": 0.20
+      },
+      "chinese": {
+        "train": 0.85,
+        "validate": 0.05,
+        "test": 0.10
+      }
+    },
     "min_test_rows": 0,
     "min_validate_rows": 0,
     "character_ngram_jaccard_threshold": 0.95,
@@ -54,8 +63,8 @@
     "max_eval_units_per_side": 384,
     "lexical_eval": false,
     "synthetic_eval": false,
-    "synthetic_eval_policy": "human_only_source_stratified",
-    "ratio_basis": "all_pairs_by_language_human_rows_by_source",
+    "synthetic_eval_policy": "train_only_after_human_split",
+    "ratio_basis": "deduplicated_human_pairs_by_language_and_source",
     "headline_tier": "in_domain_hard"
   },
   "exposure_audit": {

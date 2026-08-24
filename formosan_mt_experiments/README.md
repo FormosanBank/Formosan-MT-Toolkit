@@ -34,9 +34,11 @@ domain labels; the corpus and model contracts contain no domain classifier or
 domain tags.
 
 - the corpus, profile, standardization namespace, and artifact hashes;
-- 5/10 validation/test proportions from all deduplicated pairs in
-  every language, with capacity-aware source-corpus representation;
-- human sentence references only in evaluation; synthetic pivots are train-only;
+- 70/10/20 train/validation/test proportions from deduplicated human English
+  pairs and 85/5/10 from deduplicated human Chinese pairs in every language,
+  with capacity-aware source-corpus representation;
+- human sentence references only in evaluation; synthetic pivots are appended
+  to training after the human split;
 - no lexical, morpheme, short, or ambiguous-normalization
   evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts

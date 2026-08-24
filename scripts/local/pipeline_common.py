@@ -17,6 +17,10 @@ from reproducibility import (  # noqa: E402,F401
     sha256_file,
     stable_json_hash,
 )
+from split_policy import (  # noqa: E402,F401
+    target_split_ratios,
+    validate_target_split_ratios,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "corpus_pipeline.json"
@@ -57,20 +61,17 @@ def load_pipeline_config() -> dict[str, Any]:
     ):
         raise RuntimeError("Corpus pipeline has an invalid sentence-only pivot policy")
     splits = value.get("splits", {})
-    ratios = [
-        splits.get("train_ratio"),
-        splits.get("validate_ratio"),
-        splits.get("test_ratio"),
-    ]
+    try:
+        validate_target_split_ratios(splits)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Corpus pipeline has invalid target split ratios") from exc
     if (
-        not all(isinstance(ratio, (int, float)) and 0 <= ratio <= 1 for ratio in ratios)
-        or abs(sum(ratios) - 1.0) > 1e-9
-        or splits.get("lexical_eval") is not False
+        splits.get("lexical_eval") is not False
         or splits.get("synthetic_eval") is not False
         or splits.get("synthetic_eval_policy")
-        != "human_only_source_stratified"
+        != "train_only_after_human_split"
         or splits.get("ratio_basis")
-        != "all_pairs_by_language_human_rows_by_source"
+        != "deduplicated_human_pairs_by_language_and_source"
         or not isinstance(splits.get("source_ratio_tolerance"), (int, float))
         or not 0 <= splits["source_ratio_tolerance"] <= 1
         or any(

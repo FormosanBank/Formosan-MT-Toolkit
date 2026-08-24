@@ -365,7 +365,7 @@ Commercial AI use is prohibited without prior written permission. See the [Formo
 {chr(10).join(summary_rows)}
 | **Total** | **{total:,}** | **{sum(v['splits']['train'] for v in configs.values()):,}** | **{sum(v['splits']['validate'] for v in configs.values()):,}** | **{sum(v['splits']['test'] for v in configs.values()):,}** | **{sum(v['synthetic_train'] for v in configs.values()):,}** |
 
-Every language is split approximately 85% train, 5% validation, and 10% test. Evaluation contains only eligible human sentence references. Synthetic pivots and short entries are train-only.
+Human pairs in every language use 70% train, 10% validation, and 20% test for Formosan-English, and 85% train, 5% validation, and 10% test for Formosan-Chinese. Evaluation contains only eligible human sentence references. Synthetic pivots and short entries are added to training, so final augmented-corpus percentages are more train-heavy.
 
 ## Languages
 

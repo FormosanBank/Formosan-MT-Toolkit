@@ -16,15 +16,18 @@ SHARED_SCRIPTS = PROJECT_ROOT / "scripts" / "shared"
 sys.path.insert(0, str(SHARED_SCRIPTS))
 from columnar_io import read_csv_or_columnar, write_columnar_cache  # noqa: E402,F401,I001
 from reproducibility import sha256_file, stable_json_hash  # noqa: E402
+from split_policy import (  # noqa: E402,F401
+    target_split_ratios,
+    validate_target_split_ratios,
+)
+
 DEFAULT_PROFILE = EXPERIMENT_ROOT / "configs" / "default_experiment.json"
 MILMMT_PROFILE = EXPERIMENT_ROOT / "configs" / "milmmt_1b_experiment.json"
 CORPUS_PIPELINE_CONFIG = PROJECT_ROOT / "config" / "corpus_pipeline.json"
 MODEL_FAMILIES = {"nllb", "milmmt"}
 
 SHARED_SPLIT_FIELDS = (
-    "train_ratio",
-    "validate_ratio",
-    "test_ratio",
+    "ratios_by_target",
     "min_test_rows",
     "min_validate_rows",
     "min_formosan_tokens",
@@ -47,6 +50,10 @@ def load_corpus_pipeline_config() -> dict[str, Any]:
         raise SystemExit(f"Cannot load corpus pipeline config {CORPUS_PIPELINE_CONFIG}: {exc}") from exc
     if pipeline.get("schema_version") != 3 or pipeline.get("pipeline_version") != "formosan-mt-corpus-v3":
         raise SystemExit("Unsupported corpus pipeline configuration")
+    try:
+        validate_target_split_ratios(pipeline.get("splits", {}))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit("Corpus pipeline has invalid target split ratios") from exc
     return pipeline
 
 

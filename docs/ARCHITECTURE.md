@@ -193,10 +193,12 @@ pairwise split labels and builds the model-facing split. It:
 1. deduplicates canonical source-target pairs;
 2. locks lexical, morpheme, ambiguous-normalization, MT-ineligible, and
    lexical-like rows out of evaluation;
-3. reserves 5/10 validation/test rows from all deduplicated pairs in every
-   language, but fills those quotas only with eligible human sentences;
-4. keeps every synthetic pivot row in training and balances evaluation across
-   human source corpora where indivisible leakage groups permit;
+3. splits deduplicated human pairs by language: English uses 70/10/20 and
+   Chinese uses 85/5/10 train/validation/test, with evaluation filled only by
+   eligible human sentences;
+4. appends every retained synthetic pivot row to training and balances
+   evaluation across human source corpora where indivisible leakage groups
+   permit;
 5. keeps exact and one-edit variants together, then removes held-out candidates
    at or above 0.95 character 3/4/5-gram Jaccard
    conflicts, blocks their full current similarity neighborhood, then refills
@@ -209,11 +211,14 @@ pairwise split labels and builds the model-facing split. It:
 independent validation, and model profiles load the same values; profile drift
 fails before training.
 
-The ratio denominator is every deduplicated pair in each language. Test reserves
-10% and validation reserves 5% of that total, but both splits are populated
-only with evaluation-eligible sentences. Source-corpus targets use the same
-human-source distribution and are constrained by each source's eligible
-capacity; unfillable shares are redistributed within the language.
+The ratio denominator is every deduplicated human pair in each language.
+English reserves 20% for test and 10% for validation. Chinese reserves 10% for
+test and 5% for validation. Evaluation is populated only with eligible human
+sentences. Synthetic rows do not change those quotas and are added to training
+afterward, so final augmented-corpus percentages are intentionally more
+train-heavy. Source-corpus targets follow the human-source distribution and are
+constrained by each source's eligible capacity; unfillable shares are
+redistributed within the language.
 Document overlap is reported as a diagnostic because some source corpora
 serialize thousands of unrelated rows in one XML file; treating that file as an
 indivisible split unit would recreate the source imbalance this stage prevents.

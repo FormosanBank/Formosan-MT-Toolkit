@@ -274,21 +274,24 @@ def build_hard_split(
     for language, language_frame in frame.groupby("lang_code", sort=True):
         index = language_frame.index
         eligible_total = int(candidate_mask.loc[index].sum())
+        synthetic_rows = int(synthetic.loc[index].sum())
+        human_rows = len(language_frame) - synthetic_rows
         test_target, validate_target = targets[str(language)]
         language_reports[str(language)] = {
             "rows_total": len(language_frame),
+            "human_rows": human_rows,
             "eligible_sentence_rows": int(human_candidate.loc[index].sum()),
             "group_safe_human_sentence_rows": eligible_total,
             "eligible_human_sentence_rows": int(
                 human_candidate.loc[index].sum()
             ),
             "eligible_synthetic_sentence_rows": 0,
-            "synthetic_rows": int(synthetic.loc[index].sum()),
+            "synthetic_rows": synthetic_rows,
             "lexical_rows": int(
                 language_frame["row_type"].isin({"lexeme", "morpheme"}).sum()
             ),
-            "evaluation_ineligible_rows": int(
-                len(language_frame) - human_candidate.loc[index].sum()
+            "evaluation_ineligible_human_rows": int(
+                human_rows - human_candidate.loc[index].sum()
             ),
             "target_test_rows": test_target,
             "target_validate_rows": validate_target,
@@ -333,7 +336,7 @@ def build_hard_split(
         if current_targets != targets:
             raise SystemExit(
                 "Similarity filtering left insufficient eligible rows for "
-                "the all-pair language targets"
+                "the human-corpus language targets"
             )
         for group_id in set(assignments) - registry_groups:
             assignments.pop(group_id)
@@ -486,6 +489,9 @@ def build_hard_split(
             ngram_threshold=ngram_threshold,
             test_ratio=test_ratio,
             val_ratio=val_ratio,
+            target_language=(
+                "chinese" if target_col == "chinese_sentence" else "english"
+            ),
             min_formosan_tokens=min_formosan_tokens,
             min_target_tokens=min_target_tokens,
             min_combined_tokens=min_combined_tokens,
