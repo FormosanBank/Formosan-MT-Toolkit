@@ -71,6 +71,7 @@ from split_allocation import (  # noqa: E402
     GroupCandidate,
     choose_groups,
     fill_language_shortfalls,
+    group_assignment_tolerance,
     split_targets,
 )
 from split_similarity import (  # noqa: E402
@@ -668,6 +669,16 @@ class LeakageTests(unittest.TestCase):
 
         self.assertGreaterEqual(validation_rows, 33)
         self.assertGreaterEqual(test_rows, 98)
+
+    def test_group_assignment_tolerance_matches_indivisible_group_size(self) -> None:
+        indexes = pd.Index(range(6))
+        group_ids = pd.Series([10, 10, 10, 10, 20, 30], index=indexes)
+        candidates = pd.Series(True, index=indexes)
+
+        self.assertEqual(
+            group_assignment_tolerance(indexes, group_ids, candidates),
+            3,
+        )
 
     def test_one_character_variants_conflict_with_evaluation(self) -> None:
         evaluation = pd.DataFrame({"lang_code": ["ami"], "text": ["malikoda"]}, index=[100])

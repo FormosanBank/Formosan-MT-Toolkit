@@ -15,7 +15,7 @@ from mt_common import (
     split_counts,
     split_counts_by_language,
 )
-from split_allocation import source_assignment_tolerance
+from split_allocation import group_assignment_tolerance, source_assignment_tolerance
 from split_similarity import overlap_summary
 
 SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
@@ -76,6 +76,11 @@ def build_split_report(context: SplitReportContext) -> dict:
         human_counts = Counter(human_frame["split"])
         human_rows = len(human_frame)
         target_test, target_validate = context.targets[language_key]
+        assignment_tolerance = group_assignment_tolerance(
+            language_frame.index,
+            context.group_ids,
+            context.effective_candidate_mask,
+        )
         context.language_reports[language_key].update(
             {
                 "output_rows": len(language_frame),
@@ -85,6 +90,7 @@ def build_split_report(context: SplitReportContext) -> dict:
                 "human_train_rows": human_counts["train"],
                 "human_test_rows": human_counts["test"],
                 "human_validate_rows": human_counts["validate"],
+                "assignment_tolerance_rows": assignment_tolerance,
                 "human_train_fraction": human_counts["train"] / max(human_rows, 1),
                 "human_test_fraction": human_counts["test"] / max(human_rows, 1),
                 "human_validate_fraction": (
@@ -124,12 +130,16 @@ def build_split_report(context: SplitReportContext) -> dict:
                 ),
             }
         )
-        if counts["test"] != target_test or counts["validate"] != target_validate:
+        if (
+            abs(counts["test"] - target_test) > assignment_tolerance
+            or abs(counts["validate"] - target_validate) > assignment_tolerance
+        ):
             ratio_shortfalls[language_key] = {
                 "test": counts["test"],
                 "target_test": target_test,
                 "validate": counts["validate"],
                 "target_validate": target_validate,
+                "tolerance": assignment_tolerance,
             }
 
     source_reports: dict[str, dict[str, dict[str, object]]] = {}

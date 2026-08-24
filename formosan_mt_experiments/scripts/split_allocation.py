@@ -411,6 +411,17 @@ def fill_assignments(
             current = stratum_group_ids.map(assignments)
 
 
+def group_assignment_tolerance(
+    indexes: pd.Index,
+    group_ids: pd.Series,
+    candidate_mask: pd.Series,
+) -> int:
+    eligible_indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
+    group_sizes = group_ids.loc[eligible_indexes].value_counts()
+    largest_group = int(group_sizes.max()) if not group_sizes.empty else 1
+    return largest_group - 1
+
+
 def source_assignment_tolerance(
     frame: pd.DataFrame,
     indexes: pd.Index,
@@ -422,16 +433,13 @@ def source_assignment_tolerance(
         "pivot_origin",
         pd.Series("original", index=source_frame.index),
     ).astype(str).eq("synthetic")
-    eligible_indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
-    group_sizes = group_ids.loc[eligible_indexes].value_counts()
-    largest_group = int(group_sizes.max()) if not group_sizes.empty else 1
     return max(
         2,
         math.ceil(
             int((~synthetic).sum())
             * SPLIT_DEFAULTS["source_ratio_tolerance"]
         ),
-        largest_group - 1,
+        group_assignment_tolerance(indexes, group_ids, candidate_mask),
     )
 
 

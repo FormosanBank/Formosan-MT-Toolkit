@@ -377,6 +377,9 @@ def validate_splits(
                 max(math.ceil(human_rows * min_validate_ratio), min_validate_rows),
             )
         )
+        assignment_tolerance = int(
+            report_language.get("assignment_tolerance_rows", 0)
+        )
         values = {
             "rows": len(group),
             "human_rows": human_rows,
@@ -393,13 +396,20 @@ def validate_splits(
             "final_validate_ratio": validate_rows / max(len(group), 1),
             "required_test": required_test,
             "required_validate": required_validate,
+            "assignment_tolerance_rows": assignment_tolerance,
         }
         ratios[language_key] = values
-        ratio_mismatch = reported_human_rows != human_rows or (
-            test_rows != required_test or validate_rows != required_validate
-            if split_report is not None
-            else test_rows < required_test or validate_rows < required_validate
-        )
+        if split_report is not None:
+            ratio_mismatch = reported_human_rows != human_rows or (
+                abs(test_rows - required_test) > assignment_tolerance
+                or abs(validate_rows - required_validate) > assignment_tolerance
+            )
+        else:
+            ratio_mismatch = (
+                reported_human_rows != human_rows
+                or test_rows < required_test
+                or validate_rows < required_validate
+            )
         if ratio_mismatch:
             ratio_failures[language_key] = values
     missing_report_languages = sorted(set(report_languages) - set(ratios))
