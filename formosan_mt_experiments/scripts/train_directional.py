@@ -73,7 +73,14 @@ def compute_training_loss(
 ) -> torch.Tensor:
     """Compute one training loss without duplicate NLLB cross-entropy work."""
     if model_family == "nllb" and label_smoothing > 0:
-        decoder_input_ids = model.prepare_decoder_input_ids_from_labels(labels=labels)
+        pad_token_id = model.config.pad_token_id
+        decoder_start_token_id = model.config.decoder_start_token_id
+        if pad_token_id is None or decoder_start_token_id is None:
+            raise ValueError("NLLB requires pad and decoder-start token IDs")
+        decoder_input_ids = labels.new_empty(labels.shape)
+        decoder_input_ids[:, 0] = decoder_start_token_id
+        decoder_input_ids[:, 1:] = labels[:, :-1]
+        decoder_input_ids.masked_fill_(decoder_input_ids.eq(-100), pad_token_id)
         outputs = model(
             input_ids=encoded["input_ids"],
             attention_mask=encoded["attention_mask"],

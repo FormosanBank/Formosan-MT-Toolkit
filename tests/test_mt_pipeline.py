@@ -559,9 +559,10 @@ class MilmmtRuntimeTests(unittest.TestCase):
         class Model:
             def __init__(self):
                 self.call = None
-
-            def prepare_decoder_input_ids_from_labels(self, *, labels):
-                return labels.masked_fill(labels.eq(-100), 0)
+                self.config = SimpleNamespace(
+                    pad_token_id=0,
+                    decoder_start_token_id=2,
+                )
 
             def __call__(self, **kwargs):
                 self.call = kwargs
@@ -583,6 +584,7 @@ class MilmmtRuntimeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertNotIn("labels", model.call)
         self.assertIn("decoder_input_ids", model.call)
+        self.assertEqual(model.call["decoder_input_ids"].tolist(), [[2, 1, 2]])
 
     def test_checkpoint_clone_excludes_optimizer_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
