@@ -60,7 +60,7 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 | Tokenizer | Formosan-aware SentencePiece extension |
 | Added pieces | 8,192 |
 | Max updates | 300,000 |
-| Microbatch / accumulation | 8 / 8 |
+| Microbatch / accumulation | 32 / 2 |
 | Maximum length | 384 |
 | Learning rate | `2e-5` |
 | Language sampling exponent | `0.5` |
@@ -78,7 +78,7 @@ NLLB generation starts the decoder with EOS and selects the target with
 | Tokenizer | Native Gemma 3 tokenizer |
 | Objective | Full-parameter response-only causal SFT |
 | Max updates | 300,000 |
-| Microbatch / accumulation | 8 / 8 |
+| Microbatch / accumulation | 32 / 2 |
 | Effective batch | 64 |
 | Maximum length | 512 |
 | Learning rate | `2e-5` |
@@ -105,9 +105,18 @@ Architecture-specific settings remain native. NLLB uses its Formosan SPM8k
 tokenizer, language/dialect control tokens, Adafactor, label smoothing, and
 encoder-decoder loss. MiLMMT uses its unchanged Gemma tokenizer, Xiaomi
 language-name prompt plus a dialect line, AdamW with inverse-square-root decay,
-response-only causal loss, and gradient checkpointing. Its 512-token limit is
-shared by prompt, source, and response;
+response-only causal loss, and fused optimizer kernels. Gradient checkpointing
+is disabled for the H200 comparison because the 32-row physical batch fits in
+memory. Its 512-token limit is shared by prompt, source, and response;
 NLLB applies its 384-token limit independently to source and target.
+
+Both profiles present each optimizer update as two physical batches of 32
+examples. Each physical batch contains four eight-row language-sampling chunks,
+so an update still contains eight independently sampled languages. Tokenization
+of the next update overlaps GPU work, and generation validation uses stable
+length sorting with batches of 32 for NLLB and 16 for MiLMMT. These throughput
+changes preserve the sampled examples, update count, effective batch, and
+checkpoint-selection policy.
 
 This is a matched-data-exposure comparison, not a parameter- or FLOP-matched
 architecture experiment: MiLMMT has about 1B parameters and NLLB about 600M.
@@ -144,9 +153,11 @@ for the primary NLLB comparison. Learning-rate sweeps are separate ablations,
 not replacements for that run. Use distinct `RUN_STAMP` values and export
 `SEED=42`, `SEED=43`, or `SEED=44` for replicated final experiments.
 
-The comparison microbatch targets an H200-class GPU. On smaller cards, keep
-the effective batch at 64 by lowering `BATCH_SIZE` and increasing
-`GRAD_ACCUM_STEPS` proportionally.
+The comparison microbatch targets an H200-class GPU. On smaller cards, keep the
+effective batch at 64 by lowering `BATCH_SIZE` and increasing
+`GRAD_ACCUM_STEPS` proportionally. `BATCH_SIZE` must remain divisible by
+`LANGUAGE_SAMPLING_CHUNK_SIZE`; use a smaller chunk only when the physical batch
+is below eight.
 
 ## Slurm Submission
 

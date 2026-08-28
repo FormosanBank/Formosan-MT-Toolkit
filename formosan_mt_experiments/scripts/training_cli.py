@@ -43,6 +43,12 @@ def parse_training_args() -> tuple[argparse.Namespace, dict]:
     parser.add_argument("--steps", type=int, default=defaults["steps"], help="Optimizer update steps.")
     parser.add_argument("--batch-size", type=int, default=defaults["batch_size"])
     parser.add_argument("--grad-accum-steps", type=int, default=defaults["grad_accum_steps"])
+    parser.add_argument(
+        "--language-sampling-chunk-size",
+        type=int,
+        default=defaults["language_sampling_chunk_size"],
+        help="Rows sampled from one language before chunks are combined into a physical batch.",
+    )
     parser.add_argument("--max-length", type=int, default=defaults["max_length"])
     parser.add_argument("--learning-rate", type=float, default=defaults["learning_rate"])
     parser.add_argument("--warmup-steps", type=int, default=defaults["warmup_steps"])
@@ -80,6 +86,11 @@ def parse_training_args() -> tuple[argparse.Namespace, dict]:
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
         default=bool(defaults.get("gradient_checkpointing", False)),
+    )
+    parser.add_argument(
+        "--fused-optimizer",
+        action=argparse.BooleanOptionalAction,
+        default=bool(defaults.get("fused_optimizer", False)),
     )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument(
@@ -152,8 +163,7 @@ def parse_training_args() -> tuple[argparse.Namespace, dict]:
     direction_target = target_language_from_direction(args.direction, args.target_lang)
     if direction_target != args.target_lang:
         raise SystemExit(
-            f"--direction {args.direction!r} targets {direction_target}, "
-            f"but --target-lang is {args.target_lang!r}."
+            f"--direction {args.direction!r} targets {direction_target}, but --target-lang is {args.target_lang!r}."
         )
     if args.eval_interval <= 0:
         raise SystemExit("--eval-interval must be positive because best-model selection requires validation.")
@@ -167,4 +177,10 @@ def parse_training_args() -> tuple[argparse.Namespace, dict]:
         raise SystemExit("--lexical-row-sampling-weight must be greater than 0 and at most 1.")
     if not 0.0 <= args.dialect_tag_dropout <= 1.0:
         raise SystemExit("--dialect-tag-dropout must be between 0 and 1.")
+    if args.batch_size <= 0 or args.grad_accum_steps <= 0:
+        raise SystemExit("--batch-size and --grad-accum-steps must be positive.")
+    if args.language_sampling_chunk_size <= 0:
+        raise SystemExit("--language-sampling-chunk-size must be positive.")
+    if args.batch_size % args.language_sampling_chunk_size:
+        raise SystemExit("--batch-size must be divisible by --language-sampling-chunk-size.")
     return args, profile

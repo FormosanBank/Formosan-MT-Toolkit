@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 from pathlib import Path
@@ -27,10 +28,7 @@ def metric_value(metrics: dict, name: str) -> float:
         return float(metrics[name])
     if name.startswith("macro_"):
         metric = name.removeprefix("macro_")
-        values = [
-            float(language_metrics[metric])
-            for language_metrics in metrics["generation"]["by_language"].values()
-        ]
+        values = [float(language_metrics[metric]) for language_metrics in metrics["generation"]["by_language"].values()]
         if not values:
             raise ValueError(f"Cannot compute {name} without per-language metrics")
         return float(np.mean(values))
@@ -79,6 +77,29 @@ def save_resume_checkpoint(model, tokenizer, optimizer, scheduler, scaler, path:
         },
         tmp / "trainer_state.pt",
     )
+    shutil.rmtree(path, ignore_errors=True)
+    tmp.replace(path)
+
+
+def clone_model_checkpoint(source: Path, path: Path, metadata: dict) -> None:
+    """Clone model/tokenizer files without serializing the same weights twice."""
+    tmp = path.with_name(f"{path.name}.tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for source_path in source.rglob("*"):
+        relative = source_path.relative_to(source)
+        if relative == Path("trainer_state.pt") or relative == Path("experiment_metadata.json"):
+            continue
+        destination = tmp / relative
+        if source_path.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source_path, destination)
+        except OSError:
+            shutil.copy2(source_path, destination)
+    write_json(tmp / "experiment_metadata.json", metadata)
     shutil.rmtree(path, ignore_errors=True)
     tmp.replace(path)
 
@@ -170,12 +191,9 @@ def build_run_contract(args, profile: dict) -> dict:
     if (
         validation.get("profile", {}).get("sha256") != expected_profile["sha256"]
         or split_validation.get("required_human_ratios") != expected_ratios
-        or split_validation.get("minimum_evaluation_rows")
-        != expected_minimum_rows
-        or split_validation.get("ngram_jaccard_threshold")
-        != expected_split_policy["character_ngram_jaccard_threshold"]
-        or split_validation.get("source_ratio_tolerance")
-        != expected_split_policy["source_ratio_tolerance"]
+        or split_validation.get("minimum_evaluation_rows") != expected_minimum_rows
+        or split_validation.get("ngram_jaccard_threshold") != expected_split_policy["character_ngram_jaccard_threshold"]
+        or split_validation.get("source_ratio_tolerance") != expected_split_policy["source_ratio_tolerance"]
         or split_validation.get("ratio_basis") != expected_split_policy["ratio_basis"]
         or split_validation.get("synthetic_eval_rows") != 0
         or split_validation.get("synthetic_eval_allowed") is not False
@@ -201,11 +219,7 @@ def build_run_contract(args, profile: dict) -> dict:
         setup_inputs = setup.get("inputs")
         if not isinstance(setup_inputs, list):
             setup_inputs = [setup.get("input", {})]
-        if not any(
-            record.get("sha256") == input_hash
-            for record in setup_inputs
-            if isinstance(record, dict)
-        ):
+        if not any(record.get("sha256") == input_hash for record in setup_inputs if isinstance(record, dict)):
             raise SystemExit("NLLB setup manifest does not match the training corpus")
     elif setup.get("base_model") != profile["base_model"]:
         raise SystemExit("MiLMMT setup manifest has the wrong base model")
@@ -253,8 +267,7 @@ def build_run_contract(args, profile: dict) -> dict:
         "repository": git_record(),
         "dependencies": dependency_versions(),
         "hyperparameters": {
-            key: str(value) if isinstance(value, Path) else value
-            for key, value in hyperparameters.items()
+            key: str(value) if isinstance(value, Path) else value for key, value in hyperparameters.items()
         },
     }
 

@@ -128,10 +128,15 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
         raise SystemExit("Experiment profile has invalid validation_metadata_mode")
     if training.get("effective_batch_size") != (training.get("batch_size", 0) * training.get("grad_accum_steps", 0)):
         raise SystemExit("Experiment profile effective batch size is inconsistent")
+    sampling_chunk_size = training.get("language_sampling_chunk_size")
+    if (
+        not isinstance(sampling_chunk_size, int)
+        or sampling_chunk_size <= 0
+        or training.get("batch_size", 0) % sampling_chunk_size
+    ):
+        raise SystemExit("Experiment profile has an invalid language sampling chunk size")
     if model_family == "milmmt":
-        if bool(profile.get("prompt", {}).get("use_metadata")) != bool(
-            training.get("use_tags")
-        ):
+        if bool(profile.get("prompt", {}).get("use_metadata")) != bool(training.get("use_tags")):
             raise SystemExit("MiLMMT prompt metadata and use_tags must agree")
         if training.get("optimizer") != "adamw":
             raise SystemExit("MiLMMT requires AdamW")
@@ -166,9 +171,7 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
                 or profile[section][field] != baseline[section][field]
             ]
             if mismatched:
-                raise SystemExit(
-                    f"MiLMMT comparison fields differ from NLLB in {section}: {mismatched}"
-                )
+                raise SystemExit(f"MiLMMT comparison fields differ from NLLB in {section}: {mismatched}")
     if "default" not in profile.get("generation_defaults", {}).get("metadata_modes", []):
         raise SystemExit("Headline generation must include default metadata")
     return profile

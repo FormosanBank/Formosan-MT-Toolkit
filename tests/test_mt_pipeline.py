@@ -81,8 +81,15 @@ from split_similarity import (  # noqa: E402
     ngram_candidate_conflicts,
     one_edit_conflicts,
 )
-from train_directional import metric_improved, metric_value, training_source_texts  # noqa: E402
+from train_directional import (  # noqa: E402
+    compute_training_loss,
+    metric_improved,
+    metric_value,
+    training_source_texts,
+)
 from training_code_inventory import build_code_inventory  # noqa: E402
+from training_data import collate_encoded_batches  # noqa: E402
+from training_state import clone_model_checkpoint  # noqa: E402
 from validate_experiment import (  # noqa: E402
     validate_provenance,
     validate_splits,
@@ -496,8 +503,8 @@ class MilmmtRuntimeTests(unittest.TestCase):
             pad_token_id = 0
             eos_token_id = 1
 
-            def __call__(self, text, **_kwargs):
-                return {"input_ids": [ord(character) + 2 for character in text]}
+            def __call__(self, texts, **_kwargs):
+                return {"input_ids": [[ord(character) + 2 for character in text] for text in texts]}
 
         tokenizer = Tokenizer()
         task = milmmt.task_spec("ami", "f2en", target_lang="english")
@@ -510,9 +517,90 @@ class MilmmtRuntimeTests(unittest.TestCase):
             device=torch.device("cpu"),
         )
         target = [ord(character) + 2 for character in "answer"] + [1]
-        self.assertEqual(labels[0, -len(target) :].tolist(), target)
-        self.assertTrue((labels[0, : -len(target)] == -100).all())
-        self.assertEqual(encoded["attention_mask"].sum().item(), 13)
+        sequence_length = int(encoded["attention_mask"].sum())
+        self.assertEqual(
+            labels[0, sequence_length - len(target) : sequence_length].tolist(),
+            target,
+        )
+        self.assertTrue((labels[0, : sequence_length - len(target)] == -100).all())
+        self.assertTrue((labels[0, sequence_length:] == -100).all())
+        self.assertEqual(sequence_length, 13)
+        self.assertEqual(encoded["input_ids"].shape[1] % 8, 0)
+
+    def test_chunk_collation_pads_inputs_and_labels_independently(self) -> None:
+        chunks = [
+            (
+                {
+                    "input_ids": torch.tensor([[1, 2, 3], [4, 5, 0]]),
+                    "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 0]]),
+                },
+                torch.tensor([[7, 8], [9, -100]]),
+            ),
+            (
+                {
+                    "input_ids": torch.tensor([[6, 7, 8, 9, 10]]),
+                    "attention_mask": torch.ones((1, 5), dtype=torch.long),
+                },
+                torch.tensor([[11, 12, 13, 14]]),
+            ),
+        ]
+        encoded, labels, token_count = collate_encoded_batches(
+            chunks,
+            pad_token_id=0,
+            pin_memory=False,
+        )
+        self.assertEqual(encoded["input_ids"].shape, (3, 5))
+        self.assertEqual(labels.shape, (3, 4))
+        self.assertEqual(encoded["attention_mask"].sum().item(), 10)
+        self.assertEqual(token_count, 7)
+        self.assertEqual(labels[0].tolist(), [7, 8, -100, -100])
+
+    def test_nllb_smoothed_loss_does_not_pass_labels_to_model(self) -> None:
+        class Model:
+            def __init__(self):
+                self.call = None
+
+            def prepare_decoder_input_ids_from_labels(self, *, labels):
+                return labels.masked_fill(labels.eq(-100), 0)
+
+            def __call__(self, **kwargs):
+                self.call = kwargs
+                return SimpleNamespace(logits=torch.randn(1, 3, 5))
+
+        model = Model()
+        labels = torch.tensor([[1, 2, -100]])
+        encoded = {
+            "input_ids": torch.tensor([[3, 4, 0]]),
+            "attention_mask": torch.tensor([[1, 1, 0]]),
+        }
+        loss = compute_training_loss(
+            model,
+            encoded,
+            labels,
+            model_family="nllb",
+            label_smoothing=0.1,
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertNotIn("labels", model.call)
+        self.assertIn("decoder_input_ids", model.call)
+
+    def test_checkpoint_clone_excludes_optimizer_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "resume"
+            source.mkdir()
+            (source / "model.safetensors").write_bytes(b"weights")
+            (source / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (source / "trainer_state.pt").write_bytes(b"optimizer")
+            (source / "experiment_metadata.json").write_text("{}", encoding="utf-8")
+            destination = root / "best"
+            clone_model_checkpoint(source, destination, {"step": 10000})
+            self.assertEqual((destination / "model.safetensors").read_bytes(), b"weights")
+            self.assertFalse((destination / "trainer_state.pt").exists())
+            self.assertEqual(
+                json.loads((destination / "experiment_metadata.json").read_text()),
+                {"step": 10000},
+            )
 
     def test_text_model_allows_only_gemma_image_token_outside_embeddings(self) -> None:
         class Tokenizer:
@@ -522,9 +610,7 @@ class MilmmtRuntimeTests(unittest.TestCase):
             def get_added_vocab(self):
                 return {"<image_soft_token>": 10}
 
-        model = SimpleNamespace(
-            get_input_embeddings=lambda: SimpleNamespace(num_embeddings=10)
-        )
+        model = SimpleNamespace(get_input_embeddings=lambda: SimpleNamespace(num_embeddings=10))
         milmmt.validate_model_tokenizer(model, Tokenizer())
 
         class BadTokenizer(Tokenizer):
@@ -543,9 +629,7 @@ class TokenizerAuditTests(unittest.TestCase):
             def __call__(self, text, **_kwargs):
                 return {
                     "input_ids": [
-                        99 if character == "?" else ord(character)
-                        for character in str(text)
-                        if not character.isspace()
+                        99 if character == "?" else ord(character) for character in str(text) if not character.isspace()
                     ]
                 }
 
@@ -598,9 +682,7 @@ class TokenizerAuditTests(unittest.TestCase):
 
 class LeakageTests(unittest.TestCase):
     def test_control_tokens_include_languages_and_dialects_only(self) -> None:
-        tokens = special_tokens_from_corpus(
-            pd.DataFrame({"dialect": ["Coastal", "Coastal", "Coastal"]})
-        )
+        tokens = special_tokens_from_corpus(pd.DataFrame({"dialect": ["Coastal", "Coastal", "Coastal"]}))
         self.assertIn("<src_ami>", tokens)
         self.assertIn("<to_eng>", tokens)
         self.assertIn("<dialect_coastal>", tokens)
@@ -814,19 +896,12 @@ class LeakageTests(unittest.TestCase):
             values: list[str] = []
             languages: list[str] = []
             for _ in range(50):
-                value = "".join(
-                    rng.choice(alphabet)
-                    for _ in range(rng.randint(2, 50))
-                )
+                value = "".join(rng.choice(alphabet) for _ in range(rng.randint(2, 50)))
                 if values and rng.random() < 0.35:
                     value = values[rng.randrange(len(values))]
                     if value and rng.random() < 0.7:
                         offset = rng.randrange(len(value))
-                        value = (
-                            value[:offset]
-                            + rng.choice(alphabet)
-                            + value[offset + 1 :]
-                        )
+                        value = value[:offset] + rng.choice(alphabet) + value[offset + 1 :]
                 values.append(value)
                 languages.append(rng.choice(["ami", "bnn", "tay"]))
             frame = pd.DataFrame(
@@ -1019,7 +1094,7 @@ class LeakageTests(unittest.TestCase):
                         "row_id": "short-question",
                         "lang_code": "ami",
                         "formosan_sentence": "“ima su?”",
-                        "english_sentence": "\"Who are you?\"",
+                        "english_sentence": '"Who are you?"',
                         "source": "fixture.xml",
                         "row_type": "sentence",
                         "quality_flags": "",
@@ -1170,8 +1245,7 @@ class LeakageTests(unittest.TestCase):
                             f"{digest[:8]} {digest[8:16]} {digest[16:24]} {digest[24:32]} {digest[32:40]}"
                         ),
                         "english_sentence": (
-                            f"{digest[40:48]} {digest[48:56]} the sentence "
-                            f"{document} number {sentence}"
+                            f"{digest[40:48]} {digest[48:56]} the sentence {document} number {sentence}"
                         ),
                         "source": f"FormosanBank/Corpora/Test/XML/doc-{document}.xml",
                         "repository": "FormosanBank",
@@ -1293,9 +1367,7 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(contaminated_validation["gloss_translation_rows"], 1)
 
         lexical_contamination = output.copy()
-        lexeme_index = lexical_contamination.index[
-            lexical_contamination["row_type"].eq("lexeme")
-        ][0]
+        lexeme_index = lexical_contamination.index[lexical_contamination["row_type"].eq("lexeme")][0]
         lexical_contamination.loc[lexeme_index, "english_sentence"] = "wash-face"
         lexical_validation = validate_splits(
             lexical_contamination,
@@ -1417,9 +1489,7 @@ class LeakageTests(unittest.TestCase):
         source_a = raw.index[:150]
         raw.loc[source_a, "source"] = "FormosanBank/Corpora/SourceA/XML/lexical.xml"
         raw.loc[source_a, "row_type"] = "lexeme"
-        raw.loc[~raw.index.isin(source_a), "source"] = (
-            "FormosanBank/Corpora/SourceB/XML/sentences.xml"
-        )
+        raw.loc[~raw.index.isin(source_a), "source"] = "FormosanBank/Corpora/SourceB/XML/sentences.xml"
         keyed = add_normalized_columns(
             raw,
             target_col="english_sentence",
@@ -1447,8 +1517,7 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(source_a_report["target_test_rows"], 0)
         self.assertEqual(source_a_report["target_validate_rows"], 0)
         self.assertEqual(
-            source_b_report["target_test_rows"]
-            + source_b_report["target_validate_rows"],
+            source_b_report["target_test_rows"] + source_b_report["target_validate_rows"],
             36,
         )
         evaluation = output[output["split"].isin({"test", "validate"})]
@@ -1457,12 +1526,8 @@ class LeakageTests(unittest.TestCase):
     def test_synthetic_only_source_is_train_only(self) -> None:
         raw = self.hard_split_fixture()
         synthetic = raw["pivot_origin"].eq("synthetic")
-        raw.loc[synthetic, "source"] = (
-            "FormosanBank/Corpora/PivotOnly/XML/synthetic.xml"
-        )
-        raw.loc[~synthetic, "source"] = (
-            "FormosanBank/Corpora/Human/XML/human.xml"
-        )
+        raw.loc[synthetic, "source"] = "FormosanBank/Corpora/PivotOnly/XML/synthetic.xml"
+        raw.loc[~synthetic, "source"] = "FormosanBank/Corpora/Human/XML/human.xml"
         keyed = add_normalized_columns(
             raw,
             target_col="english_sentence",
@@ -1489,11 +1554,7 @@ class LeakageTests(unittest.TestCase):
         self.assertEqual(pivot_source["target_test_rows"], 0)
         self.assertEqual(pivot_source["target_validate_rows"], 0)
         self.assertEqual(pivot_source["synthetic_input_rows"], 60)
-        self.assertTrue(
-            output.loc[output["pivot_origin"].eq("synthetic"), "split"]
-            .eq("train")
-            .all()
-        )
+        self.assertTrue(output.loc[output["pivot_origin"].eq("synthetic"), "split"].eq("train").all())
         self.assertEqual(report["split_counts"]["test"], 24)
         self.assertEqual(report["split_counts"]["validate"], 12)
         self.assertEqual(report["synthetic_eval_rows"], 0)
@@ -1543,10 +1604,7 @@ class LeakageTests(unittest.TestCase):
     def test_unsafe_evaluation_candidates_are_replaced_not_excluded(self) -> None:
         raw = self.hard_split_fixture()
         near_synthetic = []
-        human = raw[
-            raw["pivot_origin"].eq("original")
-            & raw["row_type"].eq("sentence")
-        ].head(20)
+        human = raw[raw["pivot_origin"].eq("original") & raw["row_type"].eq("sentence")].head(20)
         for _, row in human.iterrows():
             near_synthetic.append(
                 {
@@ -1597,11 +1655,7 @@ class LeakageTests(unittest.TestCase):
         self.assertTrue(excluded.empty)
         evaluation = output[output["split"].isin({"test", "validate"})]
         self.assertFalse(evaluation["pivot_origin"].eq("synthetic").any())
-        self.assertTrue(
-            output[output["pivot_origin"].eq("synthetic")]["split"]
-            .eq("train")
-            .all()
-        )
+        self.assertTrue(output[output["pivot_origin"].eq("synthetic")]["split"].eq("train").all())
         self.assertEqual(len(output), report["deduplicated_input_rows"])
         self.assertEqual(language["human_test_fraction"], 0.10)
         self.assertEqual(language["human_validate_fraction"], 0.05)
@@ -1647,11 +1701,7 @@ class LeakageTests(unittest.TestCase):
                 source["validate_rows"],
                 source["target_validate_rows"],
             )
-        self.assertTrue(
-            output[output["split"].isin({"test", "validate"})]["row_type"]
-            .eq("sentence")
-            .all()
-        )
+        self.assertTrue(output[output["split"].isin({"test", "validate"})]["row_type"].eq("sentence").all())
 
     def test_independent_validator_reports_synthetic_and_document_overlap(self) -> None:
         frame = self.hard_split_fixture().iloc[:3].copy()
@@ -1829,6 +1879,16 @@ class TokenizerSetupTests(unittest.TestCase):
             "default",
         )
         self.assertEqual(len(profile["base_model"]["revision"]), 40)
+        defaults = profile["training_defaults"]
+        self.assertEqual(defaults["batch_size"], 32)
+        self.assertEqual(defaults["grad_accum_steps"], 2)
+        self.assertEqual(defaults["language_sampling_chunk_size"], 8)
+        self.assertEqual(defaults["effective_batch_size"], 64)
+        self.assertEqual(defaults["generation_eval_batch_size"], 32)
+        self.assertEqual(
+            defaults["batch_size"] // defaults["language_sampling_chunk_size"] * defaults["grad_accum_steps"],
+            8,
+        )
 
     def test_experiment_profiles_match_canonical_split_policy(self) -> None:
         pipeline_splits = load_corpus_pipeline_config()["splits"]
@@ -1881,12 +1941,20 @@ class TokenizerSetupTests(unittest.TestCase):
         self.assertEqual(profile["training_defaults"]["best_metric"], "chrF2")
         self.assertTrue(profile["training_defaults"]["use_tags"])
         self.assertEqual(profile["training_defaults"]["lexical_row_sampling_weight"], 0.25)
+        self.assertFalse(profile["training_defaults"]["gradient_checkpointing"])
+        self.assertTrue(profile["training_defaults"]["fused_optimizer"])
+        self.assertEqual(profile["training_defaults"]["generation_eval_batch_size"], 16)
+        self.assertEqual(
+            profile["training_defaults"]["batch_size"]
+            // profile["training_defaults"]["language_sampling_chunk_size"]
+            * profile["training_defaults"]["grad_accum_steps"],
+            8,
+        )
         self.assertEqual(profile["generation_defaults"]["beam"], 4)
         comparison = profile["comparison"]
         self.assertEqual(
             comparison["sample_presentations"],
-            profile["training_defaults"]["steps"]
-            * profile["training_defaults"]["effective_batch_size"],
+            profile["training_defaults"]["steps"] * profile["training_defaults"]["effective_batch_size"],
         )
         for field in comparison["matched_training_fields"]:
             self.assertEqual(
@@ -1898,6 +1966,15 @@ class TokenizerSetupTests(unittest.TestCase):
                 profile["generation_defaults"][field],
                 baseline["generation_defaults"][field],
             )
+
+    def test_experiment_profile_rejects_invalid_language_chunk_geometry(self) -> None:
+        profile = json.loads(DEFAULT_PROFILE.read_text(encoding="utf-8"))
+        profile["training_defaults"]["language_sampling_chunk_size"] = 7
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "language sampling chunk"):
+                load_profile(path)
 
     def test_embedding_realignment_uses_token_identity(self) -> None:
         class Tokenizer:

@@ -93,6 +93,7 @@ add_override() {
 add_override STEPS --steps
 add_override BATCH_SIZE --batch-size
 add_override GRAD_ACCUM_STEPS --grad-accum-steps
+add_override LANGUAGE_SAMPLING_CHUNK_SIZE --language-sampling-chunk-size
 add_override MAX_LENGTH --max-length
 add_override LEARNING_RATE --learning-rate
 add_override WARMUP_STEPS --warmup-steps
@@ -117,6 +118,21 @@ add_override EARLY_STOPPING_START_STEP --early-stopping-start-step
 add_override RESUME_FROM --resume-from
 add_override PRECISION --precision
 add_override LOAD_DTYPE --load-dtype
+
+if [[ -n "${FUSED_OPTIMIZER:-}" ]]; then
+  case "${FUSED_OPTIMIZER}" in
+    1|true|TRUE|yes|YES)
+      train_command+=(--fused-optimizer)
+      ;;
+    0|false|FALSE|no|NO)
+      train_command+=(--no-fused-optimizer)
+      ;;
+    *)
+      echo "Invalid FUSED_OPTIMIZER=${FUSED_OPTIMIZER}" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if [[ -n "${GRADIENT_CHECKPOINTING:-}" ]]; then
   case "${GRADIENT_CHECKPOINTING}" in

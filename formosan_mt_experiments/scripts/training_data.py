@@ -207,6 +207,50 @@ def encode_batch(
     )
 
 
+def collate_encoded_batches(
+    batches: list[tuple[dict[str, torch.Tensor], torch.Tensor]],
+    *,
+    pad_token_id: int,
+    pin_memory: bool,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor, int]:
+    """Pad independently tokenized language chunks into one physical batch."""
+    if not batches:
+        raise ValueError("Cannot collate an empty training batch")
+    row_count = sum(labels.shape[0] for _, labels in batches)
+    input_width = max(encoded["input_ids"].shape[1] for encoded, _ in batches)
+    label_width = max(labels.shape[1] for _, labels in batches)
+    input_ids = torch.full((row_count, input_width), pad_token_id, dtype=torch.long)
+    attention_mask = torch.zeros((row_count, input_width), dtype=torch.long)
+    labels = torch.full((row_count, label_width), -100, dtype=torch.long)
+    offset = 0
+    for encoded, chunk_labels in batches:
+        rows = chunk_labels.shape[0]
+        encoded_width = encoded["input_ids"].shape[1]
+        chunk_label_width = chunk_labels.shape[1]
+        input_ids[offset : offset + rows, :encoded_width] = encoded["input_ids"]
+        attention_mask[offset : offset + rows, :encoded_width] = encoded["attention_mask"]
+        labels[offset : offset + rows, :chunk_label_width] = chunk_labels
+        offset += rows
+    token_count = int((labels != -100).sum())
+    encoded = {"input_ids": input_ids, "attention_mask": attention_mask}
+    if pin_memory:
+        encoded = {key: value.pin_memory() for key, value in encoded.items()}
+        labels = labels.pin_memory()
+    return encoded, labels, token_count
+
+
+def move_encoded_batch(
+    encoded: dict[str, torch.Tensor],
+    labels: torch.Tensor,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    non_blocking = device.type == "cuda"
+    return (
+        {key: value.to(device, non_blocking=non_blocking) for key, value in encoded.items()},
+        labels.to(device, non_blocking=non_blocking),
+    )
+
+
 def training_source_texts(
     batch: pd.DataFrame,
     *,
@@ -263,7 +307,21 @@ def validation_sample_manifest(val_by_lang: dict, args) -> dict:
     }
 
 
-@torch.no_grad()
+def validation_length_order(df: pd.DataFrame) -> list[int]:
+    """Return a stable short-to-long order to reduce validation padding."""
+    sources = df["src_text"].astype(str).tolist()
+    targets = df["tgt_text"].astype(str).tolist()
+    return sorted(
+        range(len(df)),
+        key=lambda index: (
+            max(len(sources[index]), len(targets[index])),
+            len(sources[index]),
+            index,
+        ),
+    )
+
+
+@torch.inference_mode()
 def evaluate_loss(
     model,
     tokenizer,
@@ -278,6 +336,7 @@ def evaluate_loss(
     total_tokens = 0
     for lang, info in sorted(val_by_lang.items()):
         df = validation_subset(info["df"], lang, args)
+        df = df.iloc[validation_length_order(df)]
         lang_loss = 0.0
         lang_tokens = 0
         for start in range(0, len(df), args.eval_batch_size):
@@ -308,7 +367,7 @@ def evaluate_loss(
     }
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate_generation(
     model,
     tokenizer,
@@ -328,13 +387,15 @@ def evaluate_generation(
     bleu_tokenize = "zh" if args.direction == "f2zh" else "13a"
     for lang, info in sorted(val_by_lang.items()):
         df = validation_subset(info["df"], lang, args)
-        lang_hypotheses: list[str] = []
+        order = validation_length_order(df)
+        sorted_df = df.iloc[order]
+        sorted_hypotheses: list[str] = []
         lang_references = df["tgt_text"].astype(str).tolist()
         lang_sources = df["src_text"].astype(str).tolist()
         task = info["task"]
-        for start in range(0, len(df), args.generation_batch_size):
-            batch = df.iloc[start : start + args.generation_batch_size]
-            lang_hypotheses.extend(
+        for start in range(0, len(sorted_df), args.generation_batch_size):
+            batch = sorted_df.iloc[start : start + args.generation_batch_size]
+            sorted_hypotheses.extend(
                 runtime.generate_batch(
                     model,
                     tokenizer,
@@ -350,6 +411,9 @@ def evaluate_generation(
                     device=device,
                 )
             )
+        lang_hypotheses = [""] * len(df)
+        for sorted_index, original_index in enumerate(order):
+            lang_hypotheses[original_index] = sorted_hypotheses[sorted_index]
         by_language[lang] = {"samples": len(df)} | score_translations(
             lang_hypotheses,
             lang_references,

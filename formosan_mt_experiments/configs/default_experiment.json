@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "nllb200-spm8k-directional-v8",
+  "recipe_id": "nllb200-spm8k-directional-v9",
   "model_family": "nllb",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -52,9 +52,10 @@
   },
   "training_defaults": {
     "steps": 300000,
-    "batch_size": 8,
-    "grad_accum_steps": 8,
+    "batch_size": 32,
+    "grad_accum_steps": 2,
     "effective_batch_size": 64,
+    "language_sampling_chunk_size": 8,
     "max_length": 384,
     "learning_rate": 0.00002,
     "warmup_steps": 4000,
@@ -69,7 +70,7 @@
     "log_interval": 500,
     "generation_eval_interval": 10000,
     "generation_eval_samples_per_language": 128,
-    "generation_eval_batch_size": 16,
+    "generation_eval_batch_size": 32,
     "validation_beam": 2,
     "validation_metadata_mode": "default",
     "best_metric": "chrF2",

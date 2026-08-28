@@ -76,16 +76,10 @@ def validate_model_tokenizer(model, tokenizer) -> None:
     if len(tokenizer) == embedding_size:
         return
     extra_tokens = {
-        token: token_id
-        for token, token_id in tokenizer.get_added_vocab().items()
-        if int(token_id) >= embedding_size
+        token: token_id for token, token_id in tokenizer.get_added_vocab().items() if int(token_id) >= embedding_size
     }
-    if len(tokenizer) != embedding_size + 1 or extra_tokens != {
-        "<image_soft_token>": embedding_size
-    }:
-        raise SystemExit(
-            "MiLMMT tokenizer and text embedding table have an unexpected mismatch"
-        )
+    if len(tokenizer) != embedding_size + 1 or extra_tokens != {"<image_soft_token>": embedding_size}:
+        raise SystemExit("MiLMMT tokenizer and text embedding table have an unexpected mismatch")
 
 
 def normalize_control_metadata(
@@ -163,15 +157,14 @@ def validate_task(tokenizer, task: TaskSpec) -> None:
         raise SystemExit(f"Invalid MiLMMT task: {task}")
 
 
-def _token_ids(tokenizer, text: str) -> list[int]:
-    return list(
-        tokenizer(
-            text,
-            add_special_tokens=False,
-            return_attention_mask=False,
-            return_token_type_ids=False,
-        )["input_ids"]
-    )
+def _batch_token_ids(tokenizer, texts: list[str]) -> list[list[int]]:
+    encoded = tokenizer(
+        texts,
+        add_special_tokens=False,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+    )["input_ids"]
+    return [list(row) for row in encoded]
 
 
 def encode_batch(
@@ -181,7 +174,7 @@ def encode_batch(
     task: TaskSpec,
     *,
     max_length: int,
-    device: torch.device,
+    device: torch.device | None,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     del task
     if max_length < 8:
@@ -192,20 +185,24 @@ def encode_batch(
     label_rows: list[list[int]] = []
     minimum_prompt_tokens = min(64, max_length // 2)
     target_limit = max(1, max_length - minimum_prompt_tokens - 1)
-    for prompt, target in zip(source_texts, target_texts, strict=True):
-        target_ids = _token_ids(tokenizer, target)[:target_limit]
+    prompt_rows = _batch_token_ids(tokenizer, source_texts)
+    target_rows = _batch_token_ids(tokenizer, target_texts)
+    for prompt_ids, target_ids in zip(prompt_rows, target_rows, strict=True):
+        target_ids = target_ids[:target_limit]
         if not target_ids:
             raise ValueError("MiLMMT target tokenized to an empty sequence")
         response = target_ids + [eos]
         prompt_budget = max_length - len(response)
-        prompt_ids = _token_ids(tokenizer, prompt)
         if len(prompt_ids) > prompt_budget:
             prompt_ids = prompt_ids[-prompt_budget:]
         input_ids = prompt_ids + response
         sequences.append(input_ids)
         label_rows.append([-100] * len(prompt_ids) + response)
 
-    width = max(len(row) for row in sequences)
+    width = min(
+        max_length,
+        ((max(len(row) for row in sequences) + 7) // 8) * 8,
+    )
     input_ids = torch.full((len(sequences), width), pad, dtype=torch.long)
     attention_mask = torch.zeros((len(sequences), width), dtype=torch.long)
     labels = torch.full((len(sequences), width), -100, dtype=torch.long)
@@ -214,13 +211,13 @@ def encode_batch(
         input_ids[index, :length] = torch.tensor(sequence, dtype=torch.long)
         attention_mask[index, :length] = 1
         labels[index, :length] = torch.tensor(label_row, dtype=torch.long)
-    return (
-        {
-            "input_ids": input_ids.to(device),
-            "attention_mask": attention_mask.to(device),
-        },
-        labels.to(device),
-    )
+    encoded = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+    }
+    if device is None:
+        return encoded, labels
+    return ({key: value.to(device) for key, value in encoded.items()}, labels.to(device))
 
 
 @torch.no_grad()
@@ -252,6 +249,7 @@ def generate_batch(
             padding=True,
             truncation=True,
             max_length=max_length,
+            pad_to_multiple_of=8,
             return_token_type_ids=False,
         )
     finally:

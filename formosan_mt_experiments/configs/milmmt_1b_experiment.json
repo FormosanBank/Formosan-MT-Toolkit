@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "recipe_id": "milmmt46-1b-v1-directional-v5",
+  "recipe_id": "milmmt46-1b-v1-directional-v6",
   "model_family": "milmmt",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
@@ -51,13 +51,14 @@
     "use_metadata": true
   },
   "comparison": {
-    "baseline_recipe_id": "nllb200-spm8k-directional-v8",
+    "baseline_recipe_id": "nllb200-spm8k-directional-v9",
     "budget_basis": "sample_presentations",
     "sample_presentations": 19200000,
     "claim_scope": "matched_data_exposure_not_parameter_or_flop_matched",
     "matched_training_fields": [
       "steps",
       "effective_batch_size",
+      "language_sampling_chunk_size",
       "learning_rate",
       "warmup_steps",
       "language_sampling_alpha",
@@ -89,9 +90,10 @@
   },
   "training_defaults": {
     "steps": 300000,
-    "batch_size": 8,
-    "grad_accum_steps": 8,
+    "batch_size": 32,
+    "grad_accum_steps": 2,
     "effective_batch_size": 64,
+    "language_sampling_chunk_size": 8,
     "max_length": 512,
     "learning_rate": 0.00002,
     "warmup_steps": 4000,
@@ -104,13 +106,14 @@
     "dialect_tag_dropout": 0.25,
     "precision": "bf16",
     "load_dtype": "bf16",
-    "gradient_checkpointing": true,
+    "gradient_checkpointing": false,
+    "fused_optimizer": true,
     "label_smoothing": 0.0,
     "save_interval": 0,
     "log_interval": 500,
     "generation_eval_interval": 10000,
     "generation_eval_samples_per_language": 128,
-    "generation_eval_batch_size": 8,
+    "generation_eval_batch_size": 16,
     "validation_beam": 2,
     "validation_metadata_mode": "default",
     "best_metric": "chrF2",

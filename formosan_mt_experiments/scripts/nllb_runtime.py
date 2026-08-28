@@ -33,22 +33,15 @@ class TaskSpec:
 def token_id(tokenizer, token: str) -> int:
     value = int(tokenizer.convert_tokens_to_ids(token))
     if value == tokenizer.unk_token_id:
-        raise SystemExit(
-            f"Required token {token!r} maps to <unk>; load the matching setup artifacts."
-        )
+        raise SystemExit(f"Required token {token!r} maps to <unk>; load the matching setup artifacts.")
     if tokenizer.convert_ids_to_tokens(value) != token:
-        raise SystemExit(
-            f"Required token {token!r} does not round-trip through the tokenizer."
-        )
+        raise SystemExit(f"Required token {token!r} does not round-trip through the tokenizer.")
     return value
 
 
 def token_exists(tokenizer, token: str) -> bool:
     value = int(tokenizer.convert_tokens_to_ids(token))
-    return (
-        value != tokenizer.unk_token_id
-        and tokenizer.convert_ids_to_tokens(value) == token
-    )
+    return value != tokenizer.unk_token_id and tokenizer.convert_ids_to_tokens(value) == token
 
 
 def normalize_control_metadata(
@@ -68,18 +61,11 @@ def normalize_control_metadata(
     def values(column: str, default: str) -> pd.Series:
         if column not in output:
             return pd.Series(default, index=output.index, dtype="object")
-        return output[column].map(
-            lambda value: (
-                default
-                if pd.isna(value) or not str(value).strip()
-                else str(value)
-            )
-        )
+        return output[column].map(lambda value: default if pd.isna(value) or not str(value).strip() else str(value))
 
     dialects = values("dialect", "default")
     dialect_available = {
-        value: token_exists(tokenizer, f"<dialect_{safe_tag_value(value)}>")
-        for value in dialects.unique()
+        value: token_exists(tokenizer, f"<dialect_{safe_tag_value(value)}>") for value in dialects.unique()
     }
     dialect_missing = ~dialects.map(dialect_available)
     output["dialect"] = dialects.mask(dialect_missing, "default")
@@ -157,11 +143,7 @@ def ensure_source_prefix_tokens(
 ) -> None:
     metadata = pd.DataFrame(index=frame.index)
     metadata["lang_code"] = frame["lang_code"].astype(str)
-    metadata["dialect"] = (
-        frame["dialect"].astype(str)
-        if "dialect" in frame
-        else "default"
-    )
+    metadata["dialect"] = frame["dialect"].astype(str) if "dialect" in frame else "default"
     needed = {
         token
         for row in metadata.drop_duplicates().to_dict(orient="records")
@@ -180,8 +162,7 @@ def ensure_source_prefix_tokens(
             bad.append(token)
     if bad:
         raise SystemExit(
-            "NLLB source-control tokens are not single tokenizer tokens. "
-            f"First missing/broken tags: {bad[:30]}"
+            f"NLLB source-control tokens are not single tokenizer tokens. First missing/broken tags: {bad[:30]}"
         )
 
 
@@ -210,9 +191,7 @@ def configure_model(model, tokenizer) -> None:
 
 def validate_model_tokenizer(model, tokenizer) -> None:
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        raise SystemExit(
-            "Tokenizer and model vocabulary sizes differ; load matching setup artifacts."
-        )
+        raise SystemExit("Tokenizer and model vocabulary sizes differ; load matching setup artifacts.")
 
 
 def validate_task(tokenizer, task: TaskSpec) -> None:
@@ -227,7 +206,7 @@ def encode_batch(
     task: TaskSpec,
     *,
     max_length: int,
-    device: torch.device,
+    device: torch.device | None,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     prepare_source(tokenizer, task)
     encoded = tokenizer(
@@ -236,6 +215,7 @@ def encode_batch(
         padding=True,
         truncation=True,
         max_length=max_length,
+        pad_to_multiple_of=8,
         return_attention_mask=True,
         return_token_type_ids=False,
     )
@@ -246,10 +226,13 @@ def encode_batch(
         padding=True,
         truncation=True,
         max_length=max_length,
+        pad_to_multiple_of=8,
         return_attention_mask=False,
         return_token_type_ids=False,
     )["input_ids"]
     labels[labels == tokenizer.pad_token_id] = -100
+    if device is None:
+        return dict(encoded), labels
     return (
         {key: value.to(device) for key, value in encoded.items()},
         labels.to(device),
@@ -279,6 +262,7 @@ def generate_batch(
         padding=True,
         truncation=True,
         max_length=max_length,
+        pad_to_multiple_of=8,
         return_token_type_ids=False,
     )
     encoded = {key: value.to(device) for key, value in encoded.items()}
