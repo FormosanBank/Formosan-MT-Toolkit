@@ -2363,11 +2363,21 @@ class ExperimentManifestTests(unittest.TestCase):
             "base_model": {"name": "base/model", "revision": "abc123"},
             "mt_standardization": {"id": "formosan-mt-standard-v3"},
             "training_defaults": {
+                "steps": 300000,
                 "effective_batch_size": 64,
                 "max_length": 384,
                 "learning_rate": 2e-5,
                 "precision": "bf16",
                 "best_metric": "chrF2",
+                "language_sampling_alpha": 0.5,
+                "lexical_row_sampling_weight": 0.25,
+                "dialect_tag_dropout": 0.25,
+            },
+            "splits": {
+                "ratios_by_target": {
+                    "english": {"train": 0.7, "validate": 0.1, "test": 0.2}
+                },
+                "synthetic_eval_policy": "train_only_after_human_split",
             },
         }
         metrics = {
@@ -2376,6 +2386,11 @@ class ExperimentManifestTests(unittest.TestCase):
                 "chrF2": 27.2,
                 "TER": 90.3,
                 "empty_output_rate": 0.0,
+                "signatures": {
+                    "BLEU": "bleu-signature",
+                    "chrF2": "chrf-signature",
+                    "TER": "ter-signature",
+                },
             },
             "by_language": {"ami": {"samples": 100, "BLEU": 9.1, "chrF2": 27.2, "TER": 90.3}},
             "headline_metadata_mode": "default",
@@ -2388,6 +2403,7 @@ class ExperimentManifestTests(unittest.TestCase):
         manifest = {
             "corpora": {
                 "english": {
+                    "path": "/scratch/data/releases/20260824T042425Z_v3/private_no_bible/corpus.csv",
                     "rows": 1000,
                     "sha256": "a" * 64,
                     "splits": {"train": 900, "test": 75, "validate": 25},
@@ -2413,8 +2429,13 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("model-index:", card)
         self.assertIn("headline result uses `default` metadata", card)
         self.assertIn("Document overlap is diagnostic", card)
-        self.assertIn("capacity-aware source", card)
+        self.assertIn("70% train / 10% validate / 20% test", card)
         self.assertIn("Synthetic pivots and\nlexical entries are train-only", card)
+        self.assertIn("domain or repository tags", card)
+        self.assertNotIn("<dom_", card)
+        self.assertIn("Language sampling alpha | 0.5", card)
+        self.assertIn("Sentence / lexical sampling weight | 1.0 / 0.25", card)
+        self.assertIn("`20260824T042425Z_v3`", card)
         self.assertIn("FormosanBank/formosan-mt-private", card)
         self.assertIn("`20260809-210523`", card)
         self.assertIn("nllb-200", card)

@@ -166,6 +166,15 @@ def corpus_record(manifest: dict, target_lang: str) -> dict:
     return matches[0]
 
 
+def corpus_release_id(corpus: dict) -> str | None:
+    """Return the immutable release directory recorded in a corpus path."""
+    parts = Path(str(corpus.get("path", ""))).parts
+    try:
+        return parts[parts.index("releases") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
 def render_card(
     *,
     spec: Direction,
@@ -196,6 +205,30 @@ def render_card(
     language_yaml = "\n".join(f"- {code}" for code in languages)
     headline_mode = metrics.get("headline_metadata_mode", "default")
     training = profile["training_defaults"]
+    split_policy = profile.get("splits", {})
+    ratios = split_policy.get("ratios_by_target", {}).get(spec.target_lang, {})
+    human_split = " / ".join(
+        f"{float(ratios[key]):.0%} {label}"
+        for key, label in (
+            ("train", "train"),
+            ("validate", "validate"),
+            ("test", "test"),
+        )
+        if key in ratios
+    )
+    sampling_alpha = float(training.get("language_sampling_alpha", 1.0))
+    lexical_weight = float(training.get("lexical_row_sampling_weight", 1.0))
+    dialect_dropout = float(training.get("dialect_tag_dropout", 0.0))
+    release_id = corpus_release_id(corpus)
+    release_row = (
+        f"| Corpus release | `{release_id}` |\n" if release_id else ""
+    )
+    source_commit = manifest.get("source_git_commit")
+    source_commit_row = (
+        f"| Training code commit | `{source_commit}` |\n"
+        if source_commit
+        else ""
+    )
     corpus_validation = corpus["validation"]
     confidence = metrics.get("bootstrap_95_ci") or {}
     confidence_metrics = confidence.get("metrics") or {}
@@ -215,6 +248,8 @@ Stratified bootstrap, {confidence['samples']:,} samples, 95% confidence.
 |---|---:|---:|
 {confidence_rows}
 """
+    elif confidence.get("status") == "skipped":
+        confidence_table = "\nBootstrap confidence intervals were not requested for this release.\n"
     model_name = repo_id.split("/", 1)[-1]
     return f"""---
 license: cc-by-nc-4.0
@@ -262,11 +297,14 @@ model-index:
 **Release:** `{run_stamp}`, validation-selected step {metadata['step']:,}
 
 This is a directional model for 15 Formosan languages. It uses the
-`private_no_bible` leakage-controlled corpus, {tokenizer_note}, temperature-
-balanced language sampling, direction/language controls, and dialect tags.
-Rows are sampled uniformly within each language. Dialect-tag dropout makes
-`default` a normal inference condition. The model weights are public. The
-training corpus is distributed separately to
+`private_no_bible` leakage-controlled corpus, {tokenizer_note}, and explicit
+direction, source-language, and dialect controls. It does not infer or encode
+domains from repository or path names. Training uses language-temperature
+sampling with alpha {sampling_alpha:g}; sentence rows have weight 1.0 and
+explicit lexical rows, when present, have weight {lexical_weight:g}. Dialect
+tags use {dialect_dropout:.0%} dropout so `default` is a normal inference
+condition. Synthetic pivot rows are train-only. The model weights are public.
+The training corpus is distributed separately to
 authorized FormosanBank members through the access-controlled
 [`FormosanBank/formosan-mt-private`](https://huggingface.co/datasets/FormosanBank/formosan-mt-private)
 dataset and is not included with the weights.
@@ -276,7 +314,14 @@ dataset and is not included with the weights.
 | Item | Value |
 |---|---|
 | Base revision | `{base_revision}` |
+{release_row}{source_commit_row}| Total corpus rows | {corpus['rows']:,} |
 | Training rows | {corpus['splits']['train']:,} |
+| Human split policy | {human_split or 'Not recorded'} |
+| Synthetic evaluation policy | `{split_policy.get('synthetic_eval_policy', 'not recorded')}` |
+| Language sampling alpha | {sampling_alpha:g} |
+| Sentence / lexical sampling weight | 1.0 / {lexical_weight:g} |
+| Dialect-tag dropout | {dialect_dropout:.0%} |
+| Training budget | {int(training.get('steps', 0)):,} updates |
 | Effective batch size | {training['effective_batch_size']:,} |
 | Maximum sequence length | {training['max_length']:,} |
 | Learning rate | {training['learning_rate']:.2g} |
@@ -290,16 +335,18 @@ dataset and is not included with the weights.
 
 {usage}
 
-The control tags are part of the training contract. Use `default` when dialect
-metadata is unavailable.
+The direction, source-language, and dialect tags are part of the training
+contract. Use `default` when dialect metadata is unavailable. This model does
+not use domain or repository tags.
 
 ## Evaluation
 
 The best checkpoint was selected on validation chrF2. Test and validation
 contain only eligible, human-translated sentence pairs. Synthetic pivots and
 lexical entries are train-only.
-The headline result uses `{headline_mode}` metadata controls, so it does not
-assume access to test-set dialect labels.
+The headline result uses `{headline_mode}` metadata controls (the default
+dialect only), so it does not assume access to test-set dialect labels or any
+inferred domain metadata.
 
 | Split | Rows |
 |---|---:|
@@ -315,16 +362,24 @@ assume access to test-set dialect labels.
 Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
 {confidence_table}
 
+Metric signatures:
+
+- BLEU: `{global_metrics['signatures']['BLEU']}`
+- chrF2: `{global_metrics['signatures']['chrF2']}`
+- TER: `{global_metrics['signatures']['TER']}`
+
 | Language | Samples | BLEU | chrF2 | TER |
 |---|---:|---:|---:|---:|
 {by_language}
 
-The corpus gate enforces standard-tier Formosan text, 5/10
-validation/test proportions from all deduplicated pairs, capacity-aware source
-balance, sentence-only evaluation, and
-zero exact, skeleton, one-edit, or configured high character n-gram
-train/evaluation conflicts. Document overlap is diagnostic. This release
-passed all leakage gates: exact
+The corpus gate applies `{human_split or 'the recorded target-specific split'}`
+to deduplicated human pairs within each language and source where capacity
+permits. Synthetic pivots are appended to training after that split. Evaluation
+is sentence-only and contains no lexical or synthetic rows. Standard-tier
+Formosan text is normalized with `{profile['mt_standardization']['id']}`.
+The release requires zero exact, skeleton, one-edit, or configured high
+character n-gram train/evaluation conflicts. Document overlap is diagnostic.
+This release passed all leakage gates: exact
 {corpus_validation['exact_overlap']}, skeleton
 {corpus_validation['skeleton_overlap']}, one-edit
 {corpus_validation['one_edit_conflicts']}, character n-gram
@@ -344,8 +399,8 @@ generation contract shown above.
 ## Limitations
 
 Outputs require knowledgeable speaker review. Aggregate metrics hide large
-differences among languages and source corpora. This model is not suitable for
-authoritative, medical, legal, or safety-critical translation.
+differences among languages and source collections. This model is not suitable
+for authoritative, medical, legal, or safety-critical translation.
 """
 
 
@@ -462,18 +517,39 @@ def prepare_direction(
         encoding="utf-8",
     )
     publication = {
-        "schema_version": 1,
+        "schema_version": 2,
         "repo_id": repo_id,
         "direction": spec.code,
         "run_stamp": run_stamp,
+        "source_git_commit": manifest.get("source_git_commit"),
         "checkpoint": args.checkpoint,
         "checkpoint_step": metadata["step"],
         "corpus": {
             "name": manifest["corpus_name"],
+            "release": corpus_release_id(corpus),
             "target_lang": spec.target_lang,
             "rows": corpus["rows"],
             "splits": corpus["splits"],
             "sha256": corpus["sha256"],
+        },
+        "training": {
+            "language_sampling_alpha": profile["training_defaults"].get(
+                "language_sampling_alpha"
+            ),
+            "lexical_row_sampling_weight": profile["training_defaults"].get(
+                "lexical_row_sampling_weight"
+            ),
+            "dialect_tag_dropout": profile["training_defaults"].get(
+                "dialect_tag_dropout"
+            ),
+            "split_policy": profile.get("splits"),
+        },
+        "evaluation": {
+            "samples": metrics["samples"],
+            "metrics_sha256": sha256(metrics_path),
+            "headline_metadata_mode": metrics.get(
+                "headline_metadata_mode", "default"
+            ),
         },
         "profile_sha256": sha256_file(args.profile),
         "base_model": profile["base_model"],
