@@ -308,11 +308,13 @@ validation, or exposure gates.
 ### 9. NLLB Training
 
 `setup_tokenizer_sweep.py` and `setup_formosan_nllb200.py` learn the auxiliary
-8k SPM from V3 MT-standard Formosan training text only. They load a pinned
-NLLB-200 revision, realign every shared embedding by token identity after the
-SentencePiece ID shift, initialize new pieces from old subpieces, seed new
-Formosan language IDs, add direction/language and train-derived dialect tags,
-and hash every setup artifact.
+8k SPM from V3 MT-standard Formosan training text only. Explicit profiles pin
+the NLLB-200 distilled 600M, 1.3B, or 3.3B base revision. Setup directories are
+recipe-specific, so model sizes cannot collide. Setup realigns every shared
+embedding by token identity after the SentencePiece ID shift, initializes new
+pieces from old subpieces, seeds new Formosan language IDs, adds
+direction/language and train-derived dialect tags, and hashes every setup
+artifact.
 
 `train_directional.py` verifies the corpus, independent validation, setup,
 profile, and file hashes before training. It trains one direction per

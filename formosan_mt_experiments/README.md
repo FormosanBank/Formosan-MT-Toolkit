@@ -52,20 +52,19 @@ both translation directions. Tokenizer/model setup consumes training rows only.
 
 ## Profiles
 
-`configs/default_experiment.json` is the production NLLB-200 recipe:
+Three pinned profiles use the same NLLB corpus, tokenizer, sampling,
+validation, and generation contracts:
 
-| Setting | Value |
-|---|---:|
-| Base model | NLLB-200 distilled 600M, pinned revision |
-| Tokenizer | Formosan-aware SentencePiece extension |
-| Added pieces | 8,192 |
-| Max updates | 300,000 |
-| Microbatch / accumulation | 32 / 2 |
-| Maximum length | 384 |
-| Learning rate | `2e-5` |
-| Language sampling exponent | `0.5` |
-| Precision | bf16 |
-| Selection metric | chrF2 |
+| Profile | Official base | Microbatch / accumulation | Default GPU constraint |
+|---|---|---:|---|
+| `default_experiment.json` | distilled 600M | 32 / 2 | 40GB, 80GB, or 144GB |
+| `nllb_1_3b_experiment.json` | 1.3B | 16 / 4 | 80GB or 144GB |
+| `nllb_3_3b_experiment.json` | 3.3B | 8 / 8 | 144GB |
+
+All three use 300,000 maximum updates, effective batch 64, 384-token source
+and target limits, learning rate `2e-5`, and validation chrF2 checkpoint
+selection. The larger profiles enable gradient checkpointing. The 3.3B
+checkpoint is the official model commonly shortened to "NLLB 3B."
 
 NLLB generation starts the decoder with EOS and selects the target with
 `forced_bos_token_id`. `scripts/nllb_runtime.py` owns this runtime contract.
@@ -194,6 +193,13 @@ For MiLMMT, add:
 PROFILE="$EXP_DIR/configs/milmmt_1b_experiment.json"
 ```
 
+For larger NLLB models, set one of:
+
+```bash
+PROFILE="$EXP_DIR/configs/nllb_1_3b_experiment.json"
+PROFILE="$EXP_DIR/configs/nllb_3_3b_experiment.json"
+```
+
 The launcher queues two CPU validators, the profile's model setup, four
 trainers, and a `best/` checkpoint evaluation for each trainer. NLLB has one
 train-only SPM setup per target corpus; MiLMMT has one shared pinned base-model
@@ -202,9 +208,11 @@ reused, while terminal failures are resubmitted. Training resumes only when
 corpus, code, profile, and setup hashes match.
 
 Resource defaults can be overridden with `VALIDATE_*`, `SETUP_*`, `TRAIN_*`,
-and `EVAL_*` environment variables. Both profiles expect a 40GB-or-larger GPU.
-The Slurm files assume a `miniconda` module and `formosan_mt` environment;
-adapt those two setup lines to the cluster environment when needed.
+and `EVAL_*` environment variables. The launcher restricts 1.3B to 80GB or
+144GB GPUs and 3.3B to 144GB GPUs. Prepared model paths include the recipe ID,
+so different sizes cannot reuse or overwrite each other. The Slurm files
+assume a `miniconda` module and `formosan_mt` environment; adapt those two
+setup lines to the cluster environment when needed.
 
 ## Metrics And Checkpoints
 

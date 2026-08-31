@@ -162,12 +162,11 @@ pip install -r requirements-training.txt
 | `f2zh` | Formosan | Traditional Chinese |
 | `zh2f` | Traditional Chinese | Formosan |
 
-The default profile uses NLLB-200 with the established 8k Formosan
-SentencePiece extension and metadata controls. An experimental MiLMMT-46 1B
-profile uses Xiaomi's native tokenizer and translation prompt with
-response-only causal loss. Its training budget and model-selection schedule
-are matched to NLLB by sampled sentence presentations; tokenizer, optimizer,
-and objective remain architecture-appropriate.
+The default profile uses NLLB-200 distilled 600M with the established 8k
+Formosan SentencePiece extension and metadata controls. Pinned profiles also
+support the official NLLB-200 1.3B and 3.3B checkpoints. An experimental
+MiLMMT-46 1B profile uses Xiaomi's native tokenizer and translation prompt
+with response-only causal loss.
 
 On a Slurm cluster, place a completed `pivot_corpora_final` directory under a
 shared data root and submit from `formosan_mt_experiments/`:
@@ -190,6 +189,10 @@ PROFILE="$EXP_DIR/configs/milmmt_1b_experiment.json" \
 RUN_STAMP=$(date +%Y%m%d-%H%M%S) \
   slurm/submit_directional_experiment.sh
 ```
+
+Select a larger NLLB checkpoint with
+`configs/nllb_1_3b_experiment.json` or
+`configs/nllb_3_3b_experiment.json` in the same command.
 
 Cluster partitions, constraints, memory, time, and paths are environment
 overrides. The tracked Slurm files contain no personal account or filesystem
