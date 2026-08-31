@@ -22,9 +22,29 @@ from split_policy import (  # noqa: E402,F401
 )
 
 DEFAULT_PROFILE = EXPERIMENT_ROOT / "configs" / "default_experiment.json"
+NLLB_1_3B_PROFILE = EXPERIMENT_ROOT / "configs" / "nllb_1_3b_experiment.json"
+NLLB_3_3B_PROFILE = EXPERIMENT_ROOT / "configs" / "nllb_3_3b_experiment.json"
 MILMMT_PROFILE = EXPERIMENT_ROOT / "configs" / "milmmt_1b_experiment.json"
 CORPUS_PIPELINE_CONFIG = PROJECT_ROOT / "config" / "corpus_pipeline.json"
 MODEL_FAMILIES = {"nllb", "milmmt"}
+MODEL_VARIANTS = {
+    "nllb-600m": {
+        "model_family": "nllb",
+        "base_model": "facebook/nllb-200-distilled-600M",
+    },
+    "nllb-1.3b": {
+        "model_family": "nllb",
+        "base_model": "facebook/nllb-200-1.3B",
+    },
+    "nllb-3.3b": {
+        "model_family": "nllb",
+        "base_model": "facebook/nllb-200-3.3B",
+    },
+    "milmmt-1b": {
+        "model_family": "milmmt",
+        "base_model": "xiaomi-research/MiLMMT-46-1B-v1.0",
+    },
+}
 
 SHARED_SPLIT_FIELDS = (
     "ratios_by_target",
@@ -81,6 +101,12 @@ def load_profile(path: Path = DEFAULT_PROFILE) -> dict[str, Any]:
     model_family = profile.get("model_family")
     if model_family not in MODEL_FAMILIES:
         raise SystemExit(f"Experiment profile has unsupported model_family={model_family!r}: {path}")
+    model_variant = profile.get("model_variant")
+    variant = MODEL_VARIANTS.get(model_variant)
+    if variant is None:
+        raise SystemExit(f"Experiment profile has unsupported model_variant={model_variant!r}: {path}")
+    if variant["model_family"] != model_family or variant["base_model"] != profile.get("base_model", {}).get("name"):
+        raise SystemExit("Experiment profile model variant, family, and base model disagree")
     tokenizer = profile.get("tokenizer", {})
     if model_family == "nllb":
         if tokenizer.get("mode") != "spm":
@@ -183,6 +209,7 @@ def profile_record(path: Path) -> dict[str, str]:
         "path": str(path.resolve()),
         "sha256": sha256_file(path),
         "recipe_id": str(profile["recipe_id"]),
+        "model_variant": str(profile["model_variant"]),
     }
 
 

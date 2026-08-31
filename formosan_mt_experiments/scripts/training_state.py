@@ -210,6 +210,7 @@ def build_run_contract(args, profile: dict) -> dict:
     setup_mismatch = (
         setup.get("recipe_id") != profile["recipe_id"]
         or setup.get("model_family") != profile["model_family"]
+        or setup.get("model_variant") != profile["model_variant"]
         or setup.get("profile", {}).get("sha256") != expected_profile["sha256"]
         or setup.get("mt_standardization") != expected_mt_standard
     )
@@ -246,6 +247,7 @@ def build_run_contract(args, profile: dict) -> dict:
         "complete": True,
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
+        "model_variant": profile["model_variant"],
         "mt_standardization": expected_mt_standard,
         "profile": expected_profile,
         "input": {

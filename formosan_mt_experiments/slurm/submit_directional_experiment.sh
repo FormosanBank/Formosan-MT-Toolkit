@@ -22,11 +22,52 @@ slug = re.sub(r"[^a-z0-9]+", "_", recipe.lower()).strip("_")
 print(recipe)
 print(slug)
 print(profile["model_family"])
+print(profile["model_variant"])
 PY
 )
 RECIPE_ID="${profile_values[0]}"
 RECIPE_SLUG="${profile_values[1]}"
 MODEL_FAMILY="${profile_values[2]}"
+MODEL_VARIANT="${profile_values[3]}"
+
+case "${MODEL_VARIANT}" in
+  nllb-600m)
+    PROFILE_SETUP_TIME="12:00:00"
+    PROFILE_SETUP_MEM="128G"
+    PROFILE_GPU_CONSTRAINT="vr40g|vr80g|vr144g"
+    PROFILE_TRAIN_MEM="128G"
+    PROFILE_EVAL_TIME="08:00:00"
+    PROFILE_EVAL_BATCH="16"
+    ;;
+  nllb-1.3b)
+    PROFILE_SETUP_TIME="18:00:00"
+    PROFILE_SETUP_MEM="160G"
+    PROFILE_GPU_CONSTRAINT="vr80g|vr144g"
+    PROFILE_TRAIN_MEM="160G"
+    PROFILE_EVAL_TIME="16:00:00"
+    PROFILE_EVAL_BATCH="8"
+    ;;
+  nllb-3.3b)
+    PROFILE_SETUP_TIME="1-00:00:00"
+    PROFILE_SETUP_MEM="170G"
+    PROFILE_GPU_CONSTRAINT="vr144g"
+    PROFILE_TRAIN_MEM="170G"
+    PROFILE_EVAL_TIME="1-00:00:00"
+    PROFILE_EVAL_BATCH="4"
+    ;;
+  milmmt-1b)
+    PROFILE_SETUP_TIME="04:00:00"
+    PROFILE_SETUP_MEM="32G"
+    PROFILE_GPU_CONSTRAINT="vr40g|vr80g|vr144g"
+    PROFILE_TRAIN_MEM="128G"
+    PROFILE_EVAL_TIME="08:00:00"
+    PROFILE_EVAL_BATCH="4"
+    ;;
+  *)
+    echo "Unsupported model variant: ${MODEL_VARIANT}" >&2
+    exit 1
+    ;;
+esac
 
 DATA_DIR="${DATA_DIR:-${SCRATCH}/formosan_mt_experiments/data/${CORPUS_NAME}}"
 RUNS_DIR="${RUNS_DIR:-${SCRATCH}/formosan_mt_experiments/runs/${CORPUS_NAME}}"
@@ -175,7 +216,7 @@ submit_validation() {
 
 nllb_setup_paths() {
   local short="$1"
-  local root="${DATA_DIR}/tokenizer_sweep_${short}_spm8192"
+  local root="${DATA_DIR}/tokenizer_sweep_${RECIPE_SLUG}_${short}_spm8192"
   printf '%s|%s|%s' \
     "${root}/formosan_multilingual_nllb_spm8192_tokenizer" \
     "${root}/formosan_multilingual_nllb_spm8192_model" \
@@ -199,6 +240,7 @@ import sys
 
 manifest_path, profile_path, family, *inputs = sys.argv[1:]
 value = json.load(open(manifest_path, encoding="utf-8"))
+profile = json.load(open(profile_path, encoding="utf-8"))
 profile_hash = hashlib.sha256(open(profile_path, "rb").read()).hexdigest()
 input_hashes = {
     hashlib.sha256(open(path, "rb").read()).hexdigest()
@@ -215,6 +257,7 @@ recorded_hashes = {
 ok = (
     value.get("complete") is True
     and value.get("model_family") == family
+    and value.get("model_variant") == profile.get("model_variant")
     and value.get("profile", {}).get("sha256") == profile_hash
     and input_hashes <= recorded_hashes
 )
@@ -239,9 +282,9 @@ submit_nllb_setup() {
   local args=(
     --job-name="nllb_${CORPUS_NAME}_${short}_setup"
     --partition="${SETUP_PARTITION:-short}"
-    --time="${SETUP_TIME:-12:00:00}"
+    --time="${SETUP_TIME:-${PROFILE_SETUP_TIME}}"
     --cpus-per-task="${SETUP_CPUS:-16}"
-    --mem="${SETUP_MEM:-128G}"
+    --mem="${SETUP_MEM:-${PROFILE_SETUP_MEM}}"
   )
   [[ -z "${dependency}" ]] || args+=("${dependency}")
   args+=(
@@ -252,7 +295,7 @@ submit_nllb_setup() {
 }
 
 milmmt_setup_paths() {
-  local root="${DATA_DIR}/milmmt46_1b_v1"
+  local root="${DATA_DIR}/base_model_${RECIPE_SLUG}"
   printf '%s|%s|%s' \
     "${root}/model" \
     "${root}/model" \
@@ -272,9 +315,9 @@ submit_milmmt_setup() {
   submit_job "setup_milmmt" \
     --job-name="milmmt_${CORPUS_NAME}_setup" \
     --partition="${SETUP_PARTITION:-short}" \
-    --time="${SETUP_TIME:-04:00:00}" \
+    --time="${SETUP_TIME:-${PROFILE_SETUP_TIME}}" \
     --cpus-per-task="${SETUP_CPUS:-4}" \
-    --mem="${SETUP_MEM:-32G}" \
+    --mem="${SETUP_MEM:-${PROFILE_SETUP_MEM}}" \
     --export="ALL,EXP_DIR=${EXP_DIR},SCRATCH=${SCRATCH},PROFILE=${PROFILE},OUT_DIR=${root},SETUP_SCRIPT=${MILMMT_SETUP_IMPLEMENTATION},SETUP_SCRIPT_SHA256=${setup_sha}" \
     "${MILMMT_SETUP_SL}"
 }
@@ -299,13 +342,10 @@ submit_direction() {
   local dependency
   dependency="$(dependency_for "validate_${short}" "${setup_label}")"
 
-  local default_constraint="vr40g|vr80g|vr144g"
-  local default_mem="128G"
+  local default_constraint="${PROFILE_GPU_CONSTRAINT}"
+  local default_mem="${PROFILE_TRAIN_MEM}"
   local default_time="2-00:00:00"
-  local default_eval_batch="16"
-  if [[ "${MODEL_FAMILY}" == "milmmt" ]]; then
-    default_eval_batch="4"
-  fi
+  local default_eval_batch="${PROFILE_EVAL_BATCH}"
   local train_args=(
     --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}"
     --partition="${TRAIN_PARTITION:-medium}"
@@ -352,7 +392,7 @@ submit_direction() {
     local eval_args=(
       --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}_eval_${checkpoint}"
       --partition="${EVAL_PARTITION:-medium}"
-      --time="${EVAL_TIME:-08:00:00}"
+      --time="${EVAL_TIME:-${PROFILE_EVAL_TIME}}"
       --gres="${EVAL_GRES:-gpu:1}"
       --constraint="${EVAL_CONSTRAINT:-${default_constraint}}"
       --cpus-per-task="${EVAL_CPUS:-8}"
@@ -388,6 +428,7 @@ submit_direction() {
 echo "RUN_STAMP=${RUN_STAMP}"
 echo "CORPUS_NAME=${CORPUS_NAME}"
 echo "MODEL_FAMILY=${MODEL_FAMILY}"
+echo "MODEL_VARIANT=${MODEL_VARIANT}"
 echo "RECIPE_ID=${RECIPE_ID}"
 echo "STATE_DIR=${STATE_DIR}"
 echo "LOGS_DIR=${LOGS_DIR}"

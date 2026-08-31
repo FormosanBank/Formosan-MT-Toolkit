@@ -39,11 +39,17 @@ DIRECTIONS = {
 
 NLLB_LIDS = {code: CODE_TO_LID[code] for code in FORMOSAN_CODES}
 
-NLLB_REPOS = {
-    "f2en": "nllb200-formosan-en-spm8k",
-    "en2f": "nllb200-en-formosan-spm8k",
-    "f2zh": "nllb200-formosan-zh-spm8k",
-    "zh2f": "nllb200-zh-formosan-spm8k",
+NLLB_REPO_STEMS = {
+    "f2en": "formosan-en-spm8k",
+    "en2f": "en-formosan-spm8k",
+    "f2zh": "formosan-zh-spm8k",
+    "zh2f": "zh-formosan-spm8k",
+}
+
+NLLB_REPO_PREFIXES = {
+    "nllb-600m": "nllb200",
+    "nllb-1.3b": "nllb200-1.3b",
+    "nllb-3.3b": "nllb200-3.3b",
 }
 
 REQUIRED_FILES = {
@@ -66,8 +72,14 @@ def recipe_slug(recipe_id: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", recipe_id.lower()).strip("_")
 
 
-def repo_name(direction: str) -> str:
-    return NLLB_REPOS[direction]
+def repo_name(direction: str, profile: dict) -> str:
+    try:
+        prefix = NLLB_REPO_PREFIXES[profile["model_variant"]]
+    except KeyError as exc:
+        raise ValueError(
+            "Publication requires a supported NLLB model variant"
+        ) from exc
+    return f"{prefix}-{NLLB_REPO_STEMS[direction]}"
 
 
 def validate_checkpoint(path: Path) -> list[Path]:
@@ -293,6 +305,7 @@ model-index:
 
 **Direction:** {spec.title}<br>
 **Base model:** [`{base}`](https://huggingface.co/{base})<br>
+**Model variant:** `{profile['model_variant']}`<br>
 **Recipe:** `{profile['recipe_id']}`<br>
 **Release:** `{run_stamp}`, validation-selected step {metadata['step']:,}
 
@@ -471,6 +484,8 @@ def prepare_direction(
         metrics.get("direction") != spec.code
         or metadata.get("direction") != spec.code
         or metrics.get("model_family") != "nllb"
+        or metrics.get("model_variant") != profile["model_variant"]
+        or metadata.get("model_variant") != profile["model_variant"]
         or metrics.get("mt_standardization") != expected_mt_standard
         or metadata.get("mt_standardization") != expected_mt_standard
     ):
@@ -486,7 +501,7 @@ def prepare_direction(
             f"{metrics.get('samples')} != {expected_test_rows}"
         )
 
-    name = repo_name(spec.code)
+    name = repo_name(spec.code, profile)
     repo_id = f"{args.organization}/{name}"
     corpus = corpus_record(manifest, spec.target_lang)
     output = args.output_root / name
@@ -520,6 +535,7 @@ def prepare_direction(
         "schema_version": 2,
         "repo_id": repo_id,
         "direction": spec.code,
+        "model_variant": profile["model_variant"],
         "run_stamp": run_stamp,
         "source_git_commit": manifest.get("source_git_commit"),
         "checkpoint": args.checkpoint,
@@ -613,6 +629,7 @@ def main() -> None:
         "corpus": manifest["corpus_name"],
         "checkpoint_policy": args.checkpoint,
         "model_family": profile["model_family"],
+        "model_variant": profile["model_variant"],
         "mt_standardization": profile["mt_standardization"],
         "profile": profile_record(args.profile),
         "models": [

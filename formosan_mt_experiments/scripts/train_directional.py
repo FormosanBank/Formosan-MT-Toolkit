@@ -197,6 +197,7 @@ def main() -> None:
     load_path = resume_path or args.model
     checkpoint_contract = {
         "model_family": runtime.MODEL_FAMILY,
+        "model_variant": profile["model_variant"],
         "recipe_id": profile["recipe_id"],
         "mt_standardization": profile["mt_standardization"],
     }
@@ -253,6 +254,7 @@ def main() -> None:
         | {
             "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "model_family": runtime.MODEL_FAMILY,
+            "model_variant": profile["model_variant"],
             "run_contract_sha256": contract_sha256,
             "fused_optimizer_active": fused_optimizer_active,
             "trainable_parameters": sum(

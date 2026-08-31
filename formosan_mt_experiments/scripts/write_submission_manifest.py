@@ -123,6 +123,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "corpus_name": args.corpus_name,
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
+        "model_variant": profile["model_variant"],
         "base_model": profile["base_model"],
         "source_git_commit": args.git_commit,
         "code": build_code_inventory(

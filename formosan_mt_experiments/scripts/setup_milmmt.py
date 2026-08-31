@@ -100,6 +100,7 @@ def main() -> None:
         "stage": "base_model_ready",
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
+        "model_variant": profile["model_variant"],
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
         "base_model": base_model,

@@ -33,6 +33,8 @@ from columnar_io import read_csv_or_columnar, write_columnar_cache  # noqa: E402
 from experiment_config import (  # noqa: E402
     DEFAULT_PROFILE,
     MILMMT_PROFILE,
+    NLLB_1_3B_PROFILE,
+    NLLB_3_3B_PROFILE,
     SHARED_SPLIT_FIELDS,
     load_corpus_pipeline_config,
     load_profile,
@@ -64,6 +66,7 @@ from publish_huggingface_models import (  # noqa: E402
     nllb_usage,
     public_metrics,
     render_card,
+    repo_name,
     validate_checkpoint,
 )
 from setup_formosan_nllb200 import realign_embeddings  # noqa: E402
@@ -1892,6 +1895,83 @@ class TokenizerSetupTests(unittest.TestCase):
             8,
         )
 
+    def test_nllb_size_profiles_share_the_data_and_evaluation_contract(self) -> None:
+        profiles = [
+            load_profile(path)
+            for path in (
+                DEFAULT_PROFILE,
+                NLLB_1_3B_PROFILE,
+                NLLB_3_3B_PROFILE,
+            )
+        ]
+        self.assertEqual(
+            [profile["model_variant"] for profile in profiles],
+            ["nllb-600m", "nllb-1.3b", "nllb-3.3b"],
+        )
+        self.assertEqual(
+            [profile["base_model"] for profile in profiles],
+            [
+                {
+                    "name": "facebook/nllb-200-distilled-600M",
+                    "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
+                },
+                {
+                    "name": "facebook/nllb-200-1.3B",
+                    "revision": "b0de46b488af0cf31749cd8da5ed3171e11b2309",
+                },
+                {
+                    "name": "facebook/nllb-200-3.3B",
+                    "revision": "1a07f7d195896b2114afcb79b7b57ab512e7b43e",
+                },
+            ],
+        )
+        baseline = profiles[0]
+        for profile in profiles[1:]:
+            self.assertEqual(profile["splits"], baseline["splits"])
+            self.assertEqual(profile["tokenizer"], baseline["tokenizer"])
+            self.assertEqual(
+                profile["generation_defaults"],
+                baseline["generation_defaults"],
+            )
+            self.assertEqual(profile["training_defaults"]["steps"], 300000)
+            self.assertEqual(
+                profile["training_defaults"]["effective_batch_size"],
+                64,
+            )
+            self.assertEqual(
+                profile["training_defaults"]["batch_size"]
+                // profile["training_defaults"]["language_sampling_chunk_size"]
+                * profile["training_defaults"]["grad_accum_steps"],
+                8,
+            )
+            self.assertTrue(
+                profile["training_defaults"]["gradient_checkpointing"]
+            )
+        self.assertEqual(
+            [profile["training_defaults"]["batch_size"] for profile in profiles],
+            [32, 16, 8],
+        )
+        self.assertEqual(
+            [profile["training_defaults"]["grad_accum_steps"] for profile in profiles],
+            [2, 4, 8],
+        )
+        self.assertEqual(
+            len({profile["recipe_id"] for profile in profiles}),
+            3,
+        )
+
+    def test_experiment_profile_rejects_variant_model_disagreement(self) -> None:
+        profile = json.loads(NLLB_1_3B_PROFILE.read_text(encoding="utf-8"))
+        profile["base_model"]["name"] = "facebook/nllb-200-3.3B"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            with self.assertRaisesRegex(
+                SystemExit,
+                "variant, family, and base model disagree",
+            ):
+                load_profile(path)
+
     def test_experiment_profiles_match_canonical_split_policy(self) -> None:
         pipeline_splits = load_corpus_pipeline_config()["splits"]
         profile_splits = load_profile(DEFAULT_PROFILE)["splits"]
@@ -2246,8 +2326,17 @@ class ExperimentManifestTests(unittest.TestCase):
             'read -r -a checkpoints <<<"${EVAL_CHECKPOINTS:-best}"',
             submitter,
         )
-        self.assertIn('--time="${EVAL_TIME:-08:00:00}"', submitter)
+        self.assertIn(
+            '--time="${EVAL_TIME:-${PROFILE_EVAL_TIME}}"',
+            submitter,
+        )
         self.assertNotIn("for checkpoint in final best", submitter)
+        self.assertIn(
+            "tokenizer_sweep_${RECIPE_SLUG}_${short}_spm8192",
+            submitter,
+        )
+        self.assertIn("nllb-3.3b)", submitter)
+        self.assertIn('PROFILE_GPU_CONSTRAINT="vr144g"', submitter)
 
         bootstrap = (ROOT / "formosan_mt_experiments/slurm/bootstrap_metrics.sl").read_text(encoding="utf-8")
         self.assertIn("--cpus-per-task=8", bootstrap)
@@ -2292,6 +2381,14 @@ class ExperimentManifestTests(unittest.TestCase):
         repository_paths = {row["repository_path"] for row in artifacts}
         self.assertIn(
             "formosan_mt_experiments/scripts/setup_formosan_nllb200.py",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/configs/nllb_1_3b_experiment.json",
+            repository_paths,
+        )
+        self.assertIn(
+            "formosan_mt_experiments/configs/nllb_3_3b_experiment.json",
             repository_paths,
         )
         self.assertIn(
@@ -2360,6 +2457,7 @@ class ExperimentManifestTests(unittest.TestCase):
     def test_publication_card_records_release_and_hard_test_contract(self) -> None:
         profile = {
             "recipe_id": "nllb200-spm8k-directional-v3",
+            "model_variant": "nllb-600m",
             "base_model": {"name": "base/model", "revision": "abc123"},
             "mt_standardization": {"id": "formosan-mt-standard-v3"},
             "training_defaults": {
@@ -2439,6 +2537,25 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertIn("FormosanBank/formosan-mt-private", card)
         self.assertIn("`20260809-210523`", card)
         self.assertIn("nllb-200", card)
+
+    def test_publication_names_keep_600m_compatibility_and_isolate_larger_models(self) -> None:
+        profiles = {
+            "600m": load_profile(DEFAULT_PROFILE),
+            "1.3b": load_profile(NLLB_1_3B_PROFILE),
+            "3.3b": load_profile(NLLB_3_3B_PROFILE),
+        }
+        self.assertEqual(
+            repo_name("f2en", profiles["600m"]),
+            "nllb200-formosan-en-spm8k",
+        )
+        self.assertEqual(
+            repo_name("f2en", profiles["1.3b"]),
+            "nllb200-1.3b-formosan-en-spm8k",
+        )
+        self.assertEqual(
+            repo_name("f2en", profiles["3.3b"]),
+            "nllb200-3.3b-formosan-en-spm8k",
+        )
 
     def test_public_metrics_remove_cluster_paths(self) -> None:
         metrics = {

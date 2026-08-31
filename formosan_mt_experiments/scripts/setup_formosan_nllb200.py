@@ -307,6 +307,7 @@ def main() -> None:
         model = AutoModelForSeq2SeqLM.from_pretrained(
             base_model,
             revision=base_revision,
+            low_cpu_mem_usage=True,
         )
         merged = temporary_dir / "merged.model"
         added_pieces = merge_sentencepiece(
@@ -335,7 +336,11 @@ def main() -> None:
     shutil.rmtree(tokenizer_dir, ignore_errors=True)
     shutil.rmtree(model_dir, ignore_errors=True)
     tokenizer.save_pretrained(tokenizer_dir)
-    model.save_pretrained(model_dir, safe_serialization=True)
+    model.save_pretrained(
+        model_dir,
+        safe_serialization=True,
+        max_shard_size="5GB",
+    )
 
     tokenizer_files = [
         artifact_record(path)
@@ -353,6 +358,7 @@ def main() -> None:
         "stage": "base_spm_ready",
         "recipe_id": profile["recipe_id"],
         "model_family": profile["model_family"],
+        "model_variant": profile["model_variant"],
         "profile": profile_record(args.profile),
         "mt_standardization": {
             **mt_standard,

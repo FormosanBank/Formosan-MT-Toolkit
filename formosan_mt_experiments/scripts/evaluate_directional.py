@@ -91,6 +91,7 @@ def validate_evaluation_contract(
         run_contract.get("input", {}).get("sha256") != input_hash
         or run_contract.get("recipe_id") != profile["recipe_id"]
         or run_contract.get("model_family") != profile["model_family"]
+        or run_contract.get("model_variant") != profile["model_variant"]
         or run_contract.get("profile", {}).get("sha256") != profile_record(args.profile)["sha256"]
         or run_contract.get("mt_standardization") != profile["mt_standardization"]
     ):
@@ -600,6 +601,7 @@ def main() -> None:
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
         "model_family": runtime.MODEL_FAMILY,
+        "model_variant": profile["model_variant"],
         "contract": contract,
         "input": str(args.input),
         "model": str(args.model),

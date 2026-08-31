@@ -14,6 +14,8 @@ from reproducibility import sha256_file  # noqa: E402
 
 ACTIVE_EXPERIMENT_FILES = (
     "configs/default_experiment.json",
+    "configs/nllb_1_3b_experiment.json",
+    "configs/nllb_3_3b_experiment.json",
     "configs/milmmt_1b_experiment.json",
     "scripts/bootstrap_predictions.py",
     "scripts/build_experiment_splits.py",

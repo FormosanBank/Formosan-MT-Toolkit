@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
-  "recipe_id": "milmmt46-1b-v1-directional-v6",
-  "model_family": "milmmt",
-  "model_variant": "milmmt-1b",
+  "recipe_id": "nllb200-3.3b-spm8k-directional-v1",
+  "model_family": "nllb",
+  "model_variant": "nllb-3.3b",
   "corpus_pipeline_version": "formosan-mt-corpus-v3",
   "mt_standardization": {
     "id": "formosan-mt-standard-v3",
@@ -10,12 +10,8 @@
     "namespace": "formosan-mt"
   },
   "base_model": {
-    "name": "xiaomi-research/MiLMMT-46-1B-v1.0",
-    "revision": "4fc480b6c58dec29c159dcdf9fde0f6d5c354995"
-  },
-  "upstream_code": {
-    "repository": "https://github.com/xiaomi-research/gemmax",
-    "revision": "9bffa89ca7f6fa44072144171992dd82d52a8e9c"
+    "name": "facebook/nllb-200-3.3B",
+    "revision": "1a07f7d195896b2114afcb79b7b57ab512e7b43e"
   },
   "splits": {
     "ratios_by_target": {
@@ -45,76 +41,39 @@
     "headline_tier": "in_domain_hard"
   },
   "tokenizer": {
-    "mode": "native"
-  },
-  "prompt": {
-    "format": "xiaomi_translation_v1",
-    "use_metadata": true
-  },
-  "comparison": {
-    "baseline_recipe_id": "nllb200-spm8k-directional-v9",
-    "budget_basis": "sample_presentations",
-    "sample_presentations": 19200000,
-    "claim_scope": "matched_data_exposure_not_parameter_or_flop_matched",
-    "matched_training_fields": [
-      "steps",
-      "effective_batch_size",
-      "language_sampling_chunk_size",
-      "learning_rate",
-      "warmup_steps",
-      "language_sampling_alpha",
-      "lexical_row_sampling_weight",
-      "use_tags",
-      "dialect_tag_dropout",
-      "precision",
-      "log_interval",
-      "generation_eval_interval",
-      "generation_eval_samples_per_language",
-      "validation_beam",
-      "validation_metadata_mode",
-      "best_metric",
-      "early_stopping_patience",
-      "early_stopping_min_delta",
-      "early_stopping_start_step"
-    ],
-    "matched_generation_fields": [
-      "beam",
-      "max_new_tokens",
-      "min_new_tokens",
-      "no_repeat_ngram_size",
-      "repetition_penalty",
-      "length_penalty",
-      "metadata_modes",
-      "bootstrap_samples",
-      "bootstrap_seed"
-    ]
+    "mode": "spm",
+    "spm_vocab_sweep": [8192],
+    "default_spm_vocab": 8192,
+    "chinese_default_spm_vocab": 8192,
+    "min_char_frequency": 3,
+    "max_dialect_tags": 200,
+    "min_dialect_frequency": 3,
+    "training_columns": ["formosan_sentence"],
+    "setup_splits": ["train"]
   },
   "training_defaults": {
     "steps": 300000,
-    "batch_size": 32,
-    "grad_accum_steps": 2,
+    "batch_size": 8,
+    "grad_accum_steps": 8,
     "effective_batch_size": 64,
     "language_sampling_chunk_size": 8,
-    "max_length": 512,
+    "max_length": 384,
     "learning_rate": 0.00002,
     "warmup_steps": 4000,
-    "weight_decay": 0.01,
-    "optimizer": "adamw",
-    "lr_scheduler": "inverse_sqrt",
+    "weight_decay": 0.001,
     "language_sampling_alpha": 0.5,
     "lexical_row_sampling_weight": 0.25,
     "use_tags": true,
     "dialect_tag_dropout": 0.25,
     "precision": "bf16",
-    "load_dtype": "bf16",
-    "gradient_checkpointing": false,
-    "fused_optimizer": true,
-    "label_smoothing": 0.0,
+    "load_dtype": "fp32",
+    "gradient_checkpointing": true,
+    "label_smoothing": 0.1,
     "save_interval": 0,
     "log_interval": 500,
     "generation_eval_interval": 10000,
     "generation_eval_samples_per_language": 128,
-    "generation_eval_batch_size": 16,
+    "generation_eval_batch_size": 8,
     "validation_beam": 2,
     "validation_metadata_mode": "default",
     "best_metric": "chrF2",
@@ -124,7 +83,7 @@
   },
   "generation_defaults": {
     "beam": 4,
-    "max_length": 512,
+    "max_length": 384,
     "max_new_tokens": 256,
     "min_new_tokens": 1,
     "no_repeat_ngram_size": 0,
