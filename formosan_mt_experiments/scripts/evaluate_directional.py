@@ -23,7 +23,6 @@ from experiment_config import (
 from mt_common import (
     FORMOSAN_CODES,
     bool_series,
-    cjk_token_count,
     direction_choices,
     is_formosan_to_target,
     normalize_target_language,
@@ -31,7 +30,7 @@ from mt_common import (
     source_corpus,
     target_col_for,
     target_language_from_direction,
-    token_count,
+    target_units,
     write_json,
 )
 from mt_metrics import (
@@ -597,21 +596,12 @@ def main() -> None:
     )
     for mode, hypotheses in mode_hypotheses.items():
         predictions[f"hyp_{mode}"] = hypotheses
+    formosan_is_source = is_formosan_to_target(args.direction)
     predictions["src_tokens"] = [
-        (
-            cjk_token_count(text)
-            if args.target_lang == "chinese" and not is_formosan_to_target(args.direction)
-            else token_count(text)
-        )
-        for text in predictions["src"]
+        target_units(text, "formosan" if formosan_is_source else args.target_lang) for text in predictions["src"]
     ]
     predictions["ref_tokens"] = [
-        (
-            cjk_token_count(text)
-            if args.target_lang == "chinese" and is_formosan_to_target(args.direction)
-            else token_count(text)
-        )
-        for text in predictions["ref"]
+        target_units(text, args.target_lang if formosan_is_source else "formosan") for text in predictions["ref"]
     ]
     predictions["length_bin"] = predictions["src_tokens"].map(length_bin)
     bleu_tokenize = bleu_tokenizer_for(args.direction)

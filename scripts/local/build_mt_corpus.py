@@ -363,6 +363,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 [
                     script("scripts/local/filter_split_corpus.py"),
                     script("scripts/local/corpus_quality.py"),
+                    script("scripts/shared/text_units.py"),
                     script("scripts/local/pipeline_common.py"),
                     script("scripts/shared/columnar_io.py"),
                     script("scripts/shared/reproducibility.py"),
@@ -547,6 +548,7 @@ def build_aggregates(
         [
             script("scripts/local/build_big_corpus.py"),
             script("scripts/local/corpus_quality.py"),
+            script("scripts/shared/text_units.py"),
             script("scripts/local/pipeline_common.py"),
             script("scripts/shared/columnar_io.py"),
             script("scripts/shared/reproducibility.py"),
@@ -640,6 +642,7 @@ def run_pivot(
             [
                 script("scripts/local/pivot.py"),
                 script("scripts/local/corpus_quality.py"),
+                script("scripts/shared/text_units.py"),
                 script("scripts/local/pipeline_common.py"),
             ],
         )

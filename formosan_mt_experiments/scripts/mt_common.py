@@ -12,6 +12,7 @@ from typing import Iterable, Mapping
 
 import pandas as pd
 from experiment_config import read_csv_or_columnar, write_columnar_cache  # noqa: F401
+from text_units import has_terminal_punctuation, target_units, token_count
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT_ROOT = PROJECT_ROOT / "formosan_mt_experiments"
@@ -104,29 +105,6 @@ def skeleton_text(value: object) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch)[0] in {"L", "N", "M"})
 
 
-def token_count(value: object) -> int:
-    """Count whitespace-delimited units that contain letters or numbers."""
-    text = normalize_text(value)
-    return sum(
-        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token) for token in text.split()
-    )
-
-
-def cjk_token_count(value: object) -> int:
-    """Character-aware token proxy for Chinese text without whitespace."""
-    text = normalize_text(value)
-    if not text:
-        return 0
-    cjk_chars = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text)
-    non_cjk = re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", " ", text)
-    return len(cjk_chars) + token_count(non_cjk)
-
-
-def has_terminal_punctuation(value: object) -> bool:
-    text = str(value or "").rstrip().rstrip("\"'”’)]}》」』").rstrip()
-    return bool(text) and text[-1] in ".!?。！？"
-
-
 def normalize_target_language(target_lang: str | None = None, target_col: str | None = None) -> str:
     if target_lang:
         key = str(target_lang).strip().lower()
@@ -150,13 +128,6 @@ def target_tag_for(target_lang: str) -> str:
 
 def target_lid_for(target_lang: str) -> str:
     return TARGET_CONFIGS[normalize_target_language(target_lang)]["lid"]
-
-
-def target_token_count(value: object, target_lang: str | None = None, target_col: str | None = None) -> int:
-    lang = normalize_target_language(target_lang, target_col)
-    if lang == "chinese":
-        return cjk_token_count(value)
-    return token_count(value)
 
 
 def target_language_from_direction(direction: str, target_lang: str | None = None) -> str:
@@ -225,7 +196,7 @@ def add_normalized_columns(
     out["_target_skeleton"] = out[target_col].map(skeleton_text)
     out["_pair_skeleton"] = out["_formosan_skeleton"] + PAIR_SEP + out["_target_skeleton"]
     out["_formosan_tokens"] = out["formosan_sentence"].map(token_count)
-    out["_target_tokens"] = out[target_col].map(lambda x: target_token_count(x, target_lang=lang))
+    out["_target_tokens"] = out[target_col].map(lambda value: target_units(value, lang))
     out["_formosan_terminal"] = out["formosan_sentence"].map(has_terminal_punctuation)
     out["_target_terminal"] = out[target_col].map(has_terminal_punctuation)
     out["_short_entry"] = (out["_formosan_tokens"] <= 2) & (out["_target_tokens"] <= 3)

@@ -5,16 +5,25 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import sys
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shared"))
+from text_units import (  # noqa: E402
+    HAN_RE,
+    has_terminal_punctuation,
+    target_units,
+    token_count,
+)
+
 WHITESPACE_RE = re.compile(r"\s+")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
-CJK_RE = re.compile(r"[\u3400-\u9FFF\U00020000-\U0002B81F\uF900-\uFAFF]")
 KANA_HANGUL_RE = re.compile(r"[\u3040-\u30FF\uAC00-\uD7AF]")
 LATIN_RE = re.compile(r"[A-Za-z\u00C0-\u024F]")
 URL_RE = re.compile(r"(?:https?://|www\.)", re.IGNORECASE)
@@ -64,8 +73,6 @@ MIXED_CASE_GLOSS_CODE_RE = re.compile(r"^(?=.{2,8}$)(?=.*[a-z])(?=(?:[^A-Z]*[A-Z
 LEXICAL_STRONG_BOUNDARY_RE = re.compile(r"\S[=_]\S")
 LEXICAL_AMBIGUOUS_BOUNDARY_RE = re.compile(r"\S[-/]\S")
 GLOSS_TOKEN_EDGE_PUNCTUATION = "()[]{}<>,;:!?\"“”‘’'"
-TERMINAL_PUNCTUATION = ".!?。！？"
-TRAILING_CLOSERS = "\"'”’)]}》」』"
 ENGLISH_TITLE_WORD_RE = re.compile(r"^[A-Z][A-Za-z'’-]*$")
 CHINESE_LATIN_GLOSS_BOUNDARY_RE = re.compile(r"(?:[\u3400-\u9FFF][=_-][A-Za-z]|[A-Za-z][=_-][\u3400-\u9FFF])")
 CHINESE_STRONG_GLOSS_BOUNDARY_RE = re.compile(r"[\u3400-\u9FFF]=[\u3400-\u9FFF]")
@@ -215,25 +222,6 @@ def is_only_punctuation_or_symbols(value: str) -> bool:
     return not any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in value)
 
 
-def token_count(value: str) -> int:
-    return sum(
-        any(unicodedata.category(character)[0] in {"L", "N", "M"} for character in token) for token in value.split()
-    )
-
-
-def target_units(value: str, target_language: str) -> int:
-    if target_language == "chinese":
-        cjk = len(CJK_RE.findall(value))
-        non_cjk = CJK_RE.sub(" ", value)
-        return cjk + token_count(non_cjk)
-    return token_count(value)
-
-
-def has_terminal_punctuation(value: str) -> bool:
-    text = value.rstrip().rstrip(TRAILING_CLOSERS).rstrip()
-    return bool(text) and text[-1] in TERMINAL_PUNCTUATION
-
-
 def normalized_row_type(value: object) -> str:
     existing = str(value or "").strip().lower()
     if existing in {"sentence", "lexeme", "morpheme"}:
@@ -243,7 +231,7 @@ def normalized_row_type(value: object) -> str:
 
 def script_counts(value: str) -> dict[str, int]:
     return {
-        "cjk": len(CJK_RE.findall(value)),
+        "cjk": len(HAN_RE.findall(value)),
         "kana_hangul": len(KANA_HANGUL_RE.findall(value)),
         "latin": len(LATIN_RE.findall(value)),
     }
@@ -368,7 +356,7 @@ def has_unbalanced_target_delimiters(value: str) -> bool:
 
 def english_language_quality(value: str) -> tuple[str, tuple[str, ...]]:
     """Return a quarantine reason or train-only flag for doubtful English."""
-    if CJK_RE.search(value) or KANA_HANGUL_RE.search(value):
+    if HAN_RE.search(value) or KANA_HANGUL_RE.search(value):
         return "english_target_script_mismatch", ()
     words = [match.group(0).casefold() for match in ENGLISH_WORD_RE.finditer(value)]
     anchor_candidates = {re.split(r"['’]", word, maxsplit=1)[0] for word in words}
@@ -402,7 +390,7 @@ def target_alignment_artifact_reason(
     """Detect source text copied in front of a free target translation."""
     if target_language != "chinese":
         return ""
-    first_han = CJK_RE.search(target)
+    first_han = HAN_RE.search(target)
     if first_han is None:
         return ""
     prefix = target[: first_han.start()].strip()
@@ -658,7 +646,7 @@ def quality_decision(
             return QualityDecision("quarantine", length_reason)
     if not keep_redactions and (REDACTION_RE.search(source) or REDACTION_RE.search(target)):
         return QualityDecision("rejected", "redaction_placeholder")
-    if CJK_RE.search(source) or KANA_HANGUL_RE.search(source):
+    if HAN_RE.search(source) or KANA_HANGUL_RE.search(source):
         return QualityDecision("quarantine", "non_formosan_script_in_source")
     if row_type == "sentence" and ("=" in source or "Ø" in source):
         return QualityDecision("quarantine", "segmentation_marker_in_standard_sentence")

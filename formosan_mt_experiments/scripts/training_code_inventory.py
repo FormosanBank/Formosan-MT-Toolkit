@@ -62,6 +62,7 @@ ACTIVE_REPOSITORY_FILES = (
     "scripts/shared/columnar_io.py",
     "scripts/shared/reproducibility.py",
     "scripts/shared/split_policy.py",
+    "scripts/shared/text_units.py",
 )
 
 

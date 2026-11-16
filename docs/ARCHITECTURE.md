@@ -21,6 +21,7 @@ The active code is organized by responsibility:
 | Provenance loading and row extraction | `extraction_inventory.py`, `make_corpus.py` |
 | Row quality policy | `corpus_quality.py`, `filter_split_corpus.py` |
 | Pivot policy, cache, provider, and output | `pivot_corpus.py`, `pivot_cache.py`, `pivot_deepl.py`, `pivot_output.py` |
+| Text length units | `scripts/shared/text_units.py` |
 | Hard split allocation and similarity | `split_allocation.py`, `split_similarity.py`, `build_experiment_splits.py` |
 | Independent release gates | `validation_policy.py`, `validation_similarity.py`, `validate_experiment.py` |
 | Final artifact and provenance bundle | `build_release.py` |
@@ -229,7 +230,11 @@ standardization, language, escaping, delimiter, gloss, alignment, and
 compact-sentence gates.
 Each side must contain at least two information-bearing units. The pair must
 contain at least six units in total, or five when both sides have terminal
-sentence punctuation. Punctuation does not count as a Chinese unit. Rows with
+sentence punctuation. A unit is a whitespace-delimited token with a letter,
+number, or mark, or one Han character in Chinese; punctuation is never a unit.
+`text_units.py` holds that one definition, and the filter, the pivot floor,
+the splitter, the validator, and the evaluation length bins all use it. Text is
+counted as written, without Unicode compatibility folding. Rows with
 at most two Formosan units and at most three target units remain train-only,
 even when punctuated. Longer compact questions and clauses may enter
 evaluation. Explicit lexemes, morphemes, and explanatory definition rows
