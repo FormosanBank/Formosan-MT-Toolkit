@@ -726,31 +726,13 @@ class LeakageTests(unittest.TestCase):
 
     def test_group_selection_reserves_the_other_evaluation_split(self) -> None:
         candidates = [
-            GroupCandidate(
-                group_id=group_id,
-                eligible_rows=rows,
-                total_rows=rows,
-                non_eval_rows=0,
-                average_tokens=10,
-            )
+            GroupCandidate(group_id=group_id, eligible_rows=rows, priority=group_id)
             for group_id, rows in enumerate((104, 86, 16, 4))
         ]
-        validation = choose_groups(
-            candidates,
-            33,
-            reserve_rows=98,
-            seed=42,
-            attempts=20,
-        )
+        validation = choose_groups(candidates, 33, reserve_rows=98)
         validation_rows = sum(candidate.eligible_rows for candidate in candidates if candidate.group_id in validation)
         remaining = [candidate for candidate in candidates if candidate.group_id not in validation]
-        test = choose_groups(
-            remaining,
-            98,
-            reserve_rows=0,
-            seed=43,
-            attempts=20,
-        )
+        test = choose_groups(remaining, 98, reserve_rows=0)
         test_rows = sum(candidate.eligible_rows for candidate in remaining if candidate.group_id in test)
 
         self.assertGreaterEqual(validation_rows, 33)
@@ -1074,7 +1056,6 @@ class LeakageTests(unittest.TestCase):
                 min_target_tokens=2,
                 min_combined_tokens=6,
                 min_punctuated_combined_tokens=5,
-                attempts=10,
                 min_test_rows=0,
                 min_validate_rows=0,
                 ngram_threshold=0.82,
@@ -1310,7 +1291,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -1400,7 +1380,6 @@ class LeakageTests(unittest.TestCase):
             "min_target_tokens": 1,
             "min_combined_tokens": 2,
             "min_punctuated_combined_tokens": 2,
-            "attempts": 20,
             "min_test_rows": 5,
             "min_validate_rows": 2,
             "ngram_threshold": 0.82,
@@ -1437,7 +1416,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -1463,6 +1441,7 @@ class LeakageTests(unittest.TestCase):
                 "_source_corpus": ["SourceA"] * 6 + ["SourceB"] * 6,
                 "_formosan_tokens": [100] * 6 + [10] * 6,
                 "_target_tokens": [100] * 6 + [10] * 6,
+                "_selection_priority": range(12),
                 "pivot_origin": ["original"] * 12,
             }
         )
@@ -1480,8 +1459,6 @@ class LeakageTests(unittest.TestCase):
             },
             {"ami": (6, 0)},
             assignments,
-            seed=42,
-            attempts=20,
         )
 
         split = group_ids.map(assignments).fillna("train")
@@ -1509,7 +1486,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=0,
             min_validate_rows=0,
             ngram_threshold=0.82,
@@ -1547,7 +1523,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=0,
             min_validate_rows=0,
             ngram_threshold=0.95,
@@ -1598,7 +1573,6 @@ class LeakageTests(unittest.TestCase):
                 min_target_tokens=1,
                 min_combined_tokens=2,
                 min_punctuated_combined_tokens=2,
-                attempts=20,
                 min_test_rows=5,
                 min_validate_rows=2,
                 ngram_threshold=0.82,
@@ -1643,7 +1617,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,
@@ -1684,7 +1657,6 @@ class LeakageTests(unittest.TestCase):
             min_target_tokens=1,
             min_combined_tokens=2,
             min_punctuated_combined_tokens=2,
-            attempts=20,
             min_test_rows=5,
             min_validate_rows=2,
             ngram_threshold=0.82,

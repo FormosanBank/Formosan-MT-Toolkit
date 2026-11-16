@@ -25,6 +25,7 @@ from split_allocation import (
     fill_assignments,
     fill_language_shortfalls,
     materialize_splits,
+    selection_priorities,
     source_stratum_targets,
 )
 from split_cli import parse_split_args
@@ -183,7 +184,6 @@ def build_hard_split(
     min_target_tokens: int,
     min_combined_tokens: int,
     min_punctuated_combined_tokens: int,
-    attempts: int,
     min_test_rows: int,
     min_validate_rows: int,
     ngram_threshold: float,
@@ -232,6 +232,7 @@ def build_hard_split(
         + "\u241f"
         + frame["source"].astype(str)
     )
+    frame["_selection_priority"] = selection_priorities(frame["row_id"], seed)
     group_ids = leakage_group_ids(frame)
     ngram_indexes = SplitNgramIndexes(
         formosan=NgramSimilarityIndex(
@@ -346,8 +347,6 @@ def build_hard_split(
             effective_candidate_mask,
             source_targets,
             assignments,
-            seed=seed,
-            attempts=attempts,
         )
         fill_language_shortfalls(
             frame,
@@ -356,8 +355,6 @@ def build_hard_split(
             source_targets,
             targets,
             assignments,
-            seed=seed,
-            attempts=attempts,
         )
         split = materialize_splits(
             frame,
@@ -606,7 +603,6 @@ def main() -> None:
         min_combined_tokens=args.min_combined_tokens,
         min_punctuated_combined_tokens=args.min_punctuated_combined_tokens,
         max_eval_units_per_side=args.max_eval_units_per_side,
-        attempts=args.selection_attempts,
         min_test_rows=args.min_test_rows,
         min_validate_rows=args.min_validate_rows,
         ngram_threshold=args.ngram_jaccard_threshold,

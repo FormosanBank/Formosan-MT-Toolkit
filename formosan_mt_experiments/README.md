@@ -39,6 +39,8 @@ domain tags.
   with capacity-aware source-corpus representation;
 - human sentence references only in evaluation; synthetic pivots are appended
   to training after the human split;
+- evaluation rows sampled uniformly from eligible sentences within each
+  language and source, never ranked by length;
 - no lexical, morpheme, short, or ambiguous-normalization
   evaluation rows;
 - zero exact, skeleton, one-edit, and configured character n-gram conflicts

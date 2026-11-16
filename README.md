@@ -112,7 +112,8 @@ Production builds fail unless all of these conditions hold:
 - each language splits its deduplicated human pairs 70/10/20
   train/validation/test for English and 85/5/10 for Chinese, using only eligible
   human sentence rows in evaluation; human source-corpus representation is
-  balanced where group capacity permits;
+  balanced where group capacity permits, and evaluation rows are a seeded
+  uniform sample of the eligible sentences in each language and source;
 - synthetic pivot rows are appended to training after the human split;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;

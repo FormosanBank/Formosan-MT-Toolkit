@@ -3248,8 +3248,6 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                     1,
                     "--min-validate-rows",
                     1,
-                    "--selection-attempts",
-                    10,
                     "--tiers",
                     "in_domain_hard",
                 )
@@ -3301,8 +3299,8 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                     ).encode("utf-8")
                 ).hexdigest()
                 expected_signatures = {
-                    "en": "7fc0951c31639cef7ad16c1343d95640f51cbe4466dd778aad2108a18560afb5",
-                    "zh": "44bcc8b1dc77b9ae355729dd1c7e654769510f9eceab29f9018d8497380456e6",
+                    "en": "606b28bb0efa37166e04b5907f75ddfab228ceb3af779e93d696e8892cdb6664",
+                    "zh": "303a7c1947578cba758c1c822ee02c212fa9cfe46d7943f5d369021a94ca3b36",
                 }
                 self.assertEqual(signature, expected_signatures[short])
 

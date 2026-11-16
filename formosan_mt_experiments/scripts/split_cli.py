@@ -62,7 +62,6 @@ def parse_split_args() -> argparse.Namespace:
         type=int,
         default=SPLIT_DEFAULTS["min_validate_rows"],
     )
-    parser.add_argument("--selection-attempts", type=int, default=200)
     parser.add_argument(
         "--ngram-jaccard-threshold",
         type=float,

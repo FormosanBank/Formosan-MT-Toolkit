@@ -200,13 +200,22 @@ pairwise split labels and builds the model-facing split. It:
 4. appends every retained synthetic pivot row to training and balances
    evaluation across human source corpora where indivisible leakage groups
    permit;
-5. keeps exact and one-edit variants together, then removes held-out candidates
+5. draws evaluation rows as a seeded uniform sample of the eligible sentences
+   in each language and source corpus, so validation, test, and the eligible
+   sentences left in training share one length and content distribution;
+6. keeps exact and one-edit variants together, then removes held-out candidates
    at or above 0.95 character 3/4/5-gram Jaccard
    conflicts, blocks their full current similarity neighborhood, then refills
    evaluation from clean candidates; target overlap is conditioned by Formosan
    language, and no training rows are discarded to create the benchmark;
-6. fails if a language misses its exact quota or a source misses its declared
+7. fails if a language misses its exact quota or a source misses its declared
    capacity-aware tolerance.
+
+Eligibility alone decides which rows may be held out. The sample order is a
+hash of the split seed and the row ID, so it is reproducible, does not depend
+on row order, and does not reshuffle when the similarity gates block a
+candidate. Single-row leakage groups fill each quota exactly; a larger group
+moves as a unit and is used only when single rows cannot reach the quota.
 
 `config/corpus_pipeline.json` is the canonical split policy. Corpus builds,
 independent validation, and model profiles load the same values; profile drift
