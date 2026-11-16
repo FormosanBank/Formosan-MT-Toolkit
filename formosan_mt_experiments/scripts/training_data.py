@@ -15,7 +15,7 @@ from mt_common import (
     read_parallel_csv,
     row_type_sampling_probs,
 )
-from mt_metrics import score_translations
+from mt_metrics import bleu_tokenizer_for, score_translations
 
 
 def prepare_data(
@@ -384,7 +384,7 @@ def evaluate_generation(
     references: list[str] = []
     sources: list[str] = []
     by_language: dict[str, dict] = {}
-    bleu_tokenize = "zh" if args.direction == "f2zh" else "13a"
+    bleu_tokenize = bleu_tokenizer_for(args.direction)
     for lang, info in sorted(val_by_lang.items()):
         df = validation_subset(info["df"], lang, args)
         order = validation_length_order(df)

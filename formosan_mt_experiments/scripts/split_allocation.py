@@ -1,10 +1,16 @@
-"""Deterministic source-stratified allocation for hard MT splits."""
+"""Deterministic source-stratified allocation for hard MT splits.
+
+Evaluation rows are a seeded uniform sample of the eligible sentences in each
+language and source corpus. Eligibility decides which rows may be held out;
+nothing here prefers one eligible row over another, so validation, test, and
+the eligible sentences left in training share one distribution.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +25,30 @@ SPLIT_DEFAULTS = load_corpus_pipeline_config()["splits"]
 class GroupCandidate:
     group_id: int
     eligible_rows: int
-    total_rows: int
-    non_eval_rows: int
-    average_tokens: float
-    synthetic_fraction: float = 0.0
+    priority: int
+
+
+def selection_priorities(pair_keys: pd.Series, seed: int) -> pd.Series:
+    """Give every sentence pair a stable pseudo-random rank for evaluation sampling.
+
+    The rank depends only on the seed and the pair's language and normalized
+    text. It does not move when other rows are added, removed, or blocked by
+    the similarity gates, when a file is reordered upstream, or when the same
+    pair arrives through a different repository. A pair therefore tends to
+    stay on the same side of the split across rebuilds and across the public
+    and private corpora.
+    """
+    return pd.Series(
+        [
+            int.from_bytes(
+                hashlib.blake2b(f"{seed}\u241f{key}".encode(), digest_size=8).digest(),
+                "big",
+            )
+            for key in pair_keys.astype(str)
+        ],
+        index=pair_keys.index,
+        dtype="uint64",
+    )
 
 
 def split_targets(
@@ -54,6 +80,7 @@ def candidate_groups(
     group_ids: pd.Series,
     assignments: dict[int, str],
 ) -> list[GroupCandidate]:
+    """Return unassigned leakage groups in sampling order."""
     indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
     if indexes.empty:
         return []
@@ -65,30 +92,28 @@ def candidate_groups(
     if indexes.empty:
         return []
 
-    scores = pd.DataFrame(
-        {
-            "group_id": group_values,
-            "average_tokens": (
-                frame.loc[indexes, "_formosan_tokens"].to_numpy()
-                + frame.loc[indexes, "_target_tokens"].to_numpy()
-            )
-            / 2,
-        },
-        index=indexes,
-    )
-    grouped = scores.groupby("group_id", sort=False)["average_tokens"].agg(
-        ["size", "mean"]
-    )
-    return [
-        GroupCandidate(
-            group_id=int(row.Index),
-            eligible_rows=int(row.size),
-            total_rows=int(row.size),
-            non_eval_rows=0,
-            average_tokens=float(row.mean),
+    grouped = (
+        pd.DataFrame(
+            {
+                "group_id": group_values,
+                "priority": frame.loc[indexes, "_selection_priority"],
+            },
+            index=indexes,
         )
-        for row in grouped.itertuples()
-    ]
+        .groupby("group_id", sort=False)["priority"]
+        .agg(["size", "min"])
+    )
+    return sorted(
+        (
+            GroupCandidate(
+                group_id=int(row.Index),
+                eligible_rows=int(row.size),
+                priority=int(row.min),
+            )
+            for row in grouped.itertuples()
+        ),
+        key=lambda group: (group.priority, group.group_id),
+    )
 
 
 def choose_groups(
@@ -96,45 +121,29 @@ def choose_groups(
     target_rows: int,
     *,
     reserve_rows: int,
-    seed: int,
-    attempts: int,
     allow_overshoot: bool = True,
 ) -> set[int]:
+    """Take groups in sampling order until the row target is met.
+
+    Single-row groups fill the target exactly. Larger leakage groups move as
+    a unit and are used only when single rows cannot reach the target.
+    """
     if target_rows <= 0 or not candidates:
         return set()
-    rng = random.Random(seed)
-    tie_breakers = {
-        candidate.group_id: rng.random()
-        for candidate in candidates
-    }
-    ordered = sorted(
-        candidates,
-        key=lambda group: (
-            group.synthetic_fraction,
-            group.non_eval_rows / max(group.eligible_rows, 1),
-            -group.average_tokens,
-            tie_breakers[group.group_id],
-            group.group_id,
-        ),
-    )
-    quality_rank = {
-        candidate.group_id: rank
-        for rank, candidate in enumerate(ordered)
-    }
     total_rows = sum(candidate.eligible_rows for candidate in candidates)
     max_selected_rows = max(0, total_rows - reserve_rows)
     desired_rows = min(target_rows, max_selected_rows)
     if desired_rows <= 0:
         return set()
 
-    singletons = [group for group in ordered if group.eligible_rows == 1]
+    singletons = [group for group in candidates if group.eligible_rows == 1]
     if len(singletons) >= desired_rows:
         return {group.group_id for group in singletons[:desired_rows]}
 
     selected: set[int] = set()
     selected_rows = 0
     required_multi_rows = desired_rows - len(singletons)
-    for candidate in ordered:
+    for candidate in candidates:
         if candidate.eligible_rows == 1 or selected_rows >= required_multi_rows:
             continue
         if selected_rows + candidate.eligible_rows > desired_rows:
@@ -144,18 +153,18 @@ def choose_groups(
 
     if allow_overshoot and selected_rows < required_multi_rows:
         remaining = [
-            candidate
-            for candidate in ordered
+            (position, candidate)
+            for position, candidate in enumerate(candidates)
             if candidate.eligible_rows > 1
             and candidate.group_id not in selected
             and selected_rows + candidate.eligible_rows <= max_selected_rows
         ]
         if remaining:
-            candidate = min(
+            _, candidate = min(
                 remaining,
-                key=lambda group: (
-                    abs(selected_rows + group.eligible_rows - desired_rows),
-                    quality_rank[group.group_id],
+                key=lambda item: (
+                    abs(selected_rows + item[1].eligible_rows - desired_rows),
+                    item[0],
                 ),
             )
             selected.add(candidate.group_id)
@@ -164,58 +173,6 @@ def choose_groups(
     singleton_rows = min(len(singletons), desired_rows - selected_rows)
     selected.update(group.group_id for group in singletons[:singleton_rows])
     return selected
-
-
-def choose_singleton_groups(
-    frame: pd.DataFrame,
-    indexes: pd.Index,
-    group_ids: pd.Series,
-    assignments: dict[int, str],
-    target_rows: int,
-    *,
-    reserve_rows: int,
-    seed: int,
-) -> set[int]:
-    """Choose row-sized groups without constructing one pandas group per row."""
-    if target_rows <= 0 or indexes.empty:
-        return set()
-    candidate_group_ids = group_ids.loc[indexes]
-    if assignments:
-        unassigned = ~candidate_group_ids.isin(assignments)
-        indexes = indexes[unassigned.to_numpy()]
-        candidate_group_ids = candidate_group_ids.loc[indexes]
-    available = len(indexes)
-    selected_rows = min(target_rows, max(0, available - reserve_rows))
-    if selected_rows <= 0:
-        return set()
-
-    candidates = frame.loc[indexes]
-    synthetic = (
-        candidates.get(
-            "pivot_origin",
-            pd.Series("original", index=candidates.index),
-        )
-        .astype(str)
-        .eq("synthetic")
-    )
-    average_tokens = (
-        candidates["_formosan_tokens"] + candidates["_target_tokens"]
-    ) / 2
-    rng = random.Random(seed)
-    ranked = pd.DataFrame(
-        {
-            "group_id": candidate_group_ids.astype("int64"),
-            "synthetic": synthetic.astype("int8"),
-            "average_tokens": average_tokens.astype("float64"),
-            "tie_breaker": [rng.random() for _ in range(available)],
-        },
-        index=indexes,
-    ).sort_values(
-        ["synthetic", "average_tokens", "tie_breaker", "group_id"],
-        ascending=[True, False, True, True],
-        kind="stable",
-    )
-    return set(ranked["group_id"].head(selected_rows).astype(int))
 
 
 def apply_registry(
@@ -323,8 +280,11 @@ def source_stratum_targets(
             eligible_capacities,
             test_total + validate_total,
         )
+        # Divide every source's evaluation rows in the same proportion, so
+        # validation and test keep one source mix even when a source has too
+        # few eligible sentences to meet its share.
         validate_by_source = weighted_apportioned_counts(
-            source_rows,
+            evaluation_by_source,
             evaluation_by_source,
             validate_total,
         )
@@ -343,12 +303,8 @@ def fill_assignments(
     candidate_mask: pd.Series,
     targets: dict[tuple[str, str], tuple[int, int]],
     assignments: dict[int, str],
-    *,
-    seed: int,
-    attempts: int,
 ) -> None:
     eligible = frame[candidate_mask]
-    singleton_groups = group_ids.is_unique
     stratum_indexes = {
         (str(language), str(corpus)): group.index
         for (language, corpus), group in eligible.groupby(
@@ -363,15 +319,15 @@ def fill_assignments(
             stratum,
         ),
     )
-    for offset, (language, source) in enumerate(stratum_order):
+    for language, source in stratum_order:
         indexes = stratum_indexes.get((language, source), pd.Index([]))
         indexes = indexes[candidate_mask.loc[indexes].to_numpy()]
         stratum_group_ids = group_ids.loc[indexes]
         current = stratum_group_ids.map(assignments)
         target_test, target_validate = targets[(language, source)]
-        for split_name, target, reserve_target, seed_offset in (
-            ("validate", target_validate, target_test, 17),
-            ("test", target_test, target_validate, 0),
+        for split_name, target, reserve_target in (
+            ("validate", target_validate, target_test),
+            ("test", target_test, target_validate),
         ):
             current_rows = int(current.eq(split_name).sum())
             other_split = "test" if split_name == "validate" else "validate"
@@ -379,33 +335,18 @@ def fill_assignments(
                 0,
                 reserve_target - int(current.eq(other_split).sum()),
             )
-            target_rows = max(0, target - current_rows)
-            choice_seed = seed + offset * 997 + seed_offset
-            if singleton_groups:
-                groups = choose_singleton_groups(
+            groups = choose_groups(
+                candidate_groups(
                     frame,
                     indexes,
+                    candidate_mask,
                     group_ids,
                     assignments,
-                    target_rows,
-                    reserve_rows=reserve_rows,
-                    seed=choice_seed,
-                )
-            else:
-                groups = choose_groups(
-                    candidate_groups(
-                        frame,
-                        indexes,
-                        candidate_mask,
-                        group_ids,
-                        assignments,
-                    ),
-                    target_rows,
-                    reserve_rows=reserve_rows,
-                    seed=choice_seed,
-                    attempts=attempts,
-                    allow_overshoot=False,
-                )
+                ),
+                max(0, target - current_rows),
+                reserve_rows=reserve_rows,
+                allow_overshoot=False,
+            )
             for group in groups:
                 assignments[group] = split_name
             current = stratum_group_ids.map(assignments)
@@ -450,14 +391,9 @@ def fill_language_shortfalls(
     source_targets: dict[tuple[str, str], tuple[int, int]],
     language_targets: dict[str, tuple[int, int]],
     assignments: dict[int, str],
-    *,
-    seed: int,
-    attempts: int,
 ) -> None:
     eligible = frame[candidate_mask]
-    for offset, (language, language_frame) in enumerate(
-        eligible.groupby("lang_code", sort=True)
-    ):
+    for language, language_frame in eligible.groupby("lang_code", sort=True):
         language_key = str(language)
         indexes = language_frame.index
         language_group_ids = group_ids.loc[indexes]
@@ -469,9 +405,9 @@ def fill_language_shortfalls(
                 "_source_corpus", sort=True
             )
         }
-        for split_name, target, seed_offset in (
-            ("validate", target_validate, 43),
-            ("test", target_test, 29),
+        for split_name, target in (
+            ("validate", target_validate),
+            ("test", target_test),
         ):
             missing = max(0, target - int(current.eq(split_name).sum()))
             if not missing:
@@ -546,13 +482,6 @@ def fill_language_shortfalls(
                     candidates,
                     desired_rows,
                     reserve_rows=reserve_rows,
-                    seed=(
-                        seed
-                        + offset * 1543
-                        + seed_offset
-                        + sum(map(ord, source))
-                    ),
-                    attempts=attempts,
                     allow_overshoot=True,
                 )
                 assignments.update(

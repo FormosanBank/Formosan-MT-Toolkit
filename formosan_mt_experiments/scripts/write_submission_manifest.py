@@ -62,15 +62,9 @@ def build_job_graph(
         }
         if not evaluations:
             raise ValueError(f"Submission state has no evaluation for direction {direction}")
-        bootstrap = {
-            checkpoint: job_ids[label]
-            for checkpoint in evaluations
-            if (label := f"bootstrap_{direction}_{checkpoint}") in job_ids
-        }
         graph["directions"][direction] = {
             "train": job_ids[f"train_{direction}"],
             "evaluations": evaluations,
-            "bootstrap": bootstrap,
         }
     return graph
 

@@ -112,11 +112,16 @@ Production builds fail unless all of these conditions hold:
 - each language splits its deduplicated human pairs 70/10/20
   train/validation/test for English and 85/5/10 for Chinese, using only eligible
   human sentence rows in evaluation; human source-corpus representation is
-  balanced where group capacity permits;
+  balanced where group capacity permits, and evaluation rows are a seeded
+  uniform sample of the eligible sentences in each language and source;
 - synthetic pivot rows are appended to training after the human split;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;
+- validation and test have matching sentence-length distributions in every
+  language;
 - exact TAME-MT source, target, and pair exposure at 0.95 is zero;
+- the installed packages equal `requirements-corpus.txt`, and the checkout is
+  clean;
 - final files and their build environment are checksummed.
 
 See [Pipeline Architecture](docs/ARCHITECTURE.md) for stage ownership and
@@ -205,8 +210,9 @@ defaults. See [Experiment Training](formosan_mt_experiments/README.md).
 | `build_corpora.sh` | Stable public entrypoint. |
 | `config/` | Versioned MT standardization policy. |
 | `scripts/local/` | Acquisition, QC, extraction, filtering, pivoting, and release orchestration. |
+| `scripts/shared/` | Definitions both halves must agree on: text length units, split ratios, hashing, and the pinned-environment check. |
 | `formosan_mt_experiments/` | Split validation, model setup, training, evaluation, and Slurm launchers. |
-| `tests/` | Corpus, training, inference, and provenance contract tests. |
+| `tests/` | One module per pipeline boundary; shared fixtures in `support.py`. |
 
 Corpus rows, downloaded XML, credentials, paid caches, private repository
 inventories, model files, and run outputs are intentionally not versioned.

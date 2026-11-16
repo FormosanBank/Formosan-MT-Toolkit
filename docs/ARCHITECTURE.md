@@ -21,6 +21,7 @@ The active code is organized by responsibility:
 | Provenance loading and row extraction | `extraction_inventory.py`, `make_corpus.py` |
 | Row quality policy | `corpus_quality.py`, `filter_split_corpus.py` |
 | Pivot policy, cache, provider, and output | `pivot_corpus.py`, `pivot_cache.py`, `pivot_deepl.py`, `pivot_output.py` |
+| Text length units | `scripts/shared/text_units.py` |
 | Hard split allocation and similarity | `split_allocation.py`, `split_similarity.py`, `build_experiment_splits.py` |
 | Independent release gates | `validation_policy.py`, `validation_similarity.py`, `validate_experiment.py` |
 | Final artifact and provenance bundle | `build_release.py` |
@@ -199,13 +200,24 @@ pairwise split labels and builds the model-facing split. It:
 4. appends every retained synthetic pivot row to training and balances
    evaluation across human source corpora where indivisible leakage groups
    permit;
-5. keeps exact and one-edit variants together, then removes held-out candidates
+5. draws evaluation rows as a seeded uniform sample of the eligible sentences
+   in each language and source corpus, so validation, test, and the eligible
+   sentences left in training share one length and content distribution;
+6. keeps exact and one-edit variants together, then removes held-out candidates
    at or above 0.95 character 3/4/5-gram Jaccard
    conflicts, blocks their full current similarity neighborhood, then refills
    evaluation from clean candidates; target overlap is conditioned by Formosan
    language, and no training rows are discarded to create the benchmark;
-6. fails if a language misses its exact quota or a source misses its declared
+7. fails if a language misses its exact quota or a source misses its declared
    capacity-aware tolerance.
+
+Eligibility alone decides which rows may be held out. The sample order is a
+hash of the split seed, the language, and the normalized sentence pair. It is
+reproducible, does not depend on row order or on which repository supplied the
+pair, and does not reshuffle when the similarity gates block a candidate. A
+pair therefore tends to stay on the same side of the split when a corpus is
+rebuilt with new data, and between the public and private corpora. Single-row leakage groups fill each quota exactly; a larger group
+moves as a unit and is used only when single rows cannot reach the quota.
 
 `config/corpus_pipeline.json` is the canonical split policy. Corpus builds,
 independent validation, and model profiles load the same values; profile drift
@@ -218,7 +230,9 @@ sentences. Synthetic rows do not change those quotas and are added to training
 afterward, so final augmented-corpus percentages are intentionally more
 train-heavy. Source-corpus targets follow the human-source distribution and are
 constrained by each source's eligible capacity; unfillable shares are
-redistributed within the language.
+redistributed within the language. Every source then divides its evaluation
+rows between validation and test in the same proportion, so the two splits
+have one source mix even when a source cannot meet its share.
 Document overlap is reported as a diagnostic because some source corpora
 serialize thousands of unrelated rows in one XML file; treating that file as an
 indivisible split unit would recreate the source imbalance this stage prevents.
@@ -229,7 +243,11 @@ standardization, language, escaping, delimiter, gloss, alignment, and
 compact-sentence gates.
 Each side must contain at least two information-bearing units. The pair must
 contain at least six units in total, or five when both sides have terminal
-sentence punctuation. Punctuation does not count as a Chinese unit. Rows with
+sentence punctuation. A unit is a whitespace-delimited token with a letter,
+number, or mark, or one Han character in Chinese; punctuation is never a unit.
+`text_units.py` holds that one definition, and the filter, the pivot floor,
+the splitter, the validator, and the evaluation length bins all use it. Text is
+counted as written, without Unicode compatibility folding. Rows with
 at most two Formosan units and at most three target units remain train-only,
 even when punctuated. Longer compact questions and clauses may enter
 evaluation. Explicit lexemes, morphemes, and explanatory definition rows
@@ -255,6 +273,12 @@ document overlap, normalized/skeleton overlap, one-edit conflicts, exact
 character n-gram conflicts, lexical eligibility, and per-source split ratios
 from the emitted CSV. It requires sentence-level MT-standard evaluation rows.
 
+It also checks that validation resembles test. Within each language it
+compares mean pair length between the two splits and fails when they differ by
+more than 0.2 pooled standard deviations at more than four standard errors.
+Checkpoints are selected on validation and reported on test, so the two must
+come from one distribution.
+
 `audit_corpus_exposure.py` then runs TAME-MT 0.2.2 with exact native retrieval
 in both MT directions. It reports SourceExposure, TargetExposure,
 PairLeakTopK, exact overlap, and translation-memory baselines by split and
@@ -275,9 +299,17 @@ and training files remain CSV, and validation still recomputes leakage keys.
 
 Language preparation and corpus-wide release stages are content-addressed. A
 cache hit requires matching input, repository/blob, QC revision, profile,
-configuration, script, Python, and dependency hashes. Every cached output is
-SHA-256 verified; missing or edited artifacts rerun the affected stage and any
+configuration, and script hashes, the same Python version, and the same
+installed versions of the pinned packages. Every cached output is SHA-256
+verified; missing or edited artifacts rerun the affected stage and any
 downstream stage whose key changes.
+
+A production build starts only when the installed packages equal
+`requirements-corpus.txt`. A missing package, another version, or an editable
+checkout of a pinned package stops the build before any stage runs, and the
+message lists each difference. `--allow-environment-drift` is a diagnostic
+override; the manifest records the pinned and installed version of every
+package either way.
 
 Acquisition refreshes repository heads unless explicitly skipped or reused.
 Three language pipelines run concurrently by default. `--language-workers 1`
@@ -329,9 +361,15 @@ weights.
 
 `evaluate_directional.py` evaluates the entire human test split. Default
 dialect tags are the headline score; oracle dialect tags are a separate
-diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures, stratified
-bootstrap confidence intervals, exact/empty/length diagnostics, and
-language/source/dialect/length slices.
+diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures,
+exact/empty/length diagnostics, and language/source/dialect/length slices.
+They give both the pooled score and the macro average over languages, each
+with language-stratified bootstrap confidence intervals.
+
+`mt_metrics.py` extracts per-sentence sufficient statistics once per
+hypothesis set. Slices, resamples, and `compare_predictions.py`, the paired
+significance test between two systems on the same test rows, all sum those
+statistics instead of rescoring text.
 
 `nllb_runtime.py` owns NLLB tokenizer state, language controls, decoder start,
 and target selection. Every setup, run, checkpoint, and evaluation contract

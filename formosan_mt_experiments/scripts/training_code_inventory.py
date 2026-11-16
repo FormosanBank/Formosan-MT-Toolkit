@@ -19,6 +19,7 @@ ACTIVE_EXPERIMENT_FILES = (
     "configs/milmmt_1b_experiment.json",
     "scripts/bootstrap_predictions.py",
     "scripts/build_experiment_splits.py",
+    "scripts/compare_predictions.py",
     "scripts/evaluate_directional.py",
     "scripts/experiment_config.py",
     "scripts/formosan_mt_inference.py",
@@ -44,7 +45,6 @@ ACTIVE_EXPERIMENT_FILES = (
     "scripts/validation_similarity.py",
     "scripts/validate_experiment.py",
     "scripts/write_submission_manifest.py",
-    "slurm/bootstrap_metrics.sl",
     "slurm/evaluate_directional.sl",
     "slurm/setup_base_model.sl",
     "slurm/setup_spm_sweep.sl",
@@ -62,6 +62,7 @@ ACTIVE_REPOSITORY_FILES = (
     "scripts/shared/columnar_io.py",
     "scripts/shared/reproducibility.py",
     "scripts/shared/split_policy.py",
+    "scripts/shared/text_units.py",
 )
 
 

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 import threading
 from pathlib import Path
 
-from pipeline_common import atomic_write_json, sha256_file, stable_json_hash, utc_now
+from pipeline_common import (
+    CORPUS_REQUIREMENTS_PATH,
+    atomic_write_json,
+    environment_report,
+    sha256_file,
+    stable_json_hash,
+    utc_now,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CACHE_SCHEMA_VERSION = 2
@@ -134,6 +142,17 @@ def artifact_record(path: Path, root: Path) -> dict[str, object]:
     return {**_file_stat(path), "sha256": cached_sha256(path, root)}
 
 
+@functools.cache
+def installed_corpus_packages() -> dict[str, list[object]]:
+    """Identify the environment by what is installed, not by what is pinned.
+
+    Hashing the requirements file would keep serving cached stage outputs after
+    the installed packages change underneath an unchanged pin file.
+    """
+    packages = environment_report(CORPUS_REQUIREMENTS_PATH)["packages"]
+    return {name: [record["installed"], record["editable"]] for name, record in packages.items()}
+
+
 def stage_key(name: str, payload: dict[str, object], scripts: list[Path]) -> str:
     return stable_json_hash(
         {
@@ -145,7 +164,7 @@ def stage_key(name: str, payload: dict[str, object], scripts: list[Path]) -> str
             },
             "runtime": {
                 "python": list(sys.version_info[:3]),
-                "requirements_sha256": sha256_file(PROJECT_ROOT / "requirements.txt"),
+                "packages": installed_corpus_packages(),
             },
         }
     )

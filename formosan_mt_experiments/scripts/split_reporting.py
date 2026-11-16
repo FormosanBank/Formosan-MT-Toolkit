@@ -56,6 +56,25 @@ class SplitReportContext:
     registry_stats: dict
 
 
+def evaluation_length_balance(
+    frame: pd.DataFrame,
+    candidate_mask: pd.Series,
+) -> dict[str, dict[str, float]]:
+    """Mean pair length of eligible sentences by language and split.
+
+    Validation and test are sampled the same way, so their means should match.
+    Training can differ because evaluation follows each source's share of all
+    human pairs, and sources differ in length and in how much is eligible.
+    """
+    eligible = frame[candidate_mask & frame["split"].isin({"train", "validate", "test"})]
+    lengths = (eligible["_formosan_tokens"] + eligible["_target_tokens"]).astype(float)
+    means = lengths.groupby([eligible["lang_code"].astype(str), eligible["split"]]).mean()
+    return {
+        language: {split: round(float(value), 3) for split, value in means.loc[language].items()}
+        for language in sorted(means.index.get_level_values(0).unique())
+    }
+
+
 def build_split_report(context: SplitReportContext) -> dict:
     frame = context.frame
     output = context.output
@@ -343,6 +362,8 @@ def build_split_report(context: SplitReportContext) -> dict:
         "languages": context.language_reports,
         "source_strata": source_reports,
         "source_distribution_total_variation": source_distribution_tvd,
+        "evaluation_selection": "seeded_uniform_within_language_and_source",
+        "evaluation_length_balance": evaluation_length_balance(frame, context.candidate_mask),
         "ratio_basis": SPLIT_DEFAULTS["ratio_basis"],
         "required_human_ratios": {
             "train": round(1.0 - context.test_ratio - context.val_ratio, 12),

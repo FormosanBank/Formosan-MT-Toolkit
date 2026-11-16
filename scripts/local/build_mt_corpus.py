@@ -51,7 +51,9 @@ from build_release import (
     write_manifest,
 )
 from pipeline_common import (
+    CORPUS_REQUIREMENTS_PATH,
     PIPELINE_CONFIG_PATH,
+    environment_report,
     git_state,
     load_pipeline_config,
     sha256_file,
@@ -363,6 +365,7 @@ def build_language(lang: Language, args: argparse.Namespace, paths: BuildPaths) 
                 [
                     script("scripts/local/filter_split_corpus.py"),
                     script("scripts/local/corpus_quality.py"),
+                    script("scripts/shared/text_units.py"),
                     script("scripts/local/pipeline_common.py"),
                     script("scripts/shared/columnar_io.py"),
                     script("scripts/shared/reproducibility.py"),
@@ -547,6 +550,7 @@ def build_aggregates(
         [
             script("scripts/local/build_big_corpus.py"),
             script("scripts/local/corpus_quality.py"),
+            script("scripts/shared/text_units.py"),
             script("scripts/local/pipeline_common.py"),
             script("scripts/shared/columnar_io.py"),
             script("scripts/shared/reproducibility.py"),
@@ -640,6 +644,7 @@ def run_pivot(
             [
                 script("scripts/local/pivot.py"),
                 script("scripts/local/corpus_quality.py"),
+                script("scripts/shared/text_units.py"),
                 script("scripts/local/pipeline_common.py"),
             ],
         )
@@ -797,6 +802,8 @@ def run_build(args: argparse.Namespace) -> Path:
     write_manifest(args, language_reports, final_corpus_dir, paths)
     if not args.dry_run:
         print(f"Build complete: {paths.root}")
+        if not args.skip_hard_splits:
+            print(f"Size tables: python scripts/local/summarize_build.py {paths.root}")
     return paths.root
 
 
@@ -826,8 +833,28 @@ def run_public_private(args: argparse.Namespace) -> None:
         print(f"  - {root}")
 
 
+def environment_drift_message(environment: dict) -> str:
+    lines = [
+        f"  - {name}: pinned {environment['packages'][name]['pinned']}, "
+        + (
+            "installed as an editable checkout"
+            if environment["packages"][name]["editable"]
+            else f"installed {environment['packages'][name]['installed'] or 'nothing'}"
+        )
+        for name in environment["drift"]
+    ]
+    return (
+        f"Production corpus builds require the pinned environment in {environment['requirements']}:\n"
+        + "\n".join(lines)
+        + f"\nFix: pip install --force-reinstall -r {environment['requirements']}"
+    )
+
+
 def main() -> None:
     args = parse_args()
+    environment = environment_report(CORPUS_REQUIREMENTS_PATH)
+    if not args.dry_run and not args.allow_environment_drift and environment["drift"]:
+        raise SystemExit(environment_drift_message(environment))
     repository = git_state(PROJECT_ROOT)
     if (
         not args.dry_run

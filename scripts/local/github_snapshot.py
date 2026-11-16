@@ -28,7 +28,6 @@ GRAPHQL_BATCH_THRESHOLD = 20
 REQUEST_TIMEOUT = 30
 CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 CACHE_DIR = PROJECT_ROOT / "corpus_builds" / ".github_metadata_cache"
-EXACT_BIBLE_REPOS = ("Formosan-Taiwan-Bible-Society-Bibles",)
 
 LANGUAGE_EQUIVALENTS: dict[str, set[str]] = {
     "zh": {"zh", "zho", "chi", "cmn"},

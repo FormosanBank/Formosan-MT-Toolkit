@@ -79,17 +79,11 @@ MANIFEST_DIR="${MANIFEST_DIR:-${SCRATCH}/formosan_mt_experiments/manifests}"
 
 TRAIN_SL="${TRAIN_SL:-${EXP_DIR}/slurm/train_directional.sl}"
 EVAL_SL="${EVAL_SL:-${EXP_DIR}/slurm/evaluate_directional.sl}"
-BOOTSTRAP_SL="${BOOTSTRAP_SL:-${EXP_DIR}/slurm/bootstrap_metrics.sl}"
 VALIDATE_SL="${VALIDATE_SL:-${EXP_DIR}/slurm/validate_corpus.sl}"
 NLLB_SETUP_SL="${NLLB_SETUP_SL:-${EXP_DIR}/slurm/setup_spm_sweep.sl}"
 NLLB_SETUP_IMPLEMENTATION="${NLLB_SETUP_IMPLEMENTATION:-${EXP_DIR}/scripts/setup_formosan_nllb200.py}"
 MILMMT_SETUP_SL="${MILMMT_SETUP_SL:-${EXP_DIR}/slurm/setup_base_model.sl}"
 MILMMT_SETUP_IMPLEMENTATION="${MILMMT_SETUP_IMPLEMENTATION:-${EXP_DIR}/scripts/setup_milmmt.py}"
-
-case "${SUBMIT_BOOTSTRAP:-0}" in
-  0|1) ;;
-  *) echo "SUBMIT_BOOTSTRAP must be 0 or 1" >&2; exit 1 ;;
-esac
 
 mkdir -p "${STATE_DIR}" "${LOGS_DIR}"
 for short in en zh; do
@@ -400,28 +394,10 @@ submit_direction() {
     )
     [[ -z "${eval_dependency}" ]] || eval_args+=("${eval_dependency}")
     eval_args+=(
-      --export="$(common_export "${target_lang}" "${direction}"),MODEL=${run_out}/${checkpoint},TOKENIZER=${run_out}/${checkpoint},CORPUS_MANIFEST=${CORPUS_MANIFEST},VALIDATION_REPORT=${validation_report},RUN_CONTRACT=${run_out}/run_contract.json,OUT_DIR=${report_dir},BATCH_SIZE=${default_eval_batch}"
+      --export="$(common_export "${target_lang}" "${direction}"),MODEL=${run_out}/${checkpoint},TOKENIZER=${run_out}/${checkpoint},CORPUS_MANIFEST=${CORPUS_MANIFEST},VALIDATION_REPORT=${validation_report},RUN_CONTRACT=${run_out}/run_contract.json,OUT_DIR=${report_dir},BATCH_SIZE=${default_eval_batch},BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-1000},BOOTSTRAP_SEED=${BOOTSTRAP_SEED:-42}"
       "${EVAL_SL}"
     )
     submit_job "eval_${direction}_${checkpoint}" "${eval_args[@]}"
-
-    if [[ "${SUBMIT_BOOTSTRAP:-0}" == "1" ]]; then
-      local bootstrap_dependency
-      bootstrap_dependency="$(dependency_for "eval_${direction}_${checkpoint}")"
-      local bootstrap_args=(
-        --job-name="${MODEL_FAMILY}_${CORPUS_NAME}_${direction}_bootstrap_${checkpoint}"
-        --partition="${BOOTSTRAP_PARTITION:-short}"
-        --time="${BOOTSTRAP_TIME:-08:00:00}"
-        --cpus-per-task="${BOOTSTRAP_CPUS:-8}"
-        --mem="${BOOTSTRAP_MEM:-64G}"
-      )
-      [[ -z "${bootstrap_dependency}" ]] || bootstrap_args+=("${bootstrap_dependency}")
-      bootstrap_args+=(
-        --export="ALL,EXP_DIR=${EXP_DIR},PREDICTIONS=${report_dir}/predictions.csv,METRICS=${report_dir}/metrics.json,BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-200},BOOTSTRAP_SEED=${BOOTSTRAP_SEED:-42},BOOTSTRAP_WORKERS=${BOOTSTRAP_CPUS:-8}"
-        "${BOOTSTRAP_SL}"
-      )
-      submit_job "bootstrap_${direction}_${checkpoint}" "${bootstrap_args[@]}"
-    fi
   done
 }
 

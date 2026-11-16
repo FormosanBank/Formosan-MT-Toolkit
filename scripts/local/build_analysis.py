@@ -250,6 +250,7 @@ def analysis_stage_key(
             script("scripts/shared/columnar_io.py"),
             script("scripts/shared/reproducibility.py"),
             script("scripts/shared/split_policy.py"),
+            script("scripts/shared/text_units.py"),
             script("formosan_mt_experiments/configs/default_experiment.json"),
         ],
     )

@@ -43,6 +43,10 @@ from corpus_quality import (  # noqa: E402
 )
 
 EVAL_SPLITS = {"validate", "valid", "val", "test"}
+# Validation and test are drawn the same way, so their lengths should match.
+# A language fails only when the gap is both large and far outside chance.
+LENGTH_BALANCE_MAX_EFFECT = 0.2
+LENGTH_BALANCE_MIN_Z = 4.0
 REQUIRED_PROVENANCE = {
     "row_id",
     "source_record_id",
@@ -124,6 +128,40 @@ def validate_provenance(frame: pd.DataFrame) -> dict[str, object]:
             and not mt_contract_error
         ),
     }
+
+
+def validate_test_length_balance(
+    keyed: pd.DataFrame,
+    split: pd.Series,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    """Compare validation and test pair lengths within each language.
+
+    The effect is the difference in mean pair length in pooled standard
+    deviations. Checkpoints are selected on validation and reported on test,
+    so a validation set that is systematically longer or shorter than test
+    makes both numbers misleading.
+    """
+    units = (keyed["_formosan_tokens"] + keyed["_target_tokens"]).astype(float)
+    report: dict[str, dict[str, float]] = {}
+    failures: dict[str, dict[str, float]] = {}
+    for language, indexes in keyed.groupby("lang_code", sort=True).groups.items():
+        language_split = split.loc[indexes]
+        validate = units.loc[indexes][language_split.eq("validate")]
+        test = units.loc[indexes][language_split.eq("test")]
+        if len(validate) < 2 or len(test) < 2:
+            continue
+        pooled = math.sqrt((validate.var(ddof=1) + test.var(ddof=1)) / 2)
+        effect = float((validate.mean() - test.mean()) / pooled) if pooled else 0.0
+        values = {
+            "validate_mean_units": round(float(validate.mean()), 3),
+            "test_mean_units": round(float(test.mean()), 3),
+            "standardized_difference": round(effect, 4),
+            "z": round(effect / math.sqrt(1 / len(validate) + 1 / len(test)), 2),
+        }
+        report[str(language)] = values
+        if abs(effect) > LENGTH_BALANCE_MAX_EFFECT and abs(values["z"]) > LENGTH_BALANCE_MIN_Z:
+            failures[str(language)] = values
+    return report, failures
 
 
 def validate_splits(
@@ -469,7 +507,7 @@ def validate_splits(
                 language_test + language_validate,
             )
             validate_targets = weighted_apportioned_counts(
-                all_distribution,
+                evaluation_targets,
                 evaluation_targets,
                 language_validate,
             )
@@ -566,10 +604,12 @@ def validate_splits(
         target_ngram_index=target_ngram_index,
     )
     duplicate_pairs = int(keyed["_pair_key"].duplicated().sum())
+    length_balance, length_balance_failures = validate_test_length_balance(keyed, split)
     ok = (
         not unknown_splits
         and not ratio_failures
         and not source_ratio_failures
+        and not length_balance_failures
         and not split_report_errors
         and (not require_human_eval or synthetic_eval_rows == 0)
         and mt_ineligible_eval_rows == 0
@@ -639,5 +679,7 @@ def validate_splits(
         "source_ratio_failures": source_ratio_failures,
         "source_distribution_total_variation": source_distribution_tvd,
         "source_ratio_tolerance": source_ratio_tolerance,
+        "validate_test_length_balance": length_balance,
+        "validate_test_length_failures": length_balance_failures,
         "ngram_jaccard_threshold": ngram_threshold,
     }

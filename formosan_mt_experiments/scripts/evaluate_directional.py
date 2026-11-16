@@ -23,7 +23,6 @@ from experiment_config import (
 from mt_common import (
     FORMOSAN_CODES,
     bool_series,
-    cjk_token_count,
     direction_choices,
     is_formosan_to_target,
     normalize_target_language,
@@ -31,12 +30,15 @@ from mt_common import (
     source_corpus,
     target_col_for,
     target_language_from_direction,
-    token_count,
+    target_units,
     write_json,
 )
 from mt_metrics import (
+    SentenceStatistics,
+    bleu_tokenizer_for,
     bootstrap_confidence_intervals,
-    score_translations,
+    macro_average,
+    sentence_statistics,
 )
 from tqdm.auto import tqdm
 
@@ -298,29 +300,65 @@ def generate_mode(
 def group_scores(
     predictions: pd.DataFrame,
     group_column: str,
+    statistics: SentenceStatistics,
+) -> dict[str, dict[str, object]]:
+    """Score each group from the shared sentence statistics."""
+    positions = predictions.reset_index(drop=True).groupby(group_column, dropna=False).indices
+    return {
+        str(name): {"samples": len(rows), **statistics.score(rows)}
+        for name, rows in positions.items()
+    }
+
+
+def score_predictions(
+    predictions: pd.DataFrame,
+    modes: list[str],
     *,
-    hypothesis_column: str,
     lowercase: bool,
     bleu_tokenize: str,
-) -> dict[str, dict[str, object]]:
-    if group_column not in predictions:
-        return {}
-    return {
-        str(name): {
-            "samples": len(subset),
-            **score_translations(
-                subset[hypothesis_column].tolist(),
-                subset["ref"].tolist(),
-                sources=subset["src"].tolist(),
-                lowercase=lowercase,
-                bleu_tokenize=bleu_tokenize,
+    bootstrap_samples: int,
+    bootstrap_seed: int,
+) -> dict[str, object]:
+    """Return every metric section of the evaluation report.
+
+    Each metadata mode is tokenized once. Slices, the macro average, and the
+    bootstrap intervals all reuse the default mode's sentence statistics.
+    """
+    mode_statistics = {
+        mode: sentence_statistics(
+            predictions[f"hyp_{mode}"].tolist(),
+            predictions["ref"].tolist(),
+            sources=predictions["src"].tolist(),
+            lowercase=lowercase,
+            bleu_tokenize=bleu_tokenize,
+        )
+        for mode in modes
+    }
+    statistics = mode_statistics["default"]
+    languages = predictions["lang_code"].tolist()
+    confidence: dict[str, object] = {"status": "skipped", "samples": 0, "seed": bootstrap_seed}
+    if bootstrap_samples > 0:
+        confidence = {
+            "status": "complete",
+            "stratification": "language",
+            **bootstrap_confidence_intervals(
+                statistics,
+                strata=languages,
+                samples=bootstrap_samples,
+                seed=bootstrap_seed,
             ),
         }
-        for name, subset in predictions.groupby(
-            group_column,
-            dropna=False,
-        )
-        if not subset.empty
+    return {
+        "global": {"samples": len(predictions), **statistics.score()},
+        "macro_by_language": macro_average(statistics, languages),
+        "metadata_modes": {
+            mode: {"samples": len(predictions), **values.score()} for mode, values in mode_statistics.items()
+        },
+        "bootstrap_95_ci": confidence,
+        "by_language": group_scores(predictions, "lang_code", statistics),
+        "by_source_corpus": group_scores(predictions, "source_corpus", statistics),
+        "by_dialect": group_scores(predictions, "dialect", statistics),
+        "by_length_bin": group_scores(predictions, "length_bin", statistics),
     }
 
 
@@ -415,7 +453,6 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
         type=int,
         default=defaults["bootstrap_seed"],
     )
-    parser.add_argument("--bootstrap-workers", type=int, default=1)
     parser.add_argument("--limit-per-lang", type=int, default=0)
     parser.add_argument("--lowercase-bleu", action="store_true")
     parser.add_argument(
@@ -559,45 +596,22 @@ def main() -> None:
     )
     for mode, hypotheses in mode_hypotheses.items():
         predictions[f"hyp_{mode}"] = hypotheses
+    formosan_is_source = is_formosan_to_target(args.direction)
     predictions["src_tokens"] = [
-        (
-            cjk_token_count(text)
-            if args.target_lang == "chinese" and not is_formosan_to_target(args.direction)
-            else token_count(text)
-        )
-        for text in predictions["src"]
+        target_units(text, "formosan" if formosan_is_source else args.target_lang) for text in predictions["src"]
     ]
     predictions["ref_tokens"] = [
-        (
-            cjk_token_count(text)
-            if args.target_lang == "chinese" and is_formosan_to_target(args.direction)
-            else token_count(text)
-        )
-        for text in predictions["ref"]
+        target_units(text, args.target_lang if formosan_is_source else "formosan") for text in predictions["ref"]
     ]
     predictions["length_bin"] = predictions["src_tokens"].map(length_bin)
-    bleu_tokenize = "zh" if args.target_lang == "chinese" and is_formosan_to_target(args.direction) else "13a"
+    bleu_tokenize = bleu_tokenizer_for(args.direction)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(args.output_csv, index=False)
-    print(f"predictions checkpoint: {args.output_csv}")
+    print(f"predictions: {args.output_csv}")
 
-    mode_metrics = {
-        mode: {
-            "samples": len(predictions),
-            **score_translations(
-                predictions[f"hyp_{mode}"].tolist(),
-                predictions["ref"].tolist(),
-                sources=predictions["src"].tolist(),
-                lowercase=args.lowercase_bleu,
-                bleu_tokenize=bleu_tokenize,
-            ),
-        }
-        for mode in modes
-    }
-    primary = mode_metrics["default"]
     metrics = {
-        "schema_version": 3,
-        "complete": False,
+        "schema_version": 4,
+        "complete": True,
         "profile": profile_record(args.profile),
         "mt_standardization": profile["mt_standardization"],
         "model_family": runtime.MODEL_FAMILY,
@@ -613,69 +627,18 @@ def main() -> None:
         "split": args.split,
         "samples": len(predictions),
         "headline_metadata_mode": "default",
-        "global": primary,
-        "metadata_modes": mode_metrics,
         "metadata_fallbacks": metadata_fallbacks,
-        "bootstrap_95_ci": {
-            "status": ("pending" if args.bootstrap_samples > 0 else "skipped"),
-            "samples": args.bootstrap_samples,
-            "seed": args.bootstrap_seed,
-        },
-        "by_language": group_scores(
+        **score_predictions(
             predictions,
-            "lang_code",
-            hypothesis_column="hyp_default",
+            modes,
             lowercase=args.lowercase_bleu,
             bleu_tokenize=bleu_tokenize,
-        ),
-        "by_source_corpus": group_scores(
-            predictions,
-            "source_corpus",
-            hypothesis_column="hyp_default",
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
-        ),
-        "by_reference_origin": group_scores(
-            predictions,
-            "pivot_origin",
-            hypothesis_column="hyp_default",
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
-        ),
-        "by_dialect": group_scores(
-            predictions,
-            "dialect",
-            hypothesis_column="hyp_default",
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
-        ),
-        "by_length_bin": group_scores(
-            predictions,
-            "length_bin",
-            hypothesis_column="hyp_default",
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
+            bootstrap_samples=args.bootstrap_samples,
+            bootstrap_seed=args.bootstrap_seed,
         ),
     }
-    metrics["complete"] = True
     write_json(args.output_json, metrics)
-    print(json.dumps(primary, indent=2))
-    print(f"metrics checkpoint: {args.output_json}")
-
-    if args.bootstrap_samples > 0:
-        metrics["bootstrap_95_ci"] = bootstrap_confidence_intervals(
-            predictions["hyp_default"].tolist(),
-            predictions["ref"].tolist(),
-            strata=predictions["lang_code"].tolist(),
-            samples=args.bootstrap_samples,
-            seed=args.bootstrap_seed,
-            workers=args.bootstrap_workers,
-            lowercase=args.lowercase_bleu,
-            bleu_tokenize=bleu_tokenize,
-        )
-        metrics["bootstrap_95_ci"]["status"] = "complete"
-        write_json(args.output_json, metrics)
-    print(f"predictions: {args.output_csv}")
+    print(json.dumps({"global": metrics["global"], "macro_by_language": metrics["macro_by_language"]}, indent=2))
     print(f"metrics: {args.output_json}")
 
 

@@ -13,6 +13,7 @@ SHARED_SCRIPTS = Path(__file__).resolve().parents[1] / "shared"
 sys.path.insert(0, str(SHARED_SCRIPTS))
 from reproducibility import (  # noqa: E402,F401
     atomic_write_json,
+    environment_report,
     sha256_bytes,
     sha256_file,
     stable_json_hash,
@@ -24,6 +25,7 @@ from split_policy import (  # noqa: E402,F401
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "corpus_pipeline.json"
+CORPUS_REQUIREMENTS_PATH = PROJECT_ROOT / "requirements-corpus.txt"
 
 
 def load_pipeline_config() -> dict[str, Any]:
