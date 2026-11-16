@@ -1,55 +1,135 @@
 #!/usr/bin/env python3
-"""Shared corpus-level generation metrics for training and evaluation."""
+"""Corpus MT metrics built on per-sentence sufficient statistics.
+
+BLEU, chrF2, and TER are corpus-level functions of per-sentence counts.
+Extracting those counts once lets every slice, bootstrap resample, and paired
+system comparison sum rows instead of scoring the text again.
+"""
 
 from __future__ import annotations
 
-import multiprocessing
-import random
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-try:
-    from sacrebleu.metrics import BLEU, CHRF, TER
+import numpy as np
+from sacrebleu.metrics import BLEU, CHRF, TER
 
-    _SACREBLEU_ERROR = None
-except Exception as exc:  # pragma: no cover - exercised only in incomplete envs
-    BLEU = CHRF = TER = None  # type: ignore
-    _SACREBLEU_ERROR = exc
-
-
-_BOOTSTRAP_HYPOTHESES: tuple[str, ...] = ()
-_BOOTSTRAP_REFERENCES: tuple[str, ...] = ()
-_BOOTSTRAP_LOWERCASE = False
-_BOOTSTRAP_BLEU_TOKENIZE = "13a"
+METRIC_NAMES = ("BLEU", "chrF2", "TER")
+CONFIDENCE = 0.95
+# Bounds one block of bootstrap resample counts to about 32 MB.
+RESAMPLE_BLOCK_CELLS = 4_000_000
 
 
-def _initialize_bootstrap_worker(
-    hypotheses: tuple[str, ...],
-    references: tuple[str, ...],
-    lowercase: bool,
-    bleu_tokenize: str,
-) -> None:
-    global _BOOTSTRAP_HYPOTHESES
-    global _BOOTSTRAP_REFERENCES
-    global _BOOTSTRAP_LOWERCASE
-    global _BOOTSTRAP_BLEU_TOKENIZE
-
-    _BOOTSTRAP_HYPOTHESES = hypotheses
-    _BOOTSTRAP_REFERENCES = references
-    _BOOTSTRAP_LOWERCASE = lowercase
-    _BOOTSTRAP_BLEU_TOKENIZE = bleu_tokenize
+def bleu_tokenizer_for(direction: str) -> str:
+    """Chinese output has no word boundaries, so it needs sacreBLEU's zh tokenizer."""
+    return "zh" if str(direction).strip().lower() == "f2zh" else "13a"
 
 
-def _score_bootstrap_indexes(indexes: list[int]) -> tuple[float, float, float]:
-    metrics = score_translations(
-        [_BOOTSTRAP_HYPOTHESES[index] for index in indexes],
-        [_BOOTSTRAP_REFERENCES[index] for index in indexes],
-        lowercase=_BOOTSTRAP_LOWERCASE,
-        bleu_tokenize=_BOOTSTRAP_BLEU_TOKENIZE,
-    )
-    return (
-        float(metrics["BLEU"]),
-        float(metrics["chrF2"]),
-        float(metrics["TER"]),
+@dataclass(frozen=True)
+class SentenceStatistics:
+    """Sufficient statistics and diagnostics for one hypothesis set.
+
+    ``counts`` holds one row per sentence with the BLEU, chrF2, and TER count
+    columns side by side. Summing rows gives the counts of any subcorpus.
+    """
+
+    counts: np.ndarray
+    exact: np.ndarray
+    empty: np.ndarray
+    hypothesis_characters: np.ndarray
+    reference_characters: np.ndarray
+    source_copy: np.ndarray | None
+    _metrics: dict[str, object]
+    _columns: dict[str, slice]
+
+    def __len__(self) -> int:
+        return len(self.counts)
+
+    @property
+    def signatures(self) -> dict[str, str]:
+        return {name: str(metric.get_signature()) for name, metric in self._metrics.items()}
+
+    def scores_from_totals(self, totals: np.ndarray) -> dict[str, float]:
+        """Score one row of summed counts."""
+        return {
+            name: float(metric._compute_score_from_stats(totals[self._columns[name]]).score)
+            for name, metric in self._metrics.items()
+        }
+
+    def score(self, rows: np.ndarray | None = None) -> dict[str, object]:
+        """Return metrics and degeneration diagnostics for all rows or a subset."""
+
+        def select(values: np.ndarray) -> np.ndarray:
+            return values if rows is None else values[rows]
+
+        counts = select(self.counts)
+        if not len(counts):
+            raise ValueError("Cannot score an empty corpus.")
+        metrics: dict[str, object] = dict(self.scores_from_totals(counts.sum(axis=0)))
+        metrics["exact_match_rate"] = float(select(self.exact).mean())
+        metrics["empty_output_rate"] = float(select(self.empty).mean())
+        metrics["character_length_ratio"] = float(
+            select(self.hypothesis_characters).sum() / max(int(select(self.reference_characters).sum()), 1)
+        )
+        metrics["signatures"] = self.signatures
+        if self.source_copy is not None:
+            metrics["source_copy_rate"] = float(select(self.source_copy).mean())
+        return metrics
+
+
+def sentence_statistics(
+    hypotheses: Sequence[str],
+    references: Sequence[str],
+    *,
+    sources: Sequence[str] | None = None,
+    lowercase: bool = False,
+    bleu_tokenize: str = "13a",
+) -> SentenceStatistics:
+    """Tokenize and count every sentence pair exactly once."""
+    if len(hypotheses) != len(references):
+        raise ValueError("Hypothesis/reference counts do not match.")
+    if sources is not None and len(sources) != len(hypotheses):
+        raise ValueError("Source/hypothesis counts do not match.")
+    if not len(hypotheses):
+        raise ValueError("Cannot score an empty corpus.")
+
+    hyps = [str(text).strip() for text in hypotheses]
+    refs = [str(text).strip() for text in references]
+    metrics = {
+        "BLEU": BLEU(tokenize=bleu_tokenize, effective_order=True, lowercase=lowercase),
+        "chrF2": CHRF(),
+        "TER": TER(
+            normalized=True,
+            asian_support=bleu_tokenize == "zh",
+            case_sensitive=not lowercase,
+        ),
+    }
+    blocks = [
+        np.asarray(metric._extract_corpus_statistics(hyps, [refs]), dtype=np.float64) for metric in metrics.values()
+    ]
+    columns: dict[str, slice] = {}
+    offset = 0
+    for name, block in zip(metrics, blocks, strict=True):
+        columns[name] = slice(offset, offset + block.shape[1])
+        offset += block.shape[1]
+    source_copy = None
+    if sources is not None:
+        source_copy = np.array(
+            [
+                " ".join(hyp.casefold().split()) == " ".join(str(source).casefold().split())
+                for hyp, source in zip(hyps, sources, strict=True)
+            ],
+            dtype=bool,
+        )
+    return SentenceStatistics(
+        counts=np.hstack(blocks),
+        exact=np.array([hyp == ref for hyp, ref in zip(hyps, refs, strict=True)], dtype=bool),
+        empty=np.array([not hyp for hyp in hyps], dtype=bool),
+        hypothesis_characters=np.array([len(text) for text in hyps], dtype=np.int64),
+        reference_characters=np.array([len(text) for text in refs], dtype=np.int64),
+        source_copy=source_copy,
+        _metrics=metrics,
+        _columns=columns,
     )
 
 
@@ -62,159 +142,181 @@ def score_translations(
     bleu_tokenize: str = "13a",
 ) -> dict[str, object]:
     """Return comparable corpus MT metrics plus basic degeneration diagnostics."""
-    if _SACREBLEU_ERROR is not None:
-        raise RuntimeError(f"sacrebleu is required for MT metrics: {_SACREBLEU_ERROR}")
-    if len(hypotheses) != len(references):
-        raise ValueError("Hypothesis/reference counts do not match.")
-    if sources is not None and len(sources) != len(hypotheses):
-        raise ValueError("Source/hypothesis counts do not match.")
-    if not hypotheses:
-        raise ValueError("Cannot score an empty corpus.")
-
-    hyps = [str(text).strip() for text in hypotheses]
-    refs = [str(text).strip() for text in references]
-    hyp_chars = sum(len(text) for text in hyps)
-    ref_chars = sum(len(text) for text in refs)
-    bleu = BLEU(
-        tokenize=bleu_tokenize,
-        effective_order=True,
+    return sentence_statistics(
+        hypotheses,
+        references,
+        sources=sources,
         lowercase=lowercase,
-    )
-    chrf = CHRF()
-    ter = TER(
-        normalized=True,
-        asian_support=bleu_tokenize == "zh",
-        case_sensitive=not lowercase,
-    )
-    bleu_score = bleu.corpus_score(hyps, [refs])
-    chrf_score = chrf.corpus_score(hyps, [refs])
-    ter_score = ter.corpus_score(hyps, [refs])
-    metrics = {
-        "BLEU": float(bleu_score.score),
-        "chrF2": float(chrf_score.score),
-        "TER": float(ter_score.score),
-        "exact_match_rate": float(sum(hyp == ref for hyp, ref in zip(hyps, refs, strict=True)) / len(hyps)),
-        "empty_output_rate": float(sum(not hyp for hyp in hyps) / len(hyps)),
-        "character_length_ratio": float(hyp_chars / max(ref_chars, 1)),
-        "signatures": {
-            "BLEU": str(bleu.get_signature()),
-            "chrF2": str(chrf.get_signature()),
-            "TER": str(ter.get_signature()),
-        },
+        bleu_tokenize=bleu_tokenize,
+    ).score()
+
+
+def stratum_rows(strata: Sequence[str] | None, size: int) -> dict[str, np.ndarray]:
+    """Map each stratum name to its row positions, in sorted name order."""
+    if strata is None:
+        return {"all": np.arange(size)}
+    if len(strata) != size:
+        raise ValueError("Strata count does not match the scored sentences")
+    names = np.asarray([str(name) for name in strata], dtype=object)
+    return {name: np.flatnonzero(names == name) for name in sorted(set(names.tolist()))}
+
+
+# Scores are kept per view: the pooled corpus, the unweighted stratum average,
+# and each stratum. Internally a view is keyed by ``(report key, stratum)``.
+View = tuple[str, str]
+POOLED: View = ("metrics", "")
+MACRO: View = ("macro", "")
+
+
+def _with_macro(by_stratum: dict[str, dict], pooled: dict) -> dict[View, dict]:
+    return {
+        POOLED: pooled,
+        MACRO: {name: np.mean([scores[name] for scores in by_stratum.values()], axis=0) for name in METRIC_NAMES},
+        **{("by_stratum", stratum): scores for stratum, scores in by_stratum.items()},
     }
-    if sources is not None:
-        normalized_sources = [" ".join(str(text).casefold().split()) for text in sources]
-        normalized_hypotheses = [" ".join(text.casefold().split()) for text in hyps]
-        metrics["source_copy_rate"] = float(
-            sum(
-                hypothesis == source
-                for hypothesis, source in zip(
-                    normalized_hypotheses,
-                    normalized_sources,
-                    strict=True,
-                )
-            )
-            / len(hyps)
-        )
-    return metrics
 
 
-def percentile(values: list[float], probability: float) -> float:
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * probability
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return (
-        ordered[lower] * (1 - fraction)
-        + ordered[upper] * fraction
+def _report(views: dict[View, object]) -> dict[str, object]:
+    return {
+        "metrics": views[POOLED],
+        "macro": views[MACRO],
+        "by_stratum": {stratum: value for (key, stratum), value in views.items() if key == "by_stratum"},
+    }
+
+
+def _observed_scores(statistics: SentenceStatistics, groups: dict[str, np.ndarray]) -> dict[View, dict]:
+    return _with_macro(
+        {name: statistics.scores_from_totals(statistics.counts[rows].sum(axis=0)) for name, rows in groups.items()},
+        statistics.scores_from_totals(statistics.counts.sum(axis=0)),
     )
+
+
+def macro_average(statistics: SentenceStatistics, strata: Sequence[str]) -> dict[str, object]:
+    """Average each metric over strata so large languages do not dominate."""
+    groups = stratum_rows(strata, len(statistics))
+    macro = _observed_scores(statistics, groups)[MACRO]
+    return {"groups": len(groups), **{name: float(macro[name]) for name in METRIC_NAMES}}
+
+
+def _resampled_totals(
+    counts: np.ndarray,
+    groups: dict[str, np.ndarray],
+    samples: int,
+    seed: int,
+) -> dict[str, np.ndarray]:
+    """Return ``(samples, width)`` summed counts per stratum.
+
+    Drawing a stratum of ``m`` rows with replacement is a multinomial count
+    over its rows, so each block of resamples is one matrix product.
+    """
+    rng = np.random.default_rng(seed)
+    totals: dict[str, np.ndarray] = {}
+    for name, rows in groups.items():
+        block = counts[rows]
+        size = len(rows)
+        probabilities = np.full(size, 1.0 / size)
+        output = np.empty((samples, counts.shape[1]), dtype=np.float64)
+        step = max(1, RESAMPLE_BLOCK_CELLS // size)
+        for start in range(0, samples, step):
+            draws = rng.multinomial(size, probabilities, size=min(step, samples - start))
+            output[start : start + len(draws)] = draws.astype(np.float64) @ block
+        totals[name] = output
+    return totals
+
+
+def _resampled_scores(statistics: SentenceStatistics, totals: dict[str, np.ndarray]) -> dict[View, dict]:
+    def scored(values: np.ndarray) -> dict[str, np.ndarray]:
+        rows = [statistics.scores_from_totals(row) for row in values]
+        return {name: np.array([row[name] for row in rows]) for name in METRIC_NAMES}
+
+    return _with_macro(
+        {name: scored(values) for name, values in totals.items()},
+        scored(sum(totals.values())),
+    )
+
+
+def _interval(values: np.ndarray) -> dict[str, float]:
+    tail = (1.0 - CONFIDENCE) / 2 * 100
+    lower, median, upper = np.percentile(values, [tail, 50.0, 100.0 - tail])
+    return {"lower": float(lower), "median": float(median), "upper": float(upper)}
 
 
 def bootstrap_confidence_intervals(
-    hypotheses: Sequence[str],
-    references: Sequence[str],
+    statistics: SentenceStatistics,
     *,
     strata: Sequence[str] | None = None,
-    samples: int = 200,
+    samples: int = 1000,
     seed: int = 42,
-    workers: int = 1,
-    lowercase: bool = False,
-    bleu_tokenize: str = "13a",
 ) -> dict[str, object]:
-    """Return deterministic stratified 95% bootstrap intervals."""
+    """Return deterministic stratified bootstrap intervals.
+
+    ``metrics`` covers the pooled corpus, ``macro`` the unweighted stratum
+    average, and ``by_stratum`` each stratum on its own.
+    """
     if samples <= 0:
-        return {"samples": 0, "seed": seed, "metrics": {}}
-    if len(hypotheses) != len(references):
-        raise ValueError("Hypothesis/reference counts do not match")
-    if strata is None:
-        strata = ["all"] * len(hypotheses)
-    if len(strata) != len(hypotheses):
-        raise ValueError("Bootstrap strata count does not match outputs")
-    if workers <= 0:
-        raise ValueError("Bootstrap workers must be positive")
-    groups: dict[str, list[int]] = {}
-    for index, name in enumerate(strata):
-        groups.setdefault(str(name), []).append(index)
-    rng = random.Random(seed)
-    values = {"BLEU": [], "chrF2": [], "TER": []}
-
-    def sampled_indexes() -> list[int]:
-        return [
-            rng.choice(group)
-            for group in groups.values()
-            for _ in range(len(group))
-        ]
-
-    hypotheses_tuple = tuple(str(value) for value in hypotheses)
-    references_tuple = tuple(str(value) for value in references)
-    worker_count = min(workers, samples)
-    initializer_args = (
-        hypotheses_tuple,
-        references_tuple,
-        lowercase,
-        bleu_tokenize,
-    )
-    indexes = (sampled_indexes() for _ in range(samples))
-    if worker_count == 1:
-        _initialize_bootstrap_worker(*initializer_args)
-        scores = map(_score_bootstrap_indexes, indexes)
-        for bleu, chrf, ter in scores:
-            values["BLEU"].append(bleu)
-            values["chrF2"].append(chrf)
-            values["TER"].append(ter)
-    else:
-        start_method = (
-            "fork"
-            if "fork" in multiprocessing.get_all_start_methods()
-            else "spawn"
-        )
-        context = multiprocessing.get_context(start_method)
-        with context.Pool(
-            processes=worker_count,
-            initializer=_initialize_bootstrap_worker,
-            initargs=initializer_args,
-        ) as pool:
-            for bleu, chrf, ter in pool.imap(
-                _score_bootstrap_indexes,
-                indexes,
-                chunksize=1,
-            ):
-                values["BLEU"].append(bleu)
-                values["chrF2"].append(chrf)
-                values["TER"].append(ter)
+        raise ValueError("Bootstrap samples must be positive")
+    groups = stratum_rows(strata, len(statistics))
+    resampled = _resampled_scores(statistics, _resampled_totals(statistics.counts, groups, samples, seed))
     return {
         "samples": samples,
         "seed": seed,
-        "workers": worker_count,
-        "stratification": "language",
-        "confidence": 0.95,
-        "metrics": {
-            metric: {
-                "lower": percentile(scores, 0.025),
-                "median": percentile(scores, 0.5),
-                "upper": percentile(scores, 0.975),
+        "confidence": CONFIDENCE,
+        **_report(
+            {view: {name: _interval(scores[name]) for name in METRIC_NAMES} for view, scores in resampled.items()}
+        ),
+    }
+
+
+def paired_bootstrap_comparison(
+    baseline: SentenceStatistics,
+    system: SentenceStatistics,
+    *,
+    strata: Sequence[str] | None = None,
+    samples: int = 1000,
+    seed: int = 42,
+) -> dict[str, object]:
+    """Test whether two systems differ on the same test sentences.
+
+    Both systems are scored on identical stratified resamples. ``delta`` is
+    system minus baseline; lower TER is better. The two-sided p-value is the
+    shifted paired bootstrap test: the share of resampled differences, centered
+    on their mean, that are at least as large as the observed difference.
+    """
+    if samples <= 0:
+        raise ValueError("Bootstrap samples must be positive")
+    if len(baseline) != len(system):
+        raise ValueError("Paired comparison needs the same sentences for both systems")
+    if baseline.signatures != system.signatures:
+        raise ValueError("Paired comparison needs identical metric configurations")
+    groups = stratum_rows(strata, len(baseline))
+    width = baseline.counts.shape[1]
+    totals = _resampled_totals(np.hstack([baseline.counts, system.counts]), groups, samples, seed)
+    baseline_resampled = _resampled_scores(baseline, {name: values[:, :width] for name, values in totals.items()})
+    system_resampled = _resampled_scores(system, {name: values[:, width:] for name, values in totals.items()})
+    baseline_observed = _observed_scores(baseline, groups)
+    system_observed = _observed_scores(system, groups)
+
+    def compared(view: View) -> dict[str, dict[str, float]]:
+        output = {}
+        for name in METRIC_NAMES:
+            delta = float(system_observed[view][name] - baseline_observed[view][name])
+            differences = system_resampled[view][name] - baseline_resampled[view][name]
+            interval = _interval(differences)
+            centered = np.abs(differences - differences.mean())
+            output[name] = {
+                "baseline": float(baseline_observed[view][name]),
+                "system": float(system_observed[view][name]),
+                "delta": delta,
+                "delta_lower": interval["lower"],
+                "delta_upper": interval["upper"],
+                "p_value": float((np.sum(centered >= abs(delta)) + 1) / (samples + 1)) if delta else 1.0,
             }
-            for metric, scores in values.items()
-        },
+        return output
+
+    return {
+        "samples": samples,
+        "seed": seed,
+        "confidence": CONFIDENCE,
+        "sentences": len(baseline),
+        **_report({view: compared(view) for view in system_observed}),
     }

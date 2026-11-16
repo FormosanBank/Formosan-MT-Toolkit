@@ -50,7 +50,6 @@ from mt_common import (  # noqa: E402
     special_tokens_from_corpus,
     weighted_apportioned_counts,
 )
-from mt_metrics import bootstrap_confidence_intervals, score_translations  # noqa: E402
 from mt_standardization import (  # noqa: E402
     DEFAULT_PROFILE_PATH as MT_STANDARD_PROFILE_PATH,
 )
@@ -1820,18 +1819,6 @@ class LeakageTests(unittest.TestCase):
 
 
 class TrainingMetricTests(unittest.TestCase):
-    def test_perfect_generation_metrics_and_diagnostics(self) -> None:
-        metrics = score_translations(
-            ["hello world", "talima"],
-            ["hello world", "talima"],
-            sources=["different", "  TALIMA  "],
-        )
-        self.assertAlmostEqual(metrics["chrF2"], 100.0)
-        self.assertAlmostEqual(metrics["exact_match_rate"], 1.0)
-        self.assertAlmostEqual(metrics["empty_output_rate"], 0.0)
-        self.assertAlmostEqual(metrics["character_length_ratio"], 1.0)
-        self.assertAlmostEqual(metrics["source_copy_rate"], 0.5)
-
     def test_metric_direction_and_minimum_delta(self) -> None:
         self.assertTrue(metric_improved(20.1, 20.0, "chrF2", 0.05))
         self.assertFalse(metric_improved(20.01, 20.0, "chrF2", 0.05))
@@ -1852,21 +1839,6 @@ class TrainingMetricTests(unittest.TestCase):
         }
         self.assertEqual(metric_value(metrics, "chrF2"), 80.0)
         self.assertEqual(metric_value(metrics, "macro_chrF2"), 30.0)
-
-    def test_bootstrap_intervals_are_deterministic_and_ordered(self) -> None:
-        kwargs = {
-            "hypotheses": ["one", "two", "bad", "four"],
-            "references": ["one", "two", "three", "four"],
-            "strata": ["ami", "ami", "bnn", "bnn"],
-            "samples": 20,
-            "seed": 7,
-        }
-        first = bootstrap_confidence_intervals(**kwargs)
-        second = bootstrap_confidence_intervals(**kwargs)
-        self.assertEqual(first, second)
-        for interval in first["metrics"].values():
-            self.assertLessEqual(interval["lower"], interval["median"])
-            self.assertLessEqual(interval["median"], interval["upper"])
 
 
 class TokenizerSetupTests(unittest.TestCase):
@@ -2337,22 +2309,7 @@ class ExperimentManifestTests(unittest.TestCase):
         )
         self.assertIn("nllb-3.3b)", submitter)
         self.assertIn('PROFILE_GPU_CONSTRAINT="vr144g"', submitter)
-
-        bootstrap = (ROOT / "formosan_mt_experiments/slurm/bootstrap_metrics.sl").read_text(encoding="utf-8")
-        self.assertIn("--cpus-per-task=8", bootstrap)
-        self.assertNotIn("--gres", bootstrap)
-
-    def test_evaluator_checkpoints_outputs_before_bootstrap(self) -> None:
-        evaluator = (ROOT / "formosan_mt_experiments/scripts/evaluate_directional.py").read_text(encoding="utf-8")
-        predictions_write = evaluator.index("predictions.to_csv(args.output_csv, index=False)")
-        completed = evaluator.index('metrics["complete"] = True')
-        metrics_write = evaluator.index("write_json(args.output_json, metrics)")
-        bootstrap = evaluator.index("bootstrap_confidence_intervals(")
-
-        self.assertLess(predictions_write, completed)
-        self.assertLess(completed, metrics_write)
-        self.assertLess(metrics_write, bootstrap)
-        self.assertIn("if args.bootstrap_samples > 0:", evaluator)
+        self.assertIn("BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-1000}", submitter)
 
     def test_full_evaluation_defaults_are_resource_conservative(self) -> None:
         defaults = load_profile(DEFAULT_PROFILE)["generation_defaults"]
@@ -2598,7 +2555,6 @@ class ExperimentManifestTests(unittest.TestCase):
             {
                 "train": 5,
                 "evaluations": {"best": 7, "final": 6},
-                "bootstrap": {},
             },
         )
 

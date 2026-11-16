@@ -329,9 +329,15 @@ weights.
 
 `evaluate_directional.py` evaluates the entire human test split. Default
 dialect tags are the headline score; oracle dialect tags are a separate
-diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures, stratified
-bootstrap confidence intervals, exact/empty/length diagnostics, and
-language/source/dialect/length slices.
+diagnostic. Reports include BLEU, chrF2, TER, sacreBLEU signatures,
+exact/empty/length diagnostics, and language/source/dialect/length slices.
+They give both the pooled score and the macro average over languages, each
+with language-stratified bootstrap confidence intervals.
+
+`mt_metrics.py` extracts per-sentence sufficient statistics once per
+hypothesis set. Slices, resamples, and `compare_predictions.py`, the paired
+significance test between two systems on the same test rows, all sum those
+statistics instead of rescoring text.
 
 `nllb_runtime.py` owns NLLB tokenizer state, language controls, decoder start,
 and target selection. Every setup, run, checkpoint, and evaluation contract

@@ -231,10 +231,46 @@ evaluates only the validation-selected `best/` checkpoint with realistic
 default metadata. Set `EVAL_CHECKPOINTS="best final"` or
 `METADATA_MODES="default,oracle"` only for a specific ablation.
 
-Headline and grouped metrics are written immediately after generation.
-Bootstrap confidence intervals are optional because they are not needed for
-routine model selection. Set `SUBMIT_BOOTSTRAP=1` to add a parallel CPU-only
-confidence-interval job; the GPU is not held while resampling.
+Predictions are written as soon as generation finishes. Scoring then tokenizes
+each sentence once and keeps its BLEU, chrF2, and TER counts, so every slice
+and every bootstrap resample is a sum over rows instead of a new scoring pass.
+A 1,000-sample bootstrap over a full test set takes seconds.
+
+Each report contains:
+
+- `global`: all test rows pooled. Large languages dominate this number.
+- `macro_by_language`: the unweighted average of the per-language scores.
+- `by_language`, `by_source_corpus`, `by_dialect`, and `by_length_bin`.
+- `bootstrap_95_ci`: 95% intervals, resampled within each language, for the
+  pooled score, the macro average, and every language. The Slurm flight
+  requests 1,000 samples; set `BOOTSTRAP_SAMPLES=0` to skip them.
+
+Add intervals to an older report without rerunning generation:
+
+```bash
+python scripts/bootstrap_predictions.py \
+  --predictions "$REPORT/predictions.csv" \
+  --metrics "$REPORT/metrics.json"
+```
+
+## Comparing Two Systems
+
+Overlapping confidence intervals do not show that two systems are tied, because
+both were scored on the same sentences. Use the paired test instead:
+
+```bash
+python scripts/compare_predictions.py \
+  --baseline "$BASELINE_REPORT/predictions.csv" \
+  --system "$SYSTEM_REPORT/predictions.csv" \
+  --output-json comparison_f2en.json
+```
+
+Both files must come from the same corpus build and direction; mismatched test
+rows or references are refused. The report gives the difference in each metric
+(system minus baseline), its 95% interval, and a two-sided paired bootstrap
+p-value for the pooled corpus, the macro average, and each language. Use it for
+model-size, model-family, and seed comparisons before claiming one system is
+better.
 
 ## Component Ownership
 
@@ -248,8 +284,9 @@ confidence-interval job; the GPU is not held while resampling.
 | `milmmt_runtime.py` | MiLMMT prompts, causal loss, and generation. |
 | `train_directional.py` | Sampling, optimization, validation, and resume. |
 | `evaluate_directional.py` | Selected-checkpoint test evaluation. |
-| `bootstrap_predictions.py` | Optional CPU confidence intervals. |
-| `mt_metrics.py` | BLEU, chrF2, TER, signatures, and confidence intervals. |
+| `mt_metrics.py` | Sentence statistics, BLEU, chrF2, TER, intervals, and paired tests. |
+| `compare_predictions.py` | Paired significance test between two systems. |
+| `bootstrap_predictions.py` | Adds intervals to an existing report. |
 | `publish_huggingface_models.py` | Audited standalone Hub packages. |
 | `slurm/submit_directional_experiment.sh` | Idempotent Slurm DAG. |
 

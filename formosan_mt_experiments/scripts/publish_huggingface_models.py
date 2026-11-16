@@ -208,6 +208,13 @@ def render_card(
         for code in FORMOSAN_CODES
         if code in metrics.get("by_language", {})
     )
+    macro = metrics.get("macro_by_language") or {}
+    macro_row = (
+        f"| Hard test, macro average over {macro['groups']} languages | "
+        f"{macro['BLEU']:.2f} | {macro['chrF2']:.2f} | {macro['TER']:.2f} |\n"
+        if macro
+        else ""
+    )
     validation = metadata.get("validation", {})
     selected = validation.get("generation", {}).get("global", {})
     base = profile["base_model"]["name"]
@@ -370,7 +377,7 @@ inferred domain metadata.
 | Scope | BLEU | chrF2 | TER |
 |---|---:|---:|---:|
 | Hard test | {global_metrics['BLEU']:.2f} | {global_metrics['chrF2']:.2f} | {global_metrics['TER']:.2f} |
-| Selection validation | {selected.get('BLEU', float('nan')):.2f} | {selected.get('chrF2', float('nan')):.2f} | {selected.get('TER', float('nan')):.2f} |
+{macro_row}| Selection validation | {selected.get('BLEU', float('nan')):.2f} | {selected.get('chrF2', float('nan')):.2f} | {selected.get('TER', float('nan')):.2f} |
 
 Test empty-output rate: {global_metrics.get('empty_output_rate', 0.0):.4%}.
 {confidence_table}
