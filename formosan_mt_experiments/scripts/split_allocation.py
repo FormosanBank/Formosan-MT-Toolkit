@@ -28,21 +28,25 @@ class GroupCandidate:
     priority: int
 
 
-def selection_priorities(row_ids: pd.Series, seed: int) -> pd.Series:
-    """Give every row a stable pseudo-random rank for evaluation sampling.
+def selection_priorities(pair_keys: pd.Series, seed: int) -> pd.Series:
+    """Give every sentence pair a stable pseudo-random rank for evaluation sampling.
 
-    The rank depends only on the seed and the row ID, so it does not move when
-    other rows are added, removed, or blocked by the similarity gates.
+    The rank depends only on the seed and the pair's language and normalized
+    text. It does not move when other rows are added, removed, or blocked by
+    the similarity gates, when a file is reordered upstream, or when the same
+    pair arrives through a different repository. A pair therefore tends to
+    stay on the same side of the split across rebuilds and across the public
+    and private corpora.
     """
     return pd.Series(
         [
             int.from_bytes(
-                hashlib.blake2b(f"{seed}\u241f{row_id}".encode(), digest_size=8).digest(),
+                hashlib.blake2b(f"{seed}\u241f{key}".encode(), digest_size=8).digest(),
                 "big",
             )
-            for row_id in row_ids.astype(str)
+            for key in pair_keys.astype(str)
         ],
-        index=row_ids.index,
+        index=pair_keys.index,
         dtype="uint64",
     )
 

@@ -417,8 +417,8 @@ class EndToEndCorpusPipelineTests(unittest.TestCase):
                     ).encode("utf-8")
                 ).hexdigest()
                 expected_signatures = {
-                    "en": "606b28bb0efa37166e04b5907f75ddfab228ceb3af779e93d696e8892cdb6664",
-                    "zh": "303a7c1947578cba758c1c822ee02c212fa9cfe46d7943f5d369021a94ca3b36",
+                    "en": "181c5813e42c888d54efa50b9d078def9810ec08f01c9aefbd7f5c5c21472380",
+                    "zh": "95257f2cce7df78f3fc6bae8164356a8541262f175098f9105155a3fc9449400",
                 }
                 self.assertEqual(signature, expected_signatures[short])
 

@@ -212,9 +212,11 @@ pairwise split labels and builds the model-facing split. It:
    capacity-aware tolerance.
 
 Eligibility alone decides which rows may be held out. The sample order is a
-hash of the split seed and the row ID, so it is reproducible, does not depend
-on row order, and does not reshuffle when the similarity gates block a
-candidate. Single-row leakage groups fill each quota exactly; a larger group
+hash of the split seed, the language, and the normalized sentence pair. It is
+reproducible, does not depend on row order or on which repository supplied the
+pair, and does not reshuffle when the similarity gates block a candidate. A
+pair therefore tends to stay on the same side of the split when a corpus is
+rebuilt with new data, and between the public and private corpora. Single-row leakage groups fill each quota exactly; a larger group
 moves as a unit and is used only when single rows cannot reach the quota.
 
 `config/corpus_pipeline.json` is the canonical split policy. Corpus builds,

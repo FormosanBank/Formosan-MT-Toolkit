@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 from experiment_config import load_corpus_pipeline_config
 from mt_common import (
+    PAIR_SEP,
     add_normalized_columns,
     evaluation_candidate_mask,
     mt_standard_contract,
@@ -232,7 +233,10 @@ def build_hard_split(
         + "\u241f"
         + frame["source"].astype(str)
     )
-    frame["_selection_priority"] = selection_priorities(frame["row_id"], seed)
+    frame["_selection_priority"] = selection_priorities(
+        frame["lang_code"].astype(str) + PAIR_SEP + frame["_pair_key"].astype(str),
+        seed,
+    )
     group_ids = leakage_group_ids(frame)
     ngram_indexes = SplitNgramIndexes(
         formosan=NgramSimilarityIndex(

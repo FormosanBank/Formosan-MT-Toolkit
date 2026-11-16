@@ -100,23 +100,44 @@ class EvaluationSelectionTests(unittest.TestCase):
         self.assertNotEqual(test_rows(42), test_rows(43))
         self.assertEqual(len(test_rows(43)), 120)
 
-    def test_priorities_depend_only_on_seed_and_row_id(self) -> None:
-        row_ids = pd.Series([f"row-{index}" for index in range(50)])
-        priorities = selection_priorities(row_ids, 42)
-        shuffled = row_ids.sample(frac=1.0, random_state=7)
+    def test_priorities_depend_only_on_seed_and_pair(self) -> None:
+        keys = pd.Series([f"ami\u241fpair {index}" for index in range(50)])
+        priorities = selection_priorities(keys, 42)
+        shuffled = keys.sample(frac=1.0, random_state=7)
         reordered = selection_priorities(shuffled, 42)
         self.assertEqual(
-            dict(zip(row_ids, priorities, strict=True)),
+            dict(zip(keys, priorities, strict=True)),
             dict(zip(shuffled, reordered, strict=True)),
         )
         self.assertEqual(priorities.nunique(), 50)
-        self.assertFalse(priorities.equals(selection_priorities(row_ids, 43)))
+        self.assertFalse(priorities.equals(selection_priorities(keys, 43)))
+
+    def test_held_out_pairs_survive_new_data_and_new_provenance(self) -> None:
+        # The same pairs arrive from another repository with other row IDs,
+        # plus 20% new pairs. Held-out pairs should mostly stay held out.
+        first = corpus_with_varied_lengths(1000)
+        grown = corpus_with_varied_lengths(1200)
+        grown["row_id"] = [f"other-{index:05d}" for index in range(len(grown))]
+        grown["source"] = grown["source"].str.replace("FormosanBank/Corpora/", "Formosan-", regex=False)
+
+        def held_out(frame: pd.DataFrame) -> dict[str, set[str]]:
+            output, _, _, _ = build_hard_split(frame, seed=42, **SPLIT_OPTIONS)
+            return {
+                split: set(output.loc[output["split"].eq(split), "formosan_sentence"])
+                for split in ("train", "validate", "test")
+            }
+
+        before, after = held_out(first), held_out(grown)
+        evaluation_before = before["validate"] | before["test"]
+        self.assertEqual(len(evaluation_before), 300)
+        self.assertGreater(len(evaluation_before - after["train"]) / len(evaluation_before), 0.9)
+        self.assertGreater(len(before["test"] & after["test"]) / len(before["test"]), 0.8)
 
     def test_blocking_candidates_keeps_the_remaining_order(self) -> None:
         # The similarity gates remove candidates between passes. A stable order
         # means the rest of the sample does not reshuffle when that happens.
-        frame = pd.DataFrame({"row_id": [f"row-{index}" for index in range(40)]})
-        frame["_selection_priority"] = selection_priorities(frame["row_id"], 42)
+        frame = pd.DataFrame({"pair": [f"ami\u241fpair {index}" for index in range(40)]})
+        frame["_selection_priority"] = selection_priorities(frame["pair"], 42)
         group_ids = pd.Series(range(40), index=frame.index, dtype="int64")
         everyone = pd.Series(True, index=frame.index)
         full = [group.group_id for group in candidate_groups(frame, frame.index, everyone, group_ids, {})]
