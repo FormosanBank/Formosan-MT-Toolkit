@@ -7,6 +7,7 @@ import pandas as pd
 from build_experiment_splits import build_hard_split
 from mt_standardization import DEFAULT_PROFILE_PATH, load_profile, profile_sha256
 from split_allocation import candidate_groups, selection_priorities
+from validation_policy import validate_test_length_balance
 
 SPLIT_OPTIONS = {
     "target_col": "english_sentence",
@@ -128,3 +129,39 @@ class EvaluationSelectionTests(unittest.TestCase):
         self.assertEqual(remaining, [group_id for group_id in full if group_id not in blocked])
         self.assertNotEqual(full, sorted(full))
 
+
+
+class LengthBalanceGateTests(unittest.TestCase):
+    @staticmethod
+    def frame(validate_lengths: list[int], test_lengths: list[int]) -> tuple[pd.DataFrame, pd.Series]:
+        lengths = validate_lengths + test_lengths + [10] * 50
+        keyed = pd.DataFrame(
+            {
+                "lang_code": "ami",
+                "_formosan_tokens": lengths,
+                "_target_tokens": lengths,
+            }
+        )
+        split = pd.Series(["validate"] * len(validate_lengths) + ["test"] * len(test_lengths) + ["train"] * 50)
+        return keyed, split
+
+    def test_matching_validation_and_test_lengths_pass(self) -> None:
+        validate = [3 + index % 30 for index in range(210)]
+        test = [3 + index % 30 for index in range(420)]
+        report, failures = validate_test_length_balance(*self.frame(validate, test))
+        self.assertEqual(failures, {})
+        self.assertLess(abs(report["ami"]["standardized_difference"]), 0.05)
+
+    def test_longer_validation_than_test_fails(self) -> None:
+        # The old length-ranked selection put the longest rows in validation.
+        validate = [25 + index % 8 for index in range(200)]
+        test = [8 + index % 17 for index in range(400)]
+        report, failures = validate_test_length_balance(*self.frame(validate, test))
+        self.assertEqual(set(failures), {"ami"})
+        self.assertGreater(report["ami"]["standardized_difference"], 1.0)
+        self.assertGreater(report["ami"]["validate_mean_units"], report["ami"]["test_mean_units"])
+
+    def test_small_samples_are_not_failed_on_chance_gaps(self) -> None:
+        report, failures = validate_test_length_balance(*self.frame([12, 14, 30, 9], [10, 11, 8, 16, 12, 9, 13, 15]))
+        self.assertGreater(report["ami"]["standardized_difference"], 0.2)
+        self.assertEqual(failures, {})

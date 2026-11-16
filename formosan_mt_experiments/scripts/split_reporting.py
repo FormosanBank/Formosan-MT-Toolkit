@@ -62,9 +62,9 @@ def evaluation_length_balance(
 ) -> dict[str, dict[str, float]]:
     """Mean pair length of eligible sentences by language and split.
 
-    Validation, test, and the eligible sentences left in training are one
-    population, so these means should be close. A persistent gap means
-    evaluation rows are being selected by something other than chance.
+    Validation and test are sampled the same way, so their means should match.
+    Training can differ because evaluation follows each source's share of all
+    human pairs, and sources differ in length and in how much is eligible.
     """
     eligible = frame[candidate_mask & frame["split"].isin({"train", "validate", "test"})]
     lengths = (eligible["_formosan_tokens"] + eligible["_target_tokens"]).astype(float)

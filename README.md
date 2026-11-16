@@ -117,6 +117,8 @@ Production builds fail unless all of these conditions hold:
 - synthetic pivot rows are appended to training after the human split;
 - exact, punctuation-skeleton, one-edit, and high character n-gram leakage
   checks pass across split boundaries;
+- validation and test have matching sentence-length distributions in every
+  language;
 - exact TAME-MT source, target, and pair exposure at 0.95 is zero;
 - the installed packages equal `requirements-corpus.txt`, and the checkout is
   clean;

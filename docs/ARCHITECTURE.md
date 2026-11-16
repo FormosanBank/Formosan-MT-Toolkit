@@ -269,6 +269,12 @@ document overlap, normalized/skeleton overlap, one-edit conflicts, exact
 character n-gram conflicts, lexical eligibility, and per-source split ratios
 from the emitted CSV. It requires sentence-level MT-standard evaluation rows.
 
+It also checks that validation resembles test. Within each language it
+compares mean pair length between the two splits and fails when they differ by
+more than 0.2 pooled standard deviations at more than four standard errors.
+Checkpoints are selected on validation and reported on test, so the two must
+come from one distribution.
+
 `audit_corpus_exposure.py` then runs TAME-MT 0.2.2 with exact native retrieval
 in both MT directions. It reports SourceExposure, TargetExposure,
 PairLeakTopK, exact overlap, and translation-memory baselines by split and
