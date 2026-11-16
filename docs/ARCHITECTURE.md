@@ -280,9 +280,17 @@ and training files remain CSV, and validation still recomputes leakage keys.
 
 Language preparation and corpus-wide release stages are content-addressed. A
 cache hit requires matching input, repository/blob, QC revision, profile,
-configuration, script, Python, and dependency hashes. Every cached output is
-SHA-256 verified; missing or edited artifacts rerun the affected stage and any
+configuration, and script hashes, the same Python version, and the same
+installed versions of the pinned packages. Every cached output is SHA-256
+verified; missing or edited artifacts rerun the affected stage and any
 downstream stage whose key changes.
+
+A production build starts only when the installed packages equal
+`requirements-corpus.txt`. A missing package, another version, or an editable
+checkout of a pinned package stops the build before any stage runs, and the
+message lists each difference. `--allow-environment-drift` is a diagnostic
+override; the manifest records the pinned and installed version of every
+package either way.
 
 Acquisition refreshes repository heads unless explicitly skipped or reused.
 Three language pipelines run concurrently by default. `--language-workers 1`

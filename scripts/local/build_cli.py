@@ -179,6 +179,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--allow-environment-drift",
+        action="store_true",
+        help=(
+            "Diagnostic only: permit a build when installed packages differ from "
+            "requirements-corpus.txt. The drift is recorded in the manifest."
+        ),
+    )
+
     parser.add_argument("--with-pivot", action="store_true")
     parser.add_argument("--pivot-directions", default="both")
     parser.add_argument("--pivot-splits", default="all")

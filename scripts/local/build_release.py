@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.metadata
 import json
 import shutil
 import sys
@@ -19,8 +18,10 @@ from build_context import (
     require_json_manifest,
 )
 from pipeline_common import (
+    CORPUS_REQUIREMENTS_PATH,
     PIPELINE_CONFIG_PATH,
     atomic_write_json,
+    environment_report,
     git_state,
     load_pipeline_config,
     sha256_file,
@@ -280,26 +281,6 @@ def package_training_provenance(paths: BuildPaths, final_corpus_dir: Path) -> Pa
     return bundle_manifest
 
 
-def dependency_versions() -> dict[str, str]:
-    versions: dict[str, str] = {}
-    for package in (
-        "numpy",
-        "pandas",
-        "python-dotenv",
-        "requests",
-        "sacrebleu",
-        "sentencepiece",
-        "tame-mt",
-        "torch",
-        "transformers",
-    ):
-        try:
-            versions[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            versions[package] = "not-installed"
-    return versions
-
-
 def write_manifest(
     args: argparse.Namespace,
     language_reports: list[dict[str, object]],
@@ -375,7 +356,7 @@ def write_manifest(
         "runtime": {
             "python": sys.version,
             "executable": sys.executable,
-            "dependencies": dependency_versions(),
+            "environment": environment_report(CORPUS_REQUIREMENTS_PATH),
         },
         "languages": language_reports,
         "settings": {
@@ -404,6 +385,7 @@ def write_manifest(
             "mt_standardization_profile": str(args.mt_standard_profile),
             "keep_build_output": args.keep_build_output,
             "allow_dirty_repository": args.allow_dirty_repository,
+            "allow_environment_drift": args.allow_environment_drift,
             "fetch_workers": args.fetch_workers,
             "fetch_download_retries": args.fetch_download_retries,
             "fetch_retry_base_sleep": args.fetch_retry_base_sleep,

@@ -51,7 +51,9 @@ from build_release import (
     write_manifest,
 )
 from pipeline_common import (
+    CORPUS_REQUIREMENTS_PATH,
     PIPELINE_CONFIG_PATH,
+    environment_report,
     git_state,
     load_pipeline_config,
     sha256_file,
@@ -829,8 +831,28 @@ def run_public_private(args: argparse.Namespace) -> None:
         print(f"  - {root}")
 
 
+def environment_drift_message(environment: dict) -> str:
+    lines = [
+        f"  - {name}: pinned {environment['packages'][name]['pinned']}, "
+        + (
+            "installed as an editable checkout"
+            if environment["packages"][name]["editable"]
+            else f"installed {environment['packages'][name]['installed'] or 'nothing'}"
+        )
+        for name in environment["drift"]
+    ]
+    return (
+        f"Production corpus builds require the pinned environment in {environment['requirements']}:\n"
+        + "\n".join(lines)
+        + f"\nFix: pip install --force-reinstall -r {environment['requirements']}"
+    )
+
+
 def main() -> None:
     args = parse_args()
+    environment = environment_report(CORPUS_REQUIREMENTS_PATH)
+    if not args.dry_run and not args.allow_environment_drift and environment["drift"]:
+        raise SystemExit(environment_drift_message(environment))
     repository = git_state(PROJECT_ROOT)
     if (
         not args.dry_run

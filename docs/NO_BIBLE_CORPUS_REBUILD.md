@@ -21,6 +21,14 @@ The builder accepts a sibling `../FormosanBank` checkout only when its clean
 HEAD exactly matches the pinned QC commit. Otherwise it downloads and verifies
 the pinned QC source.
 
+The build refuses to start when installed packages differ from
+`requirements-corpus.txt`, because cached stages and release checksums are only
+comparable within one environment. If an existing virtualenv has drifted:
+
+```bash
+pip install --force-reinstall -r requirements-corpus.txt
+```
+
 ## Full Build
 
 ```bash
