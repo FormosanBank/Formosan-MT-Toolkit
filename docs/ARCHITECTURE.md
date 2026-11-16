@@ -230,7 +230,9 @@ sentences. Synthetic rows do not change those quotas and are added to training
 afterward, so final augmented-corpus percentages are intentionally more
 train-heavy. Source-corpus targets follow the human-source distribution and are
 constrained by each source's eligible capacity; unfillable shares are
-redistributed within the language.
+redistributed within the language. Every source then divides its evaluation
+rows between validation and test in the same proportion, so the two splits
+have one source mix even when a source cannot meet its share.
 Document overlap is reported as a diagnostic because some source corpora
 serialize thousands of unrelated rows in one XML file; treating that file as an
 indivisible split unit would recreate the source imbalance this stage prevents.
