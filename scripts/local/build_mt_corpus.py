@@ -802,6 +802,8 @@ def run_build(args: argparse.Namespace) -> Path:
     write_manifest(args, language_reports, final_corpus_dir, paths)
     if not args.dry_run:
         print(f"Build complete: {paths.root}")
+        if not args.skip_hard_splits:
+            print(f"Size tables: python scripts/local/summarize_build.py {paths.root}")
     return paths.root
 
 

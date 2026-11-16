@@ -17,6 +17,7 @@ from build_output import (  # noqa: E402
     format_rule_summary,
     run_logged,
 )
+from summarize_build import load_build, summarize  # noqa: E402
 
 
 class LoggedCommandTests(unittest.TestCase):
@@ -123,6 +124,79 @@ class SummaryFormattingTests(unittest.TestCase):
                 rules,
             )
             self.assertIn("QC findings: SOFT=4 across 1 rules", rules)
+
+
+class BuildSummaryTests(unittest.TestCase):
+    def write_build(self, root: Path, *, ami_human: int, sources: dict[str, int]) -> Path:
+        manifest = {
+            "complete": True,
+            "created_at": "2026-08-24T04:11:52Z",
+            "repository": {"commit": "573488b215ee1cf3701519a5bcd1010e8f0c6548"},
+            "settings": {"public": True, "with_pivot": True, "qc_revision": "acc3ec9f3137a59b"},
+        }
+        root.mkdir(parents=True)
+        (root / "mt_build_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        report = {
+            "complete": True,
+            "languages": {
+                "ami": {
+                    "human_rows": ami_human,
+                    "synthetic_rows": 50,
+                    "lexical_rows": 5,
+                    "eligible_human_sentence_rows": 60,
+                    "train_rows": ami_human + 50 - 30,
+                    "validate_rows": 10,
+                    "test_rows": 20,
+                }
+            },
+            "source_strata": {
+                "ami": {
+                    name: {
+                        "human_input_rows": rows,
+                        "synthetic_input_rows": 0,
+                        "eligible_human_rows": rows,
+                        "validate_rows": 1,
+                        "test_rows": 2,
+                    }
+                    for name, rows in sources.items()
+                }
+            },
+        }
+        for short in ("en", "zh"):
+            directory = root / "formosan_mt_experiments" / "data" / f"splits_{short}_v1"
+            directory.mkdir(parents=True)
+            (directory / "report_in_domain_hard.json").write_text(json.dumps(report), encoding="utf-8")
+        return root
+
+    def test_summary_lists_languages_totals_and_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            build = load_build(self.write_build(Path(tmp) / "public_no_bible", ami_human=100, sources={"ePark": 100}))
+            summary = summarize(build, None, sources=True)
+        self.assertIn("`public_no_bible`: built 2026-08-24 at toolkit commit `573488b`, QC `acc3ec9`", summary)
+        self.assertIn("| `ami` | 100 | 50 | 5 | 60 | 120 | 10 | 20 |", summary)
+        self.assertIn("| **Total** | 100 | 50 | 5 | 60 | 120 | 10 | 20 |", summary)
+        self.assertIn("| `ePark` | 100 | 0 | 100 | 1 | 2 |", summary)
+        self.assertEqual(summary.count("## English"), 1)
+        self.assertEqual(summary.count("## Chinese"), 1)
+
+    def test_comparison_shows_signed_changes_and_removed_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = load_build(
+                self.write_build(Path(tmp) / "old", ami_human=100, sources={"ePark": 60, "Dropped": 40})
+            )
+            new = load_build(self.write_build(Path(tmp) / "new", ami_human=130, sources={"ePark": 130}))
+            summary = summarize(new, old, sources=True)
+        self.assertIn("Changes in parentheses are against `old`", summary)
+        self.assertIn("| `ami` | 130 (+30) | 50 | 5 | 60 | 150 (+30) | 10 | 20 |", summary)
+        self.assertIn("| `ePark` | 130 (+70) |", summary)
+        self.assertIn("| `Dropped` | 0 (-40) |", summary)
+
+    def test_incomplete_builds_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.write_build(Path(tmp) / "build", ami_human=100, sources={"ePark": 100})
+            (root / "mt_build_manifest.json").write_text(json.dumps({"complete": False}), encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                load_build(root)
 
 
 if __name__ == "__main__":
