@@ -2,19 +2,16 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts/local"))
-sys.path.insert(0, str(ROOT / "scripts/shared"))
+import stage_cache
+from build_mt_corpus import environment_drift_message
+from reproducibility import environment_report, pinned_requirements
 
-import stage_cache  # noqa: E402
-from build_mt_corpus import environment_drift_message  # noqa: E402
-from reproducibility import environment_report, pinned_requirements  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeDistribution:
@@ -101,6 +98,3 @@ class PinnedEnvironmentTests(unittest.TestCase):
         with mock.patch.object(stage_cache, "installed_corpus_packages", return_value={"numpy": ["2.3.2", True]}):
             self.assertNotEqual(pinned, stage_cache.stage_key("filter", {"input": "a"}, [script]))
 
-
-if __name__ == "__main__":
-    unittest.main()

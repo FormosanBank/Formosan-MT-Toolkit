@@ -8,16 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts/local"))
-
-from build_output import (  # noqa: E402
+from build_output import (
     CommandExecutionError,
     format_language_summary,
     format_rule_summary,
     run_logged,
 )
-from summarize_build import load_build, summarize  # noqa: E402
+from summarize_build import load_build, summarize
 
 
 class LoggedCommandTests(unittest.TestCase):
@@ -198,6 +195,3 @@ class BuildSummaryTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 load_build(root)
 
-
-if __name__ == "__main__":
-    unittest.main()

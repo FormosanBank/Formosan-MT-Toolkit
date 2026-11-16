@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 import unittest
-from pathlib import Path
 
 import pandas as pd
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts/local"))
-sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
-
-from build_experiment_splits import build_hard_split  # noqa: E402
-from mt_standardization import DEFAULT_PROFILE_PATH, load_profile, profile_sha256  # noqa: E402
-from split_allocation import candidate_groups, selection_priorities  # noqa: E402
+from build_experiment_splits import build_hard_split
+from mt_standardization import DEFAULT_PROFILE_PATH, load_profile, profile_sha256
+from split_allocation import candidate_groups, selection_priorities
 
 SPLIT_OPTIONS = {
     "target_col": "english_sentence",
@@ -135,6 +128,3 @@ class EvaluationSelectionTests(unittest.TestCase):
         self.assertEqual(remaining, [group_id for group_id in full if group_id not in blocked])
         self.assertNotEqual(full, sorted(full))
 
-
-if __name__ == "__main__":
-    unittest.main()

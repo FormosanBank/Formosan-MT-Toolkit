@@ -1,21 +1,15 @@
 from __future__ import annotations
 
 import random
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sacrebleu.metrics import BLEU, CHRF, TER
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
-
-from compare_predictions import format_report, paired_predictions  # noqa: E402
-from evaluate_directional import group_scores, score_predictions  # noqa: E402
-from mt_metrics import (  # noqa: E402
+from compare_predictions import format_report, paired_predictions
+from evaluate_directional import group_scores, score_predictions
+from mt_metrics import (
     METRIC_NAMES,
     bleu_tokenizer_for,
     bootstrap_confidence_intervals,
@@ -24,6 +18,7 @@ from mt_metrics import (  # noqa: E402
     score_translations,
     sentence_statistics,
 )
+from sacrebleu.metrics import BLEU, CHRF, TER
 
 WORDS = "ko a i no to ira kako kiso cingra mafana maolah tayni tayra loma wawa ina mama".split()
 
@@ -294,6 +289,3 @@ class PredictionComparisonTests(unittest.TestCase):
         self.assertIn("| `tay` |", table)
         self.assertIn("*", table.splitlines()[2])
 
-
-if __name__ == "__main__":
-    unittest.main()

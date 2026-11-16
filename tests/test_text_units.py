@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
+import corpus_quality
+import mt_common
 import pandas as pd
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts/local"))
-sys.path.insert(0, str(ROOT / "scripts/shared"))
-sys.path.insert(0, str(ROOT / "formosan_mt_experiments/scripts"))
-
-import corpus_quality  # noqa: E402
-import mt_common  # noqa: E402
-import text_units  # noqa: E402
-from text_units import has_terminal_punctuation, target_units, token_count  # noqa: E402
+import text_units
+from text_units import has_terminal_punctuation, target_units, token_count
 
 
 class TextUnitTests(unittest.TestCase):
@@ -72,6 +64,3 @@ class TextUnitTests(unittest.TestCase):
         )
         self.assertTrue(bool(keyed["_formosan_terminal"].iloc[0]))
 
-
-if __name__ == "__main__":
-    unittest.main()
