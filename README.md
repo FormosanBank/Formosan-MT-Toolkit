@@ -210,8 +210,9 @@ defaults. See [Experiment Training](formosan_mt_experiments/README.md).
 | `build_corpora.sh` | Stable public entrypoint. |
 | `config/` | Versioned MT standardization policy. |
 | `scripts/local/` | Acquisition, QC, extraction, filtering, pivoting, and release orchestration. |
+| `scripts/shared/` | Definitions both halves must agree on: text length units, split ratios, hashing, and the pinned-environment check. |
 | `formosan_mt_experiments/` | Split validation, model setup, training, evaluation, and Slurm launchers. |
-| `tests/` | Corpus, training, inference, and provenance contract tests. |
+| `tests/` | One module per pipeline boundary; shared fixtures in `support.py`. |
 
 Corpus rows, downloaded XML, credentials, paid caches, private repository
 inventories, model files, and run outputs are intentionally not versioned.
