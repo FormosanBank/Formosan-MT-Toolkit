@@ -162,7 +162,9 @@ training and do not increase evaluation quotas.
 ## Authorized Nonpublic Sources
 
 The orchestrator can ingest repositories visible to an authorized GitHub
-token. Private discovery accepts top-level `Final_XML/` and `XML/` trees. Those
+token. Private discovery accepts top-level `Final_XML/` and `XML/` trees. It
+does not read the published `Corpora/` tree, so a private build is not
+guaranteed to contain every public pair. Those
 source snapshots, inventories, corpora, manifests, metrics, and models must
 remain outside this repository. Use a separate named build and external
 access-controlled storage. Never commit or attach them to a public pull request.
