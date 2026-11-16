@@ -6,7 +6,7 @@ import unittest
 import pandas as pd
 from build_experiment_splits import build_hard_split
 from mt_standardization import DEFAULT_PROFILE_PATH, load_profile, profile_sha256
-from split_allocation import candidate_groups, selection_priorities
+from split_allocation import candidate_groups, selection_priorities, source_stratum_targets
 from validation_policy import validate_test_length_balance
 
 SPLIT_OPTIONS = {
@@ -150,6 +150,33 @@ class EvaluationSelectionTests(unittest.TestCase):
         self.assertEqual(remaining, [group_id for group_id in full if group_id not in blocked])
         self.assertNotEqual(full, sorted(full))
 
+
+
+class SourceMixTests(unittest.TestCase):
+    def test_validation_and_test_share_one_source_mix_when_capacity_binds(self) -> None:
+        # SourceB has 1,000 human pairs but only 60 eligible sentences, so it
+        # cannot supply its share of evaluation. Its 60 held-out rows must
+        # still divide between validation and test like every other source.
+        # Apportioning validation by human pairs sent all 60 to validation.
+        frame = pd.DataFrame(
+            {
+                "lang_code": "ami",
+                "_source_corpus": ["SourceA"] * 1000 + ["SourceB"] * 1000,
+                "pivot_origin": "original",
+            }
+        )
+        eligible = pd.Series([True] * 900 + [False] * 100 + [True] * 60 + [False] * 940)
+        targets, language_targets = source_stratum_targets(
+            frame,
+            eligible,
+            test_ratio=0.2,
+            val_ratio=0.1,
+            min_test_rows=0,
+            min_validate_rows=0,
+        )
+        self.assertEqual(language_targets, {"ami": (400, 200)})
+        self.assertEqual(targets[("ami", "SourceA")], (360, 180))
+        self.assertEqual(targets[("ami", "SourceB")], (40, 20))
 
 
 class LengthBalanceGateTests(unittest.TestCase):

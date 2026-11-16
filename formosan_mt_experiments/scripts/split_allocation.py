@@ -280,8 +280,11 @@ def source_stratum_targets(
             eligible_capacities,
             test_total + validate_total,
         )
+        # Divide every source's evaluation rows in the same proportion, so
+        # validation and test keep one source mix even when a source has too
+        # few eligible sentences to meet its share.
         validate_by_source = weighted_apportioned_counts(
-            source_rows,
+            evaluation_by_source,
             evaluation_by_source,
             validate_total,
         )

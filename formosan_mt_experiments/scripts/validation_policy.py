@@ -507,7 +507,7 @@ def validate_splits(
                 language_test + language_validate,
             )
             validate_targets = weighted_apportioned_counts(
-                all_distribution,
+                evaluation_targets,
                 evaluation_targets,
                 language_validate,
             )
