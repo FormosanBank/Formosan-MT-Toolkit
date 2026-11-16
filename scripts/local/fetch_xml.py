@@ -21,8 +21,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 import requests
+from build_context import EXACT_BIBLE_REPOS
 from github_snapshot import (
-    EXACT_BIBLE_REPOS,
     GITHUB_TOKEN,
     REQUEST_TIMEOUT,
     SESSION,
