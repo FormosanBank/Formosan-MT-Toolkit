@@ -39,6 +39,14 @@ failures make the fetch manifest incomplete. Public mode restricts input to
 `Corpora/**/XML`. Private mode scans both top-level `Final_XML/` and `XML/`
 trees in every eligible repository visible to the token.
 
+Private mode does not read the published `Corpora/` tree. A private build is
+every development repository, not the public corpus plus additions. Where a
+development repository and its published copy differ, the private build has
+the development version, and a corpus published without a development
+repository is absent from it. Reading both trees would give one sentence two
+source names and two competing versions, so the two are reconciled upstream
+in FormosanBank rather than merged here.
+
 One build resolves large repository sets with paginated GraphQL, then downloads,
 parses, and classifies each XML blob once for all requested Formosan languages.
 Per-language inventories retain independent exclusion and mismatch accounting.

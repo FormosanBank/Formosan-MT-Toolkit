@@ -113,21 +113,32 @@ def table(
     return "\n".join(lines)
 
 
-def describe(build: dict) -> str:
+def describe(build: dict, label: str) -> str:
     manifest = build["manifest"]
     settings = manifest["settings"]
     return (
-        f"`{build['root'].name}`: built {manifest['created_at'][:10]} at toolkit commit "
+        f"`{label}`: built {manifest['created_at'][:10]} at toolkit commit "
         f"`{manifest['repository'].get('commit', 'unknown')[:7]}`, QC `{settings['qc_revision'][:7]}`, "
         f"{'public' if settings['public'] else 'all visible'} sources, "
         f"{'with' if settings['with_pivot'] else 'without'} DeepL pivot"
     )
 
 
+def build_labels(build: dict, baseline: dict | None) -> tuple[str, str]:
+    """Name builds by directory, adding the parent when both share a name."""
+    roots = [build["root"]] + ([] if baseline is None else [baseline["root"]])
+    if len({root.name for root in roots}) < len(roots):
+        labels = [f"{root.parent.name}/{root.name}" for root in roots]
+    else:
+        labels = [root.name for root in roots]
+    return labels[0], labels[-1]
+
+
 def summarize(build: dict, baseline: dict | None, *, sources: bool) -> str:
-    sections = [describe(build)]
+    label, baseline_label = build_labels(build, baseline)
+    sections = [describe(build, label)]
     if baseline is not None:
-        sections.append(f"Changes in parentheses are against {describe(baseline)}")
+        sections.append(f"Changes in parentheses are against {describe(baseline, baseline_label)}")
     for title, short in TARGETS:
         report = build["reports"][short]
         old_report = None if baseline is None else baseline["reports"][short]

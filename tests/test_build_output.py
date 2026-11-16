@@ -188,6 +188,14 @@ class BuildSummaryTests(unittest.TestCase):
         self.assertIn("| `ePark` | 130 (+70) |", summary)
         self.assertIn("| `Dropped` | 0 (-40) |", summary)
 
+    def test_same_named_builds_are_told_apart_by_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old = load_build(self.write_build(Path(tmp) / "august" / "public_no_bible", ami_human=100, sources={"ePark": 100}))
+            new = load_build(self.write_build(Path(tmp) / "resplit" / "public_no_bible", ami_human=100, sources={"ePark": 100}))
+            summary = summarize(new, old, sources=False)
+        self.assertIn("`resplit/public_no_bible`: built", summary)
+        self.assertIn("against `august/public_no_bible`: built", summary)
+
     def test_incomplete_builds_are_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self.write_build(Path(tmp) / "build", ami_human=100, sources={"ePark": 100})
