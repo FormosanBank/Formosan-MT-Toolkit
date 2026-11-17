@@ -107,11 +107,20 @@ def _trim_form_boundaries(
     return repaired
 
 
+def base_forms(element: ET.Element) -> list[ET.Element]:
+    """FORM children that are not marked as a ``ver`` variant."""
+    return [
+        form
+        for form in element.findall("FORM")
+        if not (form.get("ver") or "").strip()
+    ]
+
+
 def _standard_form(element: ET.Element) -> ET.Element | None:
     return next(
         (
             form
-            for form in element.findall("FORM")
+            for form in base_forms(element)
             if (form.get("kindOf") or "").strip().lower() == "standard"
         ),
         None,

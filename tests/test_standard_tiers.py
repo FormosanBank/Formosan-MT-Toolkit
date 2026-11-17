@@ -382,6 +382,28 @@ class StandardTierTests(unittest.TestCase):
                 ["Ci panay."],
             )
 
+    def test_ensure_standard_tiers_keeps_ver_alt_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = self.write_xml(
+                directory,
+                '<S id="s1"><FORM kindOf="original">makaasu</FORM>'
+                '<FORM kindOf="original" ver="alt">makaasua</FORM>'
+                '<FORM kindOf="standard">makaasu</FORM>'
+                '<FORM kindOf="standard" ver="alt">makaasua</FORM></S>',
+            )
+            ensure_standard_tiers(directory)
+            forms = ET.parse(path).getroot().findall("./S/FORM")
+            self.assertEqual(
+                [(f.get("kindOf"), f.get("ver"), f.text) for f in forms],
+                [
+                    ("original", None, "makaasu"),
+                    ("original", "alt", "makaasua"),
+                    ("standard", None, "makaasu"),
+                    ("standard", "alt", "makaasua"),
+                ],
+            )
+
     def test_invalid_audio_span_is_preserved_for_source_review(
         self,
     ) -> None:
