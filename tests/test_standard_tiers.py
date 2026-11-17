@@ -367,6 +367,21 @@ class StandardTierTests(unittest.TestCase):
             ):
                 repair_mt_xml_structure(directory)
 
+    def test_alt_version_forms_do_not_count_as_duplicate_tiers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.write_xml(
+                directory,
+                '<S id="s1"><FORM kindOf="original">Ci panay.</FORM>'
+                '<FORM kindOf="original" ver="alt">Ci panay k-u.</FORM>'
+                "</S>",
+            )
+            records = tag_transform_sources(directory)
+            self.assertEqual(
+                [row["formosan_source_standard"] for row in records.values()],
+                ["Ci panay."],
+            )
+
     def test_invalid_audio_span_is_preserved_for_source_review(
         self,
     ) -> None:

@@ -63,19 +63,24 @@ def tag_transform_sources(
                     f"{element.get('id', '')}"
                 ).encode("utf-8")
             ).hexdigest()[:24]
-            originals = [
+            primary_forms = [
                 form
                 for form in element.findall("FORM")
+                if not (form.get("ver") or "").strip()
+            ]
+            originals = [
+                form
+                for form in primary_forms
                 if (form.get("kindOf") or "").strip().lower() == "original"
             ]
             standards = [
                 form
-                for form in element.findall("FORM")
+                for form in primary_forms
                 if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
             untyped = [
                 form
-                for form in element.findall("FORM")
+                for form in primary_forms
                 if not (form.get("kindOf") or "").strip()
             ]
             if len(originals) > 1 or len(standards) > 1 or len(untyped) > 1:

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import textwrap
 import time
 from collections import Counter
@@ -40,6 +42,49 @@ def _failure_tail(path: Path, *, lines: int = 30) -> str:
     return "\n".join(f"  {line}" for line in clean[-lines:])
 
 
+def _tee_stage_output(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    log: Any,
+) -> int:
+    """Run one child, mirroring its raw output to the log and the terminal."""
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Stage process did not expose its output")
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    try:
+        while True:
+            chunk = process.stdout.read(8192)
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+            log.write(text)
+            log.flush()
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        remainder = decoder.decode(b"", final=True)
+        if remainder:
+            log.write(remainder)
+            log.flush()
+            sys.stderr.write(remainder)
+            sys.stderr.flush()
+    finally:
+        process.stdout.close()
+        returncode = process.wait()
+    return returncode
+
+
 def run_logged(
     cmd: list[str],
     *,
@@ -51,8 +96,13 @@ def run_logged(
     verbose: bool = False,
     quiet: bool = False,
     append: bool = False,
+    stream: bool = False,
 ) -> None:
-    """Run one stage while keeping normal terminal output concise."""
+    """Run one stage while keeping normal terminal output concise.
+
+    ``stream`` mirrors the child's live output (including progress bars) to the
+    terminal as well as the log; without it output is captured to the log only.
+    """
     if dry_run:
         if not quiet:
             print(f"[plan]  {label}")
@@ -71,24 +121,34 @@ def run_logged(
         child_env = os.environ.copy()
         if env:
             child_env.update(env)
-        child_env.setdefault("TQDM_DISABLE", "1")
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
+        if not stream:
+            child_env.setdefault("TQDM_DISABLE", "1")
         mode = "a" if append else "w"
         with log_path.open(mode, encoding="utf-8") as log:
             if append and log_path.stat().st_size:
                 log.write("\n")
             log.write(f"$ {shlex.join(cmd)}\n")
             log.flush()
-            result = subprocess.run(
-                cmd,
-                cwd=project_root,
-                env=child_env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        if result.returncode:
+            if stream:
+                returncode = _tee_stage_output(
+                    cmd,
+                    cwd=project_root,
+                    env=child_env,
+                    log=log,
+                )
+            else:
+                returncode = subprocess.run(
+                    cmd,
+                    cwd=project_root,
+                    env=child_env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                ).returncode
+        if returncode:
             tail = _failure_tail(log_path)
-            message = f"{label} failed (exit {result.returncode}). Log: {log_path}"
+            message = f"{label} failed (exit {returncode}). Log: {log_path}"
             if tail:
                 message += f"\nLast output:\n{tail}"
             raise CommandExecutionError(message)
