@@ -36,6 +36,23 @@ class LoggedCommandTests(unittest.TestCase):
             self.assertIn("[done]  Fixture stage", terminal.getvalue())
             self.assertIn("raw child output", log_path.read_text(encoding="utf-8"))
 
+    def test_stream_mode_mirrors_child_output_to_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_path = root / "stage.log"
+            terminal = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(terminal):
+                run_logged(
+                    [sys.executable, "-c", "print('live child output')"],
+                    project_root=root,
+                    label="Live stage",
+                    log_path=log_path,
+                    stream=True,
+                )
+
+            self.assertIn("live child output", terminal.getvalue())
+            self.assertIn("live child output", log_path.read_text(encoding="utf-8"))
+
     def test_failure_reports_log_tail_without_full_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

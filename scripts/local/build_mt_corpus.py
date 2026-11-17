@@ -82,6 +82,7 @@ def run(
     verbose: bool = False,
     quiet: bool = False,
     append: bool = False,
+    stream: bool = False,
 ) -> None:
     run_logged(
         cmd,
@@ -93,6 +94,7 @@ def run(
         verbose=verbose,
         quiet=quiet,
         append=append,
+        stream=stream,
     )
 
 
@@ -480,6 +482,7 @@ def fetch_languages(
         log_path=stage_log(paths, "fetch"),
         dry_run=args.dry_run,
         verbose=args.verbose,
+        stream=True,
     )
     if not args.dry_run:
         print(format_fetch_summary(paths.root, [lang.code for lang in languages]))
@@ -688,6 +691,7 @@ def run_pivot(
         log_path=stage_log(paths, "pivot"),
         dry_run=args.dry_run,
         verbose=args.verbose,
+        stream=True,
     )
     if not args.dry_run:
         pivot_manifest = require_json_manifest(
