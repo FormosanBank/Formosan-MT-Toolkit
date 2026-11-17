@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 from pipeline_common import sha256_file
-from xml_repairs import PROVENANCE_ATTR
+from xml_repairs import PROVENANCE_ATTR, base_forms
 
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 TRANSFORM_INVENTORY = "_qc_transform_inventory.jsonl"
@@ -63,11 +63,7 @@ def tag_transform_sources(
                     f"{element.get('id', '')}"
                 ).encode("utf-8")
             ).hexdigest()[:24]
-            primary_forms = [
-                form
-                for form in element.findall("FORM")
-                if not (form.get("ver") or "").strip()
-            ]
+            primary_forms = base_forms(element)
             originals = [
                 form
                 for form in primary_forms
@@ -165,7 +161,7 @@ def finalize_transform_inventory(
                 )
             standards = [
                 form
-                for form in element.findall("FORM")
+                for form in base_forms(element)
                 if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
             if len(standards) > 1:

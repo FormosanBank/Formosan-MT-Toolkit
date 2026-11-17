@@ -39,7 +39,7 @@ from qc_reporting import (
     summarize_validator_findings,
 )
 from tqdm import tqdm
-from xml_repairs import repair_mt_xml_structure
+from xml_repairs import base_forms, repair_mt_xml_structure
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG = load_pipeline_config()
@@ -324,7 +324,7 @@ def ensure_standard_tiers(corpus_dir: Path) -> dict[str, int | str]:
         for parent in root.iter():
             if parent.tag not in {"S", "W", "M"}:
                 continue
-            forms = parent.findall("FORM")
+            forms = base_forms(parent)
             if not forms:
                 continue
             originals = [form for form in forms if (form.get("kindOf") or "").strip().lower() == "original"]
@@ -389,7 +389,7 @@ def audit_standard_tiers(corpus_dir: Path) -> dict[str, int | str]:
             if parent.tag not in {"S", "W", "M"}:
                 continue
             standards = [
-                form for form in parent.findall("FORM") if (form.get("kindOf") or "").strip().lower() == "standard"
+                form for form in base_forms(parent) if (form.get("kindOf") or "").strip().lower() == "standard"
             ]
             if len(standards) > 1:
                 raise SystemExit(
